@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="一支铅笔的博客，记录项目、技术笔记和日常观察。"
+    >
+    <title>一支铅笔的博客</title>
+    <link rel="preconnect" href="https://images.unsplash.com">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="#top">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#posts">文章</a>
+        <a href="#about">关于</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">Personal Blog</p>
+          <h1 id="hero-title">一支铅笔的博客</h1>
+          <p class="hero-text">
+            这里记录技术实践、项目过程和一些值得留下来的想法。
+          </p>
+          <a class="primary-link" href="#posts">阅读最新文章</a>
+        </div>
+        <figure class="hero-media">
+          <img
+            src="https://images.unsplash.com/photo-1455390582262-044cdead277a?auto=format&fit=crop&w=1400&q=82"
+            alt="桌面上的笔记本、铅笔和咖啡"
+          >
+        </figure>
+      </section>
+
+      <section class="intro" id="about" aria-labelledby="about-title">
+        <p class="section-kicker">About</p>
+        <h2 id="about-title">把零散的学习和实践整理成可以回看的文字。</h2>
+        <p>
+          博客先保持轻量：不依赖构建工具，也不需要后台。之后写新文章时，可以直接复制文章区块，
+          或逐步扩展成 Markdown / Jekyll / Astro 等结构。
+        </p>
+      </section>
+
+      <section class="posts" id="posts" aria-labelledby="posts-title">
+        <div class="section-heading">
+          <p class="section-kicker">Posts</p>
+          <h2 id="posts-title">最新文章</h2>
+        </div>
+
+        <div class="post-list">
+          <article class="post-feature">
+            <p class="post-date">2026.05.01</p>
+            <h3>博客开张：先让写作发生</h3>
+            <p>
+              第一版博客只保留最重要的部分：标题、介绍、文章列表和一篇示例内容。
+              静态页面容易维护，也方便以后逐步换成更完整的博客系统。
+            </p>
+            <a href="#welcome">阅读全文</a>
+          </article>
+
+          <article class="post-item">
+            <p class="post-date">2026.05.01</p>
+            <h3>如何添加下一篇文章</h3>
+            <p>复制一个文章区块，修改日期、标题和正文，就可以继续发布。</p>
+          </article>
+
+          <article class="post-item">
+            <p class="post-date">2026.05.01</p>
+            <h3>为什么先用静态页面</h3>
+            <p>没有构建步骤、没有部署服务依赖，GitHub Pages 就能直接托管。</p>
+          </article>
+        </div>
+      </section>
+
+      <article class="essay" id="welcome" aria-labelledby="welcome-title">
+        <p class="section-kicker">Welcome</p>
+        <h2 id="welcome-title">博客开张：先让写作发生</h2>
+        <p>
+          很多博客项目会从主题、插件、评论系统和发布流程开始，最后反而还没有真正写下一篇文章。
+          这个版本刻意把技术栈压到最低：一个 HTML 文件，一个 CSS 文件，推到 GitHub Pages 后就能访问。
+        </p>
+        <p>
+          后续可以把这里当作自己的公开笔记本。技术问题、项目复盘、阅读摘要、生活观察，都可以先写成短文。
+          当文章多起来，再把它升级成更完整的博客系统也不迟。
+        </p>
+      </article>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="#top">回到顶部</a>
+    </footer>
+  </body>
+</html>
