@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="整理 World Model for Robot Learning 笔记：从 VLA、视频生成、逆动力学到潜空间世界模型。"
+    >
+    <title>机器人学习里的世界模型：从 VLA 到可行动的未来预测</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css">
+  </head>
+  <body class="article-page">
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#posts">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <p class="eyebrow">Robot Learning Notes</p>
+          <h1>机器人学习里的世界模型：从 VLA 到可行动的未来预测</h1>
+          <p class="article-dek">
+            整理自我的 Notion 碎片笔记，并对照《World Model for Robot Learning:
+            A Comprehensive Survey》和几篇代表论文。核心问题只有一个：机器人到底应该怎样“想象未来”，才能更好地行动？
+          </p>
+          <div class="article-meta">
+            <span>2026.05.12</span>
+            <span>阅读约 10 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-visual" aria-labelledby="map-title">
+          <div>
+            <p class="section-kicker">Map</p>
+            <h2 id="map-title">先把几个词放到同一张图里</h2>
+          </div>
+          <div class="world-map" aria-label="世界模型与策略模型关系图">
+            <div class="map-node input">观察<br><span>observation</span></div>
+            <div class="map-node language">语言<br><span>instruction</span></div>
+            <div class="map-node action">动作<br><span>action</span></div>
+            <div class="map-node future">未来<br><span>state / video</span></div>
+            <div class="map-node policy">Policy<br><span>现在该怎么做</span></div>
+            <div class="map-node wm">World Model<br><span>如果这样做会怎样</span></div>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <p>
+            读世界模型相关论文时，最容易混在一起的概念是 World Model、Video
+            Generation Model、Robot Policy 和 VLA。我的理解是：它们不是同一层东西。
+            Policy 关心“现在该输出什么动作”；World Model 关心“在某个动作或条件下，环境接下来会怎么变”；
+            Video Generation Model 只是世界模型的一种表征载体，因为未来可以被画成视频，也可以被压成潜在特征。
+          </p>
+          <p>
+            Survey 对世界模型的定义很直接：它是对环境如何随动作演化的预测性表示。放到机器人学习里，
+            它可以服务于策略学习、规划、仿真、评估和数据生成。这个定义比“能生成视频的模型”更宽，
+            也更接近机器人真正需要的东西：不是画面好看，而是预测对行动有用。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>四个最小概念</h2>
+          <div class="concept-grid">
+            <div class="concept-card">
+              <h3>Policy Model</h3>
+              <p>输入当前观察和语言指令，输出动作。VLA 就是把视觉、语言和动作统一到一个大模型策略中。</p>
+            </div>
+            <div class="concept-card">
+              <h3>Passive World Model</h3>
+              <p>输入观察和语言，生成可能的未来。它像“看着当前场景脑补接下来会发生什么”。</p>
+            </div>
+            <div class="concept-card">
+              <h3>Controllable World Model</h3>
+              <p>输入观察和候选动作，预测未来观察。它更适合规划，因为未来必须由动作控制。</p>
+            </div>
+            <div class="concept-card">
+              <h3>Inverse Dynamics Model</h3>
+              <p>输入当前观察和目标未来，反推出动作。它把“想象未来”和“动手执行”拆成两步。</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>为什么 VLA 是入口，但不是终点</h2>
+          <p>
+            RT-2 把 VLM 的语义能力接到机器人控制上：动作被表示成 token，和自然语言一起训练。
+            这条路线证明了网页级视觉语言预训练可以迁移到机器人任务，尤其是新物体、新指令和简单语义推理。
+            OpenVLA 进一步把这条路线开源化，用 7B VLA 和 Open X-Embodiment 数据做通用操作策略，
+            让 VLA 不再只是闭源大模型实验。π0 则换了一个动作输出范式：保留 VLM 的语义理解，
+            但用 flow matching 生成连续动作，让高频控制更自然。
+          </p>
+          <p>
+            这些模型的共同点是把“看懂任务”和“输出动作”放在一个策略里。但机器人不是只要看懂指令就够了。
+            真正困难的是：动作会改变世界，而世界的变化又会反过来决定下一步动作。因此，后续工作开始把
+            “未来”显式或隐式地塞回策略中。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>五条架构路线</h2>
+          <div class="route-list">
+            <div class="route-item">
+              <span>01</span>
+              <div>
+                <h3>先预测未来，再用 IDM 反推动作</h3>
+                <p>
+                  这条路线最直观：视频模型先脑补任务如何完成，逆动力学模型再把未来画面翻译成动作。
+                  好处是可以复用强视频生成模型；问题是像素级未来既贵，又未必包含动作控制最需要的结构。
+                </p>
+              </div>
+            </div>
+            <div class="route-item">
+              <span>02</span>
+              <div>
+                <h3>单一生成骨干：动作也是一种“未来帧”</h3>
+                <p>
+                  Cosmos Policy 是很典型的例子：它把动作、未来图像、未来状态和值函数都编码到视频模型的潜空间里，
+                  相当于把预训练视频模型改造成机器人策略和规划器。它在 LIBERO 和 RoboCasa 上给出了很强结果，
+                  但规划模式也暴露出延迟问题。
+                </p>
+              </div>
+            </div>
+            <div class="route-item">
+              <span>03</span>
+              <div>
+                <h3>MoE / MoT：理解、生成、动作各有专家</h3>
+                <p>
+                  Motus 把 VLM、视频生成和动作专家放到同一个 MoT 框架里，并用光流学习 latent action。
+                  它的优势是任务模式切换清楚：可以做 VLA、世界模型、逆动力学、视频生成，也可以联合预测视频和动作。
+                </p>
+              </div>
+            </div>
+            <div class="route-item">
+              <span>04</span>
+              <div>
+                <h3>潜空间世界模型：别急着把未来画出来</h3>
+                <p>
+                  VLA-JEPA 和 JEPA-VLA 的共同指向是：预测未来的表征，而不是预测像素。
+                  这样能避开背景变化、相机运动等噪声，把学习压力放到动作相关的状态转移上。
+                </p>
+              </div>
+            </div>
+            <div class="route-item">
+              <span>05</span>
+              <div>
+                <h3>把未来变成动作生成的条件</h3>
+                <p>
+                  WoG 和 DIAL 都在往更紧的耦合走。WoG 在 condition space 里做世界建模，
+                  DIAL 则让 VLM 先产生潜在视觉预见，再由轻量策略解码动作。直觉上，它们不是“播放未来视频”，
+                  而是把未来压成能指导控制的中间变量。
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>一张对照表</h2>
+          <div class="comparison-table" role="table" aria-label="世界模型路线对照">
+            <div class="table-row table-head" role="row">
+              <div role="columnheader">路线</div>
+              <div role="columnheader">预测什么</div>
+              <div role="columnheader">适合什么</div>
+              <div role="columnheader">主要风险</div>
+            </div>
+            <div class="table-row" role="row">
+              <div role="cell">IDM</div>
+              <div role="cell">未来观察 + 反推动作</div>
+              <div role="cell">把强视频模型接入策略</div>
+              <div role="cell">像素未来太重，动作对齐难</div>
+            </div>
+            <div class="table-row" role="row">
+              <div role="cell">单骨干</div>
+              <div role="cell">动作、图像、状态、价值</div>
+              <div role="cell">端到端规划和 Best-of-N 采样</div>
+              <div role="cell">推理延迟和闭环频率</div>
+            </div>
+            <div class="table-row" role="row">
+              <div role="cell">MoE / MoT</div>
+              <div role="cell">不同专家负责不同模态</div>
+              <div role="cell">多功能统一：VLA、WM、IDM、VGM</div>
+              <div role="cell">系统复杂，训练配方重</div>
+            </div>
+            <div class="table-row" role="row">
+              <div role="cell">JEPA / latent</div>
+              <div role="cell">未来潜特征</div>
+              <div role="cell">鲁棒、低延迟、适合高频控制</div>
+              <div role="cell">特征是否足够可控、可解释</div>
+            </div>
+            <div class="table-row" role="row">
+              <div role="cell">Condition-space</div>
+              <div role="cell">紧凑未来条件</div>
+              <div role="cell">精细动作生成和泛化</div>
+              <div role="cell">条件瓶颈设计依赖任务</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>我会怎样读后续论文</h2>
+          <p>
+            这篇 survey 最有用的地方，是把世界模型从一个玄学词拉回到几个工程问题。以后再看一篇机器人世界模型论文，
+            我会先问四个问题。第一，它建模的“未来”是什么：像素、潜特征、动作、价值，还是结构化状态？第二，
+            动作在模型里是什么角色：输入条件、输出目标，还是像 Cosmos Policy 那样被当作潜在帧？第三，
+            它提升策略的方式是什么：数据增强、候选动作评估、规划、表征预训练，还是端到端动作生成？第四，
+            推理时是否真的能进控制闭环，还是只适合离线生成和评估？
+          </p>
+          <p>
+            这四个问题比记住模型名字更稳。因为当前方向明显在收敛：大家都想让机器人有“预测未来”的能力，
+            但真正有用的未来，不一定是一段高清视频，而可能是一组足够紧凑、足够动作相关、足够快的潜在状态。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>结论：世界模型的重点是 actionable</h2>
+          <p>
+            对机器人来说，世界模型不是为了生成漂亮的视频，而是为了让策略知道动作的后果。显式视频预测适合解释、
+            数据生成和候选动作评估；潜空间预测更接近高频闭环控制；把未来作为动作生成条件，则是在效率和可控性之间折中。
+            如果只用一句话概括这组笔记：世界模型正在从“看起来像未来”转向“能指导下一步动作”。
+          </p>
+        </section>
+
+        <section class="article-section sources">
+          <h2>参考</h2>
+          <ol>
+            <li>
+              <a href="https://arxiv.org/abs/2605.00080">World Model for Robot Learning: A Comprehensive Survey</a>
+              和
+              <a href="https://ntumars.github.io/wm-robot-survey/">项目主页</a>
+            </li>
+            <li>
+              <a href="https://arxiv.org/abs/2307.15818">RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control</a>
+            </li>
+            <li>
+              <a href="https://arxiv.org/abs/2406.09246">OpenVLA: An Open-Source Vision-Language-Action Model</a>
+              和
+              <a href="https://arxiv.org/abs/2310.08864">Open X-Embodiment</a>
+            </li>
+            <li>
+              <a href="https://arxiv.org/abs/2410.24164">π0: A Vision-Language-Action Flow Model for General Robot Control</a>
+            </li>
+            <li>
+              <a href="https://arxiv.org/abs/2601.16163">Cosmos Policy: Fine-Tuning Video Models for Visuomotor Control and Planning</a>
+            </li>
+            <li>
+              <a href="https://motus-robotics.github.io/motus">Motus: A Unified Latent Action World Model</a>
+            </li>
+            <li>
+              <a href="https://arxiv.org/abs/2602.10098">VLA-JEPA</a>,
+              <a href="https://arxiv.org/abs/2602.11832">JEPA-VLA</a>,
+              <a href="https://arxiv.org/abs/2602.22010">WoG</a>,
+              <a href="https://arxiv.org/abs/2603.29844">DIAL</a>
+            </li>
+          </ol>
+        </section>
+      </article>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>

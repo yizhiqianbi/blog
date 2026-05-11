@@ -6,7 +6,7 @@
 
 - 首页内容在 `index.html`
 - 视觉样式在 `styles.css`
-- 新文章可以先复制 `index.html` 里的 `article` 区块继续添加
+- 长文章放在 `posts/` 目录，首页只放摘要和入口
 
 ## 访问地址
 
