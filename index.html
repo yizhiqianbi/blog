@@ -5,93 +5,133 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta
       name="description"
-      content="一支铅笔的博客，记录项目、技术笔记和日常观察。"
+      content="一支铅笔的静态博客，记录机器人学习、世界模型和工程笔记。"
     >
-    <title>一支铅笔的博客</title>
+    <title>一支铅笔</title>
     <link rel="icon" href="data:,">
-    <link rel="preconnect" href="https://images.unsplash.com">
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=20260512">
   </head>
   <body>
     <header class="site-header" aria-label="网站导航">
-      <a class="brand" href="#top">一支铅笔</a>
+      <a class="brand" href="index.html">一支铅笔</a>
       <nav class="nav" aria-label="主要导航">
         <a href="#posts">文章</a>
         <a href="#about">关于</a>
       </nav>
     </header>
 
-    <main id="top">
-      <section class="hero" aria-labelledby="hero-title">
-        <div class="hero-copy">
-          <p class="eyebrow">Personal Blog</p>
-          <h1 id="hero-title">一支铅笔的博客</h1>
-          <p class="hero-text">
-            这里记录技术实践、项目过程和一些值得留下来的想法。
-          </p>
-          <a class="primary-link" href="#posts">阅读最新文章</a>
-        </div>
-        <figure class="hero-media">
-          <img
-            src="https://images.unsplash.com/photo-1455390582262-044cdead277a?auto=format&amp;fit=crop&amp;w=1400&amp;q=82"
-            alt="桌面上的笔记本、铅笔和咖啡"
-          >
-        </figure>
-      </section>
-
-      <section class="intro" id="about" aria-labelledby="about-title">
-        <p class="section-kicker">About</p>
-        <h2 id="about-title">把零散的学习和实践整理成可以回看的文字。</h2>
+    <main class="home-shell" id="top">
+      <section class="home-intro" aria-labelledby="home-title">
+        <p class="kicker">Notebook</p>
+        <h1 id="home-title">一行一行写清楚。</h1>
         <p>
-          博客先保持轻量：不依赖构建工具，也不需要后台。之后写新文章时，可以直接复制文章区块，
-          或逐步扩展成 Markdown / Jekyll / Astro 等结构。
+          这里先保持静态、干净、夜间阅读友好。文章按主题拆开，每篇只处理一个问题：
+          概念是什么，代码怎么落，工程上真正有用的 insight 是什么。
         </p>
       </section>
 
-      <section class="posts" id="posts" aria-labelledby="posts-title">
-        <div class="section-heading">
-          <p class="section-kicker">Posts</p>
-          <h2 id="posts-title">最新文章</h2>
+      <section class="line-index" id="posts" aria-labelledby="posts-title">
+        <div class="index-heading">
+          <p class="kicker">Series</p>
+          <h2 id="posts-title">World Model for Robot Learning</h2>
         </div>
 
-        <div class="post-list">
-          <article class="post-feature">
-            <p class="post-date">2026.05.12</p>
-            <h3>机器人学习里的世界模型：从 VLA 到可行动的未来预测</h3>
-            <p>
-              整理 World Model for Robot Learning 的碎片笔记：世界模型、VLA、逆动力学、Cosmos Policy、
-              Motus 和 JEPA 风格潜空间路线到底是什么关系。
-            </p>
-            <a href="posts/world-model-robot-learning.html">阅读全文</a>
-          </article>
+        <a class="blog-row" href="posts/world-model-basics.html">
+          <time datetime="2026-05-12">2026.05.12</time>
+          <span>
+            <strong>01. 世界模型到底建模什么</strong>
+            <small>World Model、Video Generation、Policy、IDM 的边界。</small>
+          </span>
+          <em>Concept</em>
+        </a>
 
-          <article class="post-item">
-            <p class="post-date">2026.05.01</p>
-            <h3>博客开张：先让写作发生</h3>
-            <p>第一版博客只保留标题、介绍、文章列表和一篇示例内容。</p>
-            <a href="#welcome">阅读全文</a>
-          </article>
+        <a class="blog-row" href="posts/vla-policies.html">
+          <time datetime="2026-05-12">2026.05.12</time>
+          <span>
+            <strong>02. VLA 策略：把大模型具身化</strong>
+            <small>从 RT-2、OpenVLA 到 pi0，离散动作和连续动作的代码形态。</small>
+          </span>
+          <em>Policy</em>
+        </a>
 
-          <article class="post-item">
-            <p class="post-date">2026.05.01</p>
-            <h3>为什么先用静态页面</h3>
-            <p>没有构建步骤、没有部署服务依赖，GitHub Pages 就能直接托管。</p>
-          </article>
-        </div>
+        <a class="blog-row" href="posts/idm-predict-then-act.html">
+          <time datetime="2026-05-12">2026.05.12</time>
+          <span>
+            <strong>03. IDM：先想象未来，再反推动作</strong>
+            <small>predict-then-act 的实现拆法，以及像素未来为什么会变重。</small>
+          </span>
+          <em>IDM</em>
+        </a>
+
+        <a class="blog-row" href="posts/cosmos-single-backbone.html">
+          <time datetime="2026-05-12">2026.05.12</time>
+          <span>
+            <strong>04. Cosmos Policy：动作作为隐帧</strong>
+            <small>单一视频骨干如何同时预测 action、future image、state 和 value。</small>
+          </span>
+          <em>Backbone</em>
+        </a>
+
+        <a class="blog-row" href="posts/motus-lingbot-va.html">
+          <time datetime="2026-05-12">2026.05.12</time>
+          <span>
+            <strong>05. Motus 与 LingBot-VA：专家世界模型</strong>
+            <small>MoT、潜动作、video-action 交错输出和异步闭环。</small>
+          </span>
+          <em>MoT</em>
+        </a>
+
+        <a class="blog-row" href="posts/latent-world-models.html">
+          <time datetime="2026-05-12">2026.05.12</time>
+          <span>
+            <strong>06. 潜空间世界模型：不要急着画未来</strong>
+            <small>FLARE、FRAPPE、VLA-JEPA、JEPA-VLA 的 latent alignment 路线。</small>
+          </span>
+          <em>Latent</em>
+        </a>
+
+        <a class="blog-row" href="posts/condition-space-wog-dial.html">
+          <time datetime="2026-05-12">2026.05.12</time>
+          <span>
+            <strong>07. WoG 与 DIAL：把未来压进条件空间</strong>
+            <small>QFormer future condition、latent intent bottleneck 和两阶段训练。</small>
+          </span>
+          <em>Control</em>
+        </a>
+
+        <a class="blog-row" href="posts/world-model-applications.html">
+          <time datetime="2026-05-12">2026.05.12</time>
+          <span>
+            <strong>08. 世界模型能做什么</strong>
+            <small>Simulator、evaluation、planning、data generation 和导航。</small>
+          </span>
+          <em>Use</em>
+        </a>
       </section>
 
-      <article class="essay" id="welcome" aria-labelledby="welcome-title">
-        <p class="section-kicker">Welcome</p>
-        <h2 id="welcome-title">博客开张：先让写作发生</h2>
+      <section class="line-index archive" aria-labelledby="archive-title">
+        <div class="index-heading">
+          <p class="kicker">Archive</p>
+          <h2 id="archive-title">旧索引</h2>
+        </div>
+        <a class="blog-row" href="posts/world-model-robot-learning.html">
+          <time datetime="2026-05-12">2026.05.12</time>
+          <span>
+            <strong>世界模型笔记总览</strong>
+            <small>拆分前的阅读入口，保留为系列目录。</small>
+          </span>
+          <em>Index</em>
+        </a>
+      </section>
+
+      <section class="about" id="about" aria-labelledby="about-title">
+        <p class="kicker">About</p>
+        <h2 id="about-title">静态页面，少一点装饰，多一点可回看。</h2>
         <p>
-          很多博客项目会从主题、插件、评论系统和发布流程开始，最后反而还没有真正写下一篇文章。
-          这个版本刻意把技术栈压到最低：一个 HTML 文件，一个 CSS 文件，推到 GitHub Pages 后就能访问。
+          当前博客没有构建步骤，推到 GitHub Pages 就能打开。新文章会继续按这种列表式结构增加，
+          方便从碎片笔记逐步整理成可检索的公开材料。
         </p>
-        <p>
-          后续可以把这里当作自己的公开笔记本。技术问题、项目复盘、阅读摘要、生活观察，都可以先写成短文。
-          当文章多起来，再把它升级成更完整的博客系统也不迟。
-        </p>
-      </article>
+      </section>
     </main>
 
     <footer class="site-footer">

@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="IDM predict-then-act 路线如何把未来视频和动作解码拆开。">
+    <title>IDM：先想象未来，再反推动作</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260512">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#posts">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#posts">← 返回文章列表</a>
+          <p class="kicker">World Model 03</p>
+          <h1>IDM：先想象未来，再反推动作</h1>
+          <p class="article-dek">
+            IDM 的直觉很清楚：视频模型负责“脑补任务成功的未来”，逆动力学模型负责把当前观察和未来观察翻译成动作。
+            这个拆法很优雅，也暴露了像素未来的工程成本。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.12</span>
+            <span>阅读约 8 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>Predict then act</h2>
+          <p>
+            普通策略是看到 A 后输出动作 B；IDM 风格路线变成看到 A，再给一个未来 C，
+            反推出能把 A 推到 C 的动作 B。它最大的好处是复用强视频模型，最大的风险是未来画面对控制不一定足够精确。
+          </p>
+          <div class="figure-grid">
+            <figure class="note-figure">
+              <img src="../assets/notion/worldmodel-idm-plan-1.png" alt="IDM 路线图一">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/worldmodel-idm-plan-2.png" alt="IDM 路线图二">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/worldmodel-idm-plan-3.png" alt="IDM 路线图三">
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>代码视角</h2>
+          <p>
+            训练时需要轨迹中的当前观察、未来观察和真实动作。推理时可以滚动执行短 horizon，
+            每一步用真实新观察重新对齐，避免开放式视频 rollout 越滚越偏。
+          </p>
+          <div class="code-block">
+            <pre><code>def train_idm(batch):
+    obs_t, obs_future, action = batch
+    pred_action = inverse_dynamics(obs_t, obs_future)
+    return mse_or_flow_loss(pred_action, action)
+
+def act_with_future(obs_t, instruction):
+    imagined = video_world_model(obs_t, instruction, horizon=16)
+    action_seq = inverse_dynamics(obs_t, imagined)
+    return action_seq[:control_chunk]</code></pre>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>实现重点</h2>
+          <ul>
+            <li>未来预测要尽量 action-relevant：工具轨迹、接触状态、物体位姿常常比完整 RGB 更重要。</li>
+            <li>IDM 的训练数据必须有动作标签，否则只能学视频到伪动作或 latent action。</li>
+            <li>闭环部署时要做 receding horizon：执行一小段动作后重新观察，而不是一次性相信长视频。</li>
+          </ul>
+          <div class="figure-grid">
+            <figure class="note-figure">
+              <img src="../assets/notion/explicit-future-prediction-1.png" alt="显式未来预测图一">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/explicit-future-prediction-2.png" alt="显式未来预测图二">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/explicit-future-prediction-3.png" alt="显式未来预测图三">
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>Insight</h2>
+          <p class="insight">
+            IDM 的强处是模块化，弱处也是模块化：如果视频未来和动作执行之间的接口只是像素，
+            逆动力学就要从大量无关视觉细节里恢复控制信号。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://ntumars.github.io/wm-robot-survey/">World Model for Robot Learning survey project page</a></li>
+            <li><a href="https://arxiv.org/abs/2605.00080">World Model for Robot Learning: A Comprehensive Survey</a></li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="vla-policies.html">上一篇：VLA 策略</a>
+        <a href="cosmos-single-backbone.html">下一篇：Cosmos Policy</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>

@@ -7,6 +7,7 @@
 - 首页内容在 `index.html`
 - 视觉样式在 `styles.css`
 - 长文章放在 `posts/` 目录，首页只放摘要和入口
+- Notion 图已保存到 `assets/notion/`，文章引用本地图片，不依赖 Notion 临时链接
 
 ## 访问地址
 

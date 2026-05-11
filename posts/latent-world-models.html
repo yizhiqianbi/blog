@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="FLARE、FRAPPE、VLA-JEPA、JEPA-VLA 的潜空间世界模型路线。">
+    <title>潜空间世界模型：不要急着画未来</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260512">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#posts">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#posts">← 返回文章列表</a>
+          <p class="kicker">World Model 06</p>
+          <h1>潜空间世界模型：不要急着画未来</h1>
+          <p class="article-dek">
+            显式视频预测很直观，但也很重。FLARE、FRAPPE、VLA-JEPA 和 JEPA-VLA 的共同取向是：
+            预测未来表征，而不是把每个像素都重建出来。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.12</span>
+            <span>阅读约 9 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>从像素转向表征</h2>
+          <p>
+            FLARE 通过 future tokens 把 DiT 策略的隐藏状态对齐到未来观察 embedding；
+            FRAPPE 用多种视觉基础模型做未来表征对齐；VLA-JEPA 则用 leakage-free state prediction，
+            让未来帧只当监督目标，不进入学生路径。
+          </p>
+          <div class="figure-grid">
+            <figure class="note-figure">
+              <img src="../assets/notion/flare-latent-alignment-1.png" alt="FLARE 图一">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/flare-latent-alignment-2.png" alt="FLARE 图二">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/flare-latent-alignment-3.png" alt="FLARE 图三">
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>FRAPPE 与 JEPA</h2>
+          <p>
+            FRAPPE 解决的是预测 future observation 时对像素重建和误差积累的依赖；
+            JEPA 风格方法则更激进：目标 encoder 看未来，学生只看现在，用 latent prediction 学动作相关的状态转移。
+          </p>
+          <div class="figure-pair">
+            <figure class="note-figure">
+              <img src="../assets/notion/frappe-world-modeling.png" alt="FRAPPE 世界建模图">
+              <figcaption>FRAPPE：多未来表征对齐，减少对 action-labeled data 的依赖。</figcaption>
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/vla-jepa-overview.png" alt="VLA-JEPA 总览图">
+              <figcaption>VLA-JEPA：未来只作为 target，避免把答案泄漏给策略。</figcaption>
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>代码视角</h2>
+          <p>
+            潜空间路线通常在原始 action loss 外加一个 auxiliary alignment loss。
+            训练时看未来，推理时不需要未来图像，所以部署开销可以很低。
+          </p>
+          <div class="code-block">
+            <pre><code>with no_grad():
+    target_future = target_encoder(future_frames)
+
+hidden = policy_dit(obs, instruction, noisy_action, timestep)
+pred_action = action_head(hidden)
+future_tokens = future_token_head(hidden)
+
+loss_action = flow_matching_loss(pred_action, action)
+loss_future = cosine_or_mse(future_tokens, target_future)
+loss = loss_action + lambda_future * loss_future</code></pre>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>实现重点</h2>
+          <ul>
+            <li>target encoder 要冻结或慢更新，否则模型容易把未来目标也训练塌。</li>
+            <li>future tokens 的层位置很关键：太浅学不到任务动态，太深可能干扰动作解码。</li>
+            <li>推理时如果不计算 future embedding，就要确保训练阶段没有把未来信息当输入泄漏。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Insight</h2>
+          <p class="insight">
+            对高频控制来说，潜空间未来比像素未来更像“机器人能用的想象”。它牺牲可视化直观性，
+            换来更低延迟、更少无关背景噪声，以及更容易接入现有策略网络的训练目标。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://arxiv.org/abs/2505.15659">FLARE: Robot Learning with Implicit World Modeling</a></li>
+            <li><a href="https://arxiv.org/abs/2602.17259">FRAPPE: Infusing World Modeling into Generalist Policies via Multiple Future Representation Alignment</a></li>
+            <li><a href="https://arxiv.org/abs/2602.10098">VLA-JEPA: Enhancing Vision-Language-Action Model with Latent World Model</a></li>
+            <li><a href="https://arxiv.org/abs/2602.11832">JEPA-VLA: Video Predictive Embedding is Needed for VLA Models</a></li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="motus-lingbot-va.html">上一篇：Motus 与 LingBot-VA</a>
+        <a href="condition-space-wog-dial.html">下一篇：WoG 与 DIAL</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>

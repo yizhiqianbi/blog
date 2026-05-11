@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="World Model、Video Generation、Robot Policy 和 IDM 的概念边界。">
+    <title>世界模型到底建模什么</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260512">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#posts">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#posts">← 返回文章列表</a>
+          <p class="kicker">World Model 01</p>
+          <h1>世界模型到底建模什么</h1>
+          <p class="article-dek">
+            这篇先把最容易混在一起的几个词拆开：World Model、Video Generation Model、
+            Robot Policy、Passive World Model、Controllable World Model 和 IDM。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.12</span>
+            <span>阅读约 7 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>从一句定义开始</h2>
+          <p>
+            Survey 里最稳的定义是：世界模型是环境如何在动作下演化的预测性表示。关键不是“能不能生成视频”，
+            而是预测结果是否能帮助机器人选动作、做规划、做评估或生成数据。
+          </p>
+          <div class="figure-pair">
+            <figure class="note-figure">
+              <img src="../assets/notion/wm-definition.png" alt="Notion 中关于 World Model 的定义图">
+              <figcaption>World Model：给定当前观察和动作，预测下一状态或未来状态序列。</figcaption>
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/video-generation-model.png" alt="Notion 中关于 Video Generation Model 的定义图">
+              <figcaption>Video Generation Model 是一种载体，不等于全部世界模型。</figcaption>
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>四个对象不要混</h2>
+          <p>
+            Policy 输出动作，World Model 预测动作后果，Video Generation Model 生成未来视觉，IDM 从未来反推动作。
+            它们可以被塞进同一个大模型，也可以拆成多个模块，但接口问题始终存在。
+          </p>
+          <figure class="note-figure">
+            <img src="../assets/notion/robot-policy.png" alt="Notion 中关于 Robot Policy 的定义图">
+            <figcaption>Policy 关心“现在怎么做”，世界模型关心“这样做会怎样”。</figcaption>
+          </figure>
+          <div class="figure-pair">
+            <figure class="note-figure">
+              <img src="../assets/notion/worldmodel-taxonomy-1.png" alt="世界模型类型对照图一">
+              <figcaption>把 observation、language、action、future observation 放在同一个坐标系里看。</figcaption>
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/worldmodel-taxonomy-2.png" alt="世界模型类型对照图二">
+              <figcaption>Passive、controllable、inverse dynamics 的区别主要在输入输出方向。</figcaption>
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>代码视角</h2>
+          <p>
+            最小接口可以写成一个条件动力学模型。输出可以是像素、latent、结构化状态或 value，
+            但动作必须以某种形式进入模型，否则它只是被动视频预测。
+          </p>
+          <div class="code-block">
+            <pre><code>def world_model(obs_t, action_t, instruction=None):
+    context = encode_observation(obs_t, instruction)
+    action = encode_action(action_t)
+    future_state = dynamics(context, action)
+    return decode_for_task(future_state)
+
+def policy(obs_t, instruction):
+    action_t = action_head(encode_observation(obs_t, instruction))
+    return action_t</code></pre>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>实现重点</h2>
+          <ul>
+            <li>先决定预测对象：RGB future、latent embedding、object state、trajectory、reward/value 对训练成本影响很大。</li>
+            <li>动作可以是条件输入，也可以是模型输出，还可以像 Cosmos Policy 那样被编码成潜在帧。</li>
+            <li>如果要用于闭环控制，评估指标不能只看未来帧逼真度，还要看 action consistency 和延迟。</li>
+          </ul>
+          <div class="figure-grid">
+            <figure class="note-figure">
+              <img src="../assets/notion/worldmodel-idm-plan-1.png" alt="世界模型与逆动力学关系图一">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/worldmodel-idm-plan-2.png" alt="世界模型与逆动力学关系图二">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/worldmodel-idm-plan-3.png" alt="世界模型与逆动力学关系图三">
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>Insight</h2>
+          <p class="insight">
+            世界模型的价值不在“画出未来”，而在“把未来变成可用的控制变量”。如果未来表示不能改变动作选择，
+            它对机器人来说就只是昂贵的可视化。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://arxiv.org/abs/2605.00080">World Model for Robot Learning: A Comprehensive Survey</a></li>
+            <li><a href="https://ntumars.github.io/wm-robot-survey/">Survey project page</a></li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="vla-policies.html">下一篇：VLA 策略</a>
+        <a href="../index.html#posts">回到系列目录</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>

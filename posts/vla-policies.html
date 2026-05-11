@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="VLA 策略从 RT-2、OpenVLA 到 pi0 的实现路线。">
+    <title>VLA 策略：把大模型具身化</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260512">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#posts">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#posts">← 返回文章列表</a>
+          <p class="kicker">World Model 02</p>
+          <h1>VLA 策略：把大模型具身化</h1>
+          <p class="article-dek">
+            VLA 是这组笔记的入口，但它本身不是世界模型。它回答“现在该输出什么动作”，
+            后续世界模型路线则试图把“动作会导致什么后果”显式或隐式塞回策略。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.12</span>
+            <span>阅读约 7 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>两条主线</h2>
+          <p>
+            视觉运动策略可以直接回归动作，也可以用 Diffusion 或 Flow 生成多模态动作。VLA 则把视觉、语言、
+            动作放进预训练 VLM 的语义空间里：RT-2 走动作 token 化，OpenVLA 把这条路线开源化，
+            pi0 使用 flow matching 输出连续动作。
+          </p>
+          <div class="code-block">
+            <pre><code>机器人策略学习
+    ├── Visuomotor Policy
+    │   ├── regression: simple, fast, often unimodal
+    │   └── diffusion / flow: multimodal, needs acceleration
+    └── VLA Policy
+        ├── discrete action tokens
+        └── continuous action flow</code></pre>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>代码视角</h2>
+          <p>
+            离散 VLA 把 action 当语言 token 生成，连续 VLA 通常保留 VLM encoder，
+            再挂一个 action head 或 flow head。二者的分歧本质是动作空间如何表示。
+          </p>
+          <div class="code-block">
+            <pre><code>hidden = vlm.encode(image=obs.rgb, text=instruction)
+
+if action_space == "discrete":
+    action_tokens = lm_head.generate(hidden)
+    action = detokenize_action(action_tokens)
+else:
+    noise = sample_normal(shape=(horizon, action_dim))
+    action = flow_head.sample(hidden, proprio=obs.proprio, noise=noise)</code></pre>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>实现重点</h2>
+          <ul>
+            <li>动作离散化能复用语言模型训练范式，但要处理高频控制和连续精度损失。</li>
+            <li>连续 flow head 保留原始动作结构，更适合双臂和灵巧操作，但训练和推理要照顾控制频率。</li>
+            <li>Open X-Embodiment 这类多机器人数据集解决的是 coverage，不自动解决 action normalization 和 embodiment gap。</li>
+          </ul>
+          <figure class="note-figure">
+            <img src="../assets/notion/robot-policy.png" alt="Robot Policy 定义图">
+            <figcaption>VLA 的核心是给 VLM 配动作头，再用机器人轨迹数据让语义落到控制上。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section">
+          <h2>Insight</h2>
+          <p class="insight">
+            VLA 强在语义迁移，不强在物理后果建模。它让机器人“听懂任务”，但未必知道候选动作会让场景怎么变。
+            世界模型路线正是在补这一块。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://arxiv.org/abs/2307.15818">RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control</a></li>
+            <li><a href="https://arxiv.org/abs/2406.09246">OpenVLA: An Open-Source Vision-Language-Action Model</a></li>
+            <li><a href="https://arxiv.org/abs/2310.08864">Open X-Embodiment</a></li>
+            <li><a href="https://arxiv.org/abs/2410.24164">pi0: A Vision-Language-Action Flow Model for General Robot Control</a></li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="world-model-basics.html">上一篇：世界模型概念</a>
+        <a href="idm-predict-then-act.html">下一篇：IDM</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Cosmos Policy 如何把动作、未来图像、状态和值函数塞进同一个视频骨干。">
+    <title>Cosmos Policy：动作作为隐帧</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260512">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#posts">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#posts">← 返回文章列表</a>
+          <p class="kicker">World Model 04</p>
+          <h1>Cosmos Policy：动作作为隐帧</h1>
+          <p class="article-dek">
+            单骨干路线的关键想法是：不要在视频模型外面再搭一堆动作模块，
+            而是把动作、未来图像、未来状态和值函数都编码进同一个视频 latent diffusion 过程。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.12</span>
+            <span>阅读约 7 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>动作也是一种 latent frame</h2>
+          <p>
+            Cosmos Policy 基于 Cosmos-Predict2-2B，把动作展平后复制到视频 latent 的空间形状中，
+            让预训练视频模型用熟悉的 latent diffusion 机制直接生成动作。论文强调这不需要改架构，
+            主要通过目标机器人数据上的单阶段 post-training 完成适配。
+          </p>
+          <figure class="note-figure">
+            <img src="../assets/notion/cosmos-policy-latent-injection.png" alt="Cosmos Policy latent injection 架构图">
+            <figcaption>Latent Injection：把 action、future image、future state、value 都放进视频模型的 latent 帧位。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section">
+          <h2>代码视角</h2>
+          <p>
+            真正有用的抽象不是“视频模型加动作头”，而是把不同监督目标统一成同一种 latent token。
+            这样 Best-of-N planning 也能直接在同一模型里做候选动作采样和 value 排序。
+          </p>
+          <div class="code-block">
+            <pre><code>obs_latent = video_vae.encode(obs_images)
+action_latent = tile(project(action_seq), spatial_shape=obs_latent.shape[-2:])
+state_latent = project_state(proprio_future)
+value_latent = project_value(return_to_go)
+
+tokens = pack_as_video_latents(obs_latent, action_latent, state_latent, value_latent)
+loss = diffusion_denoising_loss(model(tokens, text, timestep), target=tokens)
+
+def plan(obs, text, n=32):
+    samples = [model.sample(obs, text) for _ in range(n)]
+    return max(samples, key=lambda x: x.predicted_value).action</code></pre>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>实现重点</h2>
+          <ul>
+            <li>动作的尺度和空间复制方式要稳定，否则 action latent 会被视频 latent 的统计量淹没。</li>
+            <li>规划模式需要多次采样并打分，效果强但延迟高，原笔记里记录的 planning 约 5 秒一次就是这个问题。</li>
+            <li>高噪声段训练权重很关键，因为动作生成要从强噪声中恢复精确控制，而不只是恢复视觉纹理。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Insight</h2>
+          <p class="insight">
+            Cosmos Policy 的漂亮之处是“接口统一”：动作不再是视频模型之外的附属模块，而是未来的一部分。
+            它的工程代价也清楚：如果每次动作都要走大视频骨干，闭环频率会先成为瓶颈。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://arxiv.org/abs/2601.16163">Cosmos Policy: Fine-Tuning Video Models for Visuomotor Control and Planning</a></li>
+            <li><a href="https://research.nvidia.com/labs/dir/cosmos-policy/">Cosmos Policy project page</a></li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="idm-predict-then-act.html">上一篇：IDM</a>
+        <a href="motus-lingbot-va.html">下一篇：Motus 与 LingBot-VA</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>

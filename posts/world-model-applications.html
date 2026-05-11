@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="世界模型在 simulator、evaluation、planning、VLA 和 navigation 中的用途。">
+    <title>世界模型能做什么</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260512">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#posts">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#posts">← 返回文章列表</a>
+          <p class="kicker">World Model 08</p>
+          <h1>世界模型能做什么</h1>
+          <p class="article-dek">
+            读完具体模型之后，最后回到用途：世界模型可以做 policy learning、planning、learned simulator、
+            decision-time evaluation、data generation，也可以服务 navigation 和 autonomous driving。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.12</span>
+            <span>阅读约 7 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>四类常见用途</h2>
+          <p>
+            我的 Notion 里把它简化成 Simulator、Evaluate、VLA、Navigation。更工程化地看，
+            这四类可以落到 rollout、ranking、training signal 和 task-level planning。
+          </p>
+          <div class="figure-pair">
+            <figure class="note-figure">
+              <img src="../assets/notion/wm-applications-1.png" alt="世界模型用途图一">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/wm-applications-2.png" alt="世界模型用途图二">
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>代码视角</h2>
+          <p>
+            当世界模型作为 simulator 或 evaluator，它不一定直接输出动作，而是给 policy update 或 action selection
+            提供 imagined transition、reward、termination 或 candidate score。
+          </p>
+          <div class="code-block">
+            <pre><code>def rank_candidate_actions(obs, instruction, candidates):
+    scored = []
+    for action_seq in candidates:
+        rollout = world_model.rollout(obs, action_seq, instruction)
+        score = evaluator(rollout.future_obs, rollout.reward, rollout.done)
+        scored.append((score, action_seq))
+    return max(scored, key=lambda item: item[0])[1]
+
+def model_based_policy_update(policy, replay):
+    imagined = world_model.imagine(replay.obs, policy.sample_actions)
+    return rl_update(policy, imagined.transitions)</code></pre>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>实现重点</h2>
+          <ul>
+            <li>用于训练时，世界模型的偏差会进入 policy update，需要短 rollout 或不确定性约束。</li>
+            <li>用于评估时，模型不必完美生成未来，只要能稳定区分候选动作好坏。</li>
+            <li>用于数据生成时，要检查生成分布是否覆盖真实失败模式，否则会放大模拟偏差。</li>
+          </ul>
+          <div class="figure-grid">
+            <figure class="note-figure">
+              <img src="../assets/notion/wm-applications-3.png" alt="世界模型用途图三">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/wm-applications-4.png" alt="世界模型用途图四">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/wm-applications-5.png" alt="世界模型用途图五">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/wm-applications-6.png" alt="世界模型用途图六">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/wm-applications-7.png" alt="世界模型用途图七">
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>Insight</h2>
+          <p class="insight">
+            世界模型不是一个固定组件，而是一种预测接口。它可以放在策略前面、策略里面、策略旁边，
+            或者作为离线数据引擎。判断路线好不好，要看它在目标任务里到底减少了哪种成本：
+            标注成本、真实机器人试错成本、推理延迟，还是泛化失败。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://arxiv.org/abs/2605.00080">World Model for Robot Learning: A Comprehensive Survey</a></li>
+            <li><a href="https://ntumars.github.io/wm-robot-survey/">Survey project page</a></li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="condition-space-wog-dial.html">上一篇：WoG 与 DIAL</a>
+        <a href="../index.html#posts">回到系列目录</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>

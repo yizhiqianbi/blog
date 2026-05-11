@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="WoG 和 DIAL 如何把未来压成动作生成可用的条件或意图瓶颈。">
+    <title>WoG 与 DIAL：把未来压进条件空间</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260512">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#posts">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#posts">← 返回文章列表</a>
+          <p class="kicker">World Model 07</p>
+          <h1>WoG 与 DIAL：把未来压进条件空间</h1>
+          <p class="article-dek">
+            WoG 和 DIAL 都不满足于“预测未来再给动作头看”。它们把未来变成更紧凑的条件或 latent intent，
+            直接服务动作生成。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.12</span>
+            <span>阅读约 8 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>WoG：condition space 里的世界建模</h2>
+          <p>
+            WoG 的判断是：视频预测太重，纯 latent action 又太轻。它用 QFormer 之类的 future encoder
+            把未来观察压成 action head 可消费的条件，让模型同时预测未来条件和动作。
+          </p>
+          <div class="figure-pair">
+            <figure class="note-figure">
+              <img src="../assets/notion/wog-overview.png" alt="WoG 总览图">
+              <figcaption>World Guidance：未来信息进入动作推理的 condition space。</figcaption>
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/wog-qformer.png" alt="WoG QFormer 图">
+              <figcaption>Future Encoder 用紧凑 token 表示未来，而不是保留完整视频。</figcaption>
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>DIAL：latent intent bottleneck</h2>
+          <p>
+            DIAL 把系统拆成 System-2 和 System-1：VLM 先在自身特征空间里合成 latent visual foresight，
+            这个 foresight 作为意图瓶颈；轻量 System-1 再根据当前观察和意图解码低层动作。
+          </p>
+          <figure class="note-figure">
+            <img src="../assets/notion/dial-overview.png" alt="DIAL 架构总览图">
+            <figcaption>DIAL：高层意图和低层动作解耦，先 feature align，再端到端联合优化。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section">
+          <h2>代码视角</h2>
+          <p>
+            两者都可以看成给 action generator 增加一个未来条件变量。区别在于 WoG 更像 condition prediction，
+            DIAL 更像 VLM feature space 里的结构化瓶颈。
+          </p>
+          <div class="code-block">
+            <pre><code># Stage 1: future-guided warmup
+future_cond = future_encoder(future_obs)
+pred_cond, pred_action = policy(obs, instruction, teacher_cond=future_cond)
+loss = action_loss(pred_action, action) + cond_loss(pred_cond, future_cond)
+
+# Stage 2: internalized inference
+pred_cond = policy.predict_condition(obs, instruction)
+pred_action = action_decoder(obs, pred_cond)
+loss = action_loss(pred_action, action)</code></pre>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>实现重点</h2>
+          <ul>
+            <li>条件瓶颈不能太宽，否则等价于搬运未来图像；也不能太窄，否则丢掉精细动作需要的信息。</li>
+            <li>两阶段训练能稳定优化：先用真未来带路，再让模型在推理时自己生成条件。</li>
+            <li>如果条件空间学得好，推理时不需要额外预测未来帧，延迟比显式视频 rollout 低。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Insight</h2>
+          <p class="insight">
+            这条路线的核心不是“有没有世界模型”，而是“世界模型的输出是不是刚好喂给动作生成”。未来被压成条件后，
+            它不再是可观看的结果，而是控制系统内部的意图变量。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://arxiv.org/abs/2602.22010">World Guidance: World Modeling in Condition Space for Action Generation</a></li>
+            <li><a href="https://arxiv.org/abs/2603.29844">DIAL: Decoupling Intent and Action via Latent World Modeling for End-to-End VLA</a></li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="latent-world-models.html">上一篇：潜空间世界模型</a>
+        <a href="world-model-applications.html">下一篇：世界模型能做什么</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>

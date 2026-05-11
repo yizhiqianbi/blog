@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Motus 与 LingBot-VA 的 MoT、潜动作和 video-action 世界模型路线。">
+    <title>Motus 与 LingBot-VA：专家世界模型</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260512">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#posts">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#posts">← 返回文章列表</a>
+          <p class="kicker">World Model 05</p>
+          <h1>Motus 与 LingBot-VA：专家世界模型</h1>
+          <p class="article-dek">
+            MoE/MoT 路线不强行让一个头负责所有事，而是让理解专家、视频生成专家和动作专家共享一部分上下文，
+            再通过调度器切换 VLA、WM、IDM、VGM 等模式。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.12</span>
+            <span>阅读约 9 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>Motus：三类专家合到一个 MoT</h2>
+          <p>
+            Motus 的核心是 VLM 负责理解，VGM 负责生成，Action expert 负责控制。它用 optical flow 提取 latent action，
+            再用三阶段训练把 web/human/synthetic/robot 数据逐步接到目标机器人轨迹上。
+          </p>
+          <div class="figure-pair">
+            <figure class="note-figure">
+              <img src="../assets/notion/motus-architecture.png" alt="Motus 架构图">
+              <figcaption>MoT：专家 FFN 相对独立，attention 共享上下文。</figcaption>
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/motus-data-pyramid.png" alt="Motus 数据金字塔图">
+              <figcaption>数据金字塔：从 web data 到 target-robot demonstrations。</figcaption>
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>LingBot-VA：video-action 交错输出</h2>
+          <p>
+            LingBot-VA 更强调 causal video-action world modeling：视频 token 和动作 token 共享 latent space，
+            通过 closed-loop rollout 和 asynchronous inference 让机器人一边执行当前动作块，一边预测下一段。
+          </p>
+          <div class="figure-grid">
+            <figure class="note-figure">
+              <img src="../assets/notion/lingbot-va-overview.png" alt="LingBot-VA 总览图">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/lingbot-va-training.png" alt="LingBot-VA 训练图">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/lingbot-va-flare-loss.png" alt="LingBot-VA future latent alignment 图">
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>代码视角</h2>
+          <p>
+            MoT 的实现重点不是 if-else 包起来的多任务，而是让不同模式共享时序上下文。
+            latent action 则相当于先从视频变化里抽一个中间动作，再映射到机器人动作空间。
+          </p>
+          <div class="code-block">
+            <pre><code>def motus_forward(tokens, mode):
+    hidden = shared_attention(tokens)
+    if mode == "video_generation":
+        return video_expert(hidden)
+    if mode == "inverse_dynamics":
+        return latent_action_expert(hidden)
+    if mode == "robot_policy":
+        z = latent_action_expert(hidden)
+        return robot_action_decoder(z)
+
+def async_control_loop(obs):
+    while True:
+        future_video, next_actions = model.predict_next_chunk(obs)
+        execute(current_actions)
+        obs = read_robot_observation()
+        current_actions = next_actions</code></pre>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>实现重点</h2>
+          <ul>
+            <li>光流 latent action 是跨 embodiment 的桥，但它必须再经过 action decoder 才能落到具体机器人。</li>
+            <li>MoT 的共享 attention 能保留跨模态上下文，专家 FFN 保留各自计算分布，适合多模式切换。</li>
+            <li>LingBot-VA 的异步推理是在承认视频生成慢的前提下，把延迟藏进执行过程，而不是假装没有延迟。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Insight</h2>
+          <p class="insight">
+            专家世界模型适合统一多功能，但复杂度是真实成本。它的优势在“一个系统能做很多事”，
+            不是“部署一定更简单”。如果目标是高频闭环，异步和分块执行会比模型指标更关键。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://motus-robotics.github.io/motus">Motus: A Unified Latent Action World Model</a></li>
+            <li><a href="https://arxiv.org/abs/2601.21998">Causal World Modeling for Robot Control</a></li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="cosmos-single-backbone.html">上一篇：Cosmos Policy</a>
+        <a href="latent-world-models.html">下一篇：潜空间世界模型</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>
