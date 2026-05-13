@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Unmasking On-Policy Distillation 论文精读：用 per-token ideal gradient 和 gradient alignment 诊断 OPD 在哪里有用、哪里有害、为什么。"
+    >
+    <title>Unmasking OPD：teacher signal 到底在帮谁</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260513">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#notes">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading</p>
+          <h1>Unmasking OPD：teacher signal 到底在帮谁</h1>
+          <p class="article-dek">
+            这篇精读 arXiv:2605.10889v1，题为 Unmasking On-Policy Distillation:
+            Where It Helps, Where It Hurts, and Why。它不提出新的 OPD 训练算法，而是提出一个
+            training-free 诊断框架：在每个 token、每道题、每个 teacher 配置上，衡量 distillation gradient
+            是否真的朝向“更可能答对”的方向。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.13</span>
+            <span>阅读约 40 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            这篇论文解决的是 OPD 虽然给 dense per-token supervision、但我们不知道哪个 teacher/上下文/ token
+            真有用的问题；核心招是从学生 rollout 的生成树里估计每个分支的成功概率，构造 ideal per-node gradient，
+            再用 cosine similarity 衡量 distillation gradient 与理想方向的对齐；它发现 OPD 更适合修正失败轨迹，
+            teacher/context 的最佳选择强依赖学生容量和任务，代价是诊断本身很贵，单题需要约 45K-200K targeted rollouts，
+            更像离线显微镜而不是直接训练算法。
+          </p>
+          <p class="insight">
+            我的读法：EffOPD 那篇解释“OPD 为什么能快”，这篇解释“OPD 什么时候不该信 teacher”。
+            两者合起来给出一个更清楚的 post-training 图景：OPD 的 token-level 信号很强，但强不等于总是对。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            任务范式是 reasoning LLM 的 on-policy distillation 诊断。给定 student model πθ 和 teacher πte，
+            student 在题目 q 上采样 reasoning trajectory；teacher 在 student 已经走过的 node/token 上给出分布。
+            论文要问的不是最终训练后 accuracy 高不高，而是某个 token 位置上，teacher 的梯度是否真的会提高最终答对概率。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>方法/范式</th>
+                <th>它优化什么</th>
+                <th>能不能看 token 级好坏</th>
+                <th>关键差异</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>GRPO / Dr. GRPO</td>
+                <td>稀疏 outcome reward，答案正确才给信号</td>
+                <td>理论上 reward gradient 指向成功，但采样噪声高</td>
+                <td>论文证明 Dr. GRPO 在 per-node 期望上恢复 ideal gradient</td>
+              </tr>
+              <tr>
+                <td>GKD / OPD</td>
+                <td>student rollout 上的 teacher distribution</td>
+                <td>普通训练只看 aggregate loss/accuracy</td>
+                <td>论文用 alignment score 判断 teacher signal 是否朝成功方向</td>
+              </tr>
+              <tr>
+                <td>Self-distillation</td>
+                <td>同一 student 在额外上下文下当 teacher</td>
+                <td>难知道 full trace、summary、wrong demo 哪个更好</td>
+                <td>论文发现最优上下文随模型容量和任务变化，没有通用 recipe</td>
+              </tr>
+              <tr>
+                <td>本文诊断框架</td>
+                <td>不训练模型，只估计每个 node 的理想方向和 teacher 方向</td>
+                <td>是，per token / per question / per teacher</td>
+                <td>把“teacher 是否有用”从训练结果拆成局部梯度方向问题</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            与主流 baseline 的最大差异：它不是再提出一个 KL 变体或 reward shaping，而是构造一个近似 oracle，
+            问 distillation gradient 是否接近“如果我知道哪个 token 更容易通向正确答案，我应该怎么更新”的方向。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            宏观看，这篇方法是一个离线诊断 pipeline。它先用 student 采样多条答案，形成 generation tree；
+            再对树上的重要分支做 targeted rollouts，估计每个 next-token 选择后的成功概率；然后用这个成功概率构造
+            ideal gradient；最后对每个 teacher/蒸馏算法计算 distillation gradient，并用 cosine similarity 得到 alignment score。
+          </p>
+          <div class="code-block">
+            <pre><code>Prompt q
+  -> student πθ samples G initial trajectories
+  -> build generation tree T
+       node u: prefix/context
+       edge k: next token
+       rollout outcome R in {0,1}
+
+For each important node u:
+  estimate P_succ^k = Pr(final answer correct | choose token k at u)
+  ideal gradient:
+    g_ideal_j(u) = Pθ^j (P_succ^j - Pbar_succ)
+
+For each teacher configuration:
+  teacher forward pass on node u
+  compute distillation gradient g_D(u), e.g. GKD
+  Align(u) = cos(g_ideal(u), g_D(u))
+
+Aggregate:
+  per token -> per path -> per question -> per teacher / dataset</code></pre>
+          </div>
+          <p>
+            关键符号和形状：在 node u 上，只考虑被足够采样的 token 集 S_u，大小 |S_u| 远小于词表 V。
+            Pθ^k、Pte^k、P_succ^k 都是定义在 S_u 上的向量；g_ideal 和 g_D 也是 |S_u| 维向量。
+            模型 logits 原本是 [V]，但 alignment 只在 S_u 上计算，因为没被 student 采到的 token 没有可靠成功率估计。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：把 teacher 好坏定义成 per-node 成功概率对齐</h3>
+          <p>
+            旧方法为什么不行：teacher 和 student 在某个 token 上 disagree，不代表 teacher 就对。teacher 可能只是偏好
+            “four” 而不是 “4”，也可能真正在纠正 “3+4” 这种推理错误。标准 KL 把这些 disagreement 都当监督，
+            会混入风格噪声和有害信号。
+          </p>
+          <p>
+            它怎么改：论文在生成树 node u 上估计每个候选 token k 的成功概率 P_succ^k，然后定义 teacher advantage：
+            teacher 如果比 student 给高成功率 token 更多概率，就有正 advantage；反之就是负的。
+          </p>
+          <p>
+            为什么有效：它把“teacher 懂不懂”从 teacher 自己的置信度，转成“teacher 是否把概率质量移向最终答对的分支”。
+            这能区分 reasoning-critical correction 和 stylistic preference。
+          </p>
+          <p>
+            代价/限制：P_succ^k 需要大量 rollout 估计，而且只能估计 student 曾经采到过的 token。
+            如果一个真正好的 token 从没被 student 采样，框架看不见它。
+          </p>
+
+          <h3>创新点 2：ideal per-node gradient</h3>
+          <p>
+            旧方法为什么不行：只看 teacher advantage 还不够，因为训练算法不同，同一个 teacher distribution 会变成不同梯度。
+            需要一个梯度级 reference，才能比较 GKD、single-sample GKD、MiniLLM 等 distillation objective。
+          </p>
+          <p>
+            它怎么改：定义局部目标 L_ideal(u)=Σ_k Pθ^k P_succ^k，也就是 student 在 node u 当前策略下的期望成功率。
+            对 logit z_j 求导，得到 g_ideal_j = Pθ^j(P_succ^j - Pbar_succ)。如果 token j 的成功率高于平均，就增大它的 logit；
+            低于平均，就减小它。
+          </p>
+          <p>
+            为什么有效：这个梯度只关心最终答对概率，不关心 teacher 风格偏好。论文还证明 Dr. GRPO 在若干简化下，
+            per-node 期望梯度与它成比例，因此它可以被看成 reward-based training 的 token-level oracle。
+          </p>
+          <p>
+            代价/限制：这是离线经验 oracle，不是真实训练时可得的梯度。它依赖 rollout 质量、verifier/reward 正确性和足够分支访问。
+          </p>
+
+          <h3>创新点 3：gradient alignment score</h3>
+          <p>
+            旧方法为什么不行：aggregate accuracy 只能告诉我们“这个 teacher 配方最后训练是否好”，看不到哪些 token 在帮忙，
+            哪些 token 在浪费梯度预算或反向伤害。
+          </p>
+          <p>
+            它怎么改：把 ideal gradient 和 distillation gradient 投到同一个 S_u token 子空间，计算 cosine similarity。
+            Align(u)&gt;0 表示 teacher+algorithm 在该 node 朝成功分支推；≈0 表示主要是无关方向；&lt;0 表示有害。
+          </p>
+          <p>
+            为什么有效：cosine 不关心梯度大小，只关心方向。这适合诊断“teacher signal 的质量”，并能比较不同 teacher、
+            不同 context、不同任务上的 token-level 局部差异。
+          </p>
+          <p>
+            代价/限制：cosine 对低 norm 梯度敏感；而且论文主要分析 GKD 方向，MiniLLM 这种 trajectory-dependent
+            梯度更复杂。alignment 高也不等于实际训练一定稳定，因为 optimizer、batching、loss weight 都会改变最终效果。
+          </p>
+
+          <h3>创新点 4：targeted rollout + teacher-independent tree sharing</h3>
+          <p>
+            旧方法为什么不行：naive 做法要在每个 node、每个 token 后面采很多 completion，长 CoT 上根本不可行。
+            AIME traces 可达 5K-30K tokens，完整枚举分支会爆炸。
+          </p>
+          <p>
+            它怎么改：先用 G=200 initial rollouts 建树，再只对重要 token 做 targeted rollouts。
+            重要性来自 GKD 梯度大小和 student-teacher probability difference；深度按指数窗口切分，比如 1-50、51-150、151-350。
+            目标 token 满足 Pθ^k 或 Pte^k 大于 τ=0.02，并补到 N_min=100 visits；普通任务保留每个 child ≥20 visits 的 node，
+            AIME 用 ≥40。
+          </p>
+          <p>
+            为什么有效：一个 targeted rollout 不只丰富目标 node，也丰富沿途祖先和后继 node 的成功率估计。
+            更重要的是，generation tree 和 P_succ 是 teacher-independent，所以 8 个 teacher 配置可以共享同一棵树，
+            只需分别做 teacher forward pass，论文估计节省约 7 倍计算。
+          </p>
+          <p>
+            代价/限制：即便优化后仍很贵，完整实验约 72 A100-days。它适合做离线诊断、benchmark 和训练策略设计，
+            不适合每个 training step 在线跑。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <p>
+            严格说，这篇论文没有训练一个新模型，也没有部署推理算法。它的“训练流程”应该理解为 OPD/蒸馏信号的离线诊断流程。
+            输入是题目、student、teacher 配置和 verifier；输出是每个 token/node 的 alignment 分数、teacher ranking、
+            correct-vs-incorrect 分析和上下文设计建议。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>操作</th>
+                <th>输出</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Initial rollout</td>
+                <td>prompt q，student πθ</td>
+                <td>采样 G=200 trajectories，验证最终答案对错</td>
+                <td>带 reward/outcome 的生成树</td>
+              </tr>
+              <tr>
+                <td>Targeted enrichment</td>
+                <td>树中访问不足但重要的 node-token pair</td>
+                <td>固定 prefix + token k，从 student 继续采样到答案</td>
+                <td>更可靠的 P_succ^k 估计</td>
+              </tr>
+              <tr>
+                <td>Ideal gradient</td>
+                <td>Pθ^k，P_succ^k</td>
+                <td>计算 Pθ^j(P_succ^j - Pbar_succ)</td>
+                <td>g_ideal(u)</td>
+              </tr>
+              <tr>
+                <td>Teacher scoring</td>
+                <td>8 种 teacher/context 配置</td>
+                <td>在相同 node 上 teacher forward，取 Pte^k</td>
+                <td>teacher distribution</td>
+              </tr>
+              <tr>
+                <td>Distillation gradient</td>
+                <td>Pθ^k，Pte^k，distillation objective</td>
+                <td>计算 GKD/single-sample/MiniLLM 对应梯度</td>
+                <td>g_D(u)</td>
+              </tr>
+              <tr>
+                <td>Alignment analysis</td>
+                <td>g_ideal(u)，g_D(u)</td>
+                <td>cosine similarity，按 path/question/teacher 聚合</td>
+                <td>哪里帮忙、哪里有害、哪个 teacher 更合适</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            如果把它用到真实训练中，可能流程会变成：先离线跑少量题的 alignment 诊断，选 teacher/context；
+            再在真正 OPD 训练时按失败轨迹、divergence 或 predicted alignment 对 token loss 加权。但这一步是论文未来方向，
+            不是本文已经完成的训练算法。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式/算法逐行讲解</h2>
+
+          <h3>公式 1：teacher advantage</h3>
+          <div class="code-block">
+            <pre><code>Adv(u) = Σ_{k in S_u} P_te^k P_succ^k
+       - Σ_{k in S_u} P_θ^k  P_succ^k</code></pre>
+          </div>
+          <p>
+            u 是生成树里的一个 node，也就是某个 prefix；S_u 是访问次数足够的候选 next-token 集。
+            P_te^k 是 teacher 在 token k 上的概率，P_θ^k 是 student 概率，P_succ^k 是选择 k 后最终答对的经验概率。
+            如果 Adv(u)&gt;0，teacher 比 student 更偏向成功分支；如果小于 0，teacher 反而把概率质量移向失败分支。
+          </p>
+
+          <h3>公式 2：ideal objective 和 ideal gradient</h3>
+          <div class="code-block">
+            <pre><code>L_ideal(u) = Σ_k P_θ^k P_succ^k
+
+Pbar_succ = Σ_k P_θ^k P_succ^k
+
+∂L_ideal / ∂z_j
+  = P_θ^j (P_succ^j - Pbar_succ)</code></pre>
+          </div>
+          <p>
+            z_j 是 student 在 node u 对 token j 的 logit。softmax Jacobian 给出 ∂P_θ^k/∂z_j=P_θ^k(δ_kj-P_θ^j)。
+            推导后得到：token j 的成功率高于当前平均成功率，就推高 logit；低于平均，就压低。
+            在实现中，这就是一个 |S_u| 维向量，对每个候选 token 都有一个梯度分量。
+          </p>
+
+          <h3>公式 3：GKD gradient</h3>
+          <div class="code-block">
+            <pre><code>L_GKD(u) = KL(π_θ || π_te)
+         = Σ_k P_θ^k (log P_θ^k - log P_te^k)
+
+Let ℓ_k = log P_θ^k - log P_te^k
+    ℓbar = Σ_k P_θ^k ℓ_k = KL(π_θ || π_te)
+
+∂L_GKD / ∂z_j = P_θ^j (ℓ_j - ℓbar)</code></pre>
+          </div>
+          <p>
+            因为训练要最小化 KL，所以实际 update direction 是这个梯度的负方向。
+            如果 teacher 给 token j 的概率相对 student 更高，ℓ_j 会更小，负梯度会推高这个 token。
+            论文用这个 distillation gradient 与 ideal gradient 做 cosine。
+          </p>
+
+          <h3>公式 4：统一局部梯度结构</h3>
+          <div class="code-block">
+            <pre><code>∂L / ∂z_j = P_θ^j (f_j - fbar)
+
+fbar = Σ_k P_θ^k f_k</code></pre>
+          </div>
+          <p>
+            这是论文很漂亮的统一视角。Dr. GRPO 里 f_k 是 P_succ^k；GKD 里 f_k 是 log P_θ^k - log P_te^k
+            的正负形式；single-sample GKD 在期望上恢复同一个方向；MiniLLM 的 f_k 则依赖后续 trajectory reward-to-go。
+            共同点是 P_θ^j 这个门控项：student 本来概率很低的 token，即使 teacher 认为好，单步梯度也很小。
+          </p>
+
+          <h3>公式 5：gradient alignment score</h3>
+          <div class="code-block">
+            <pre><code>Align(u) = cos(g_ideal(u), g_D(u))
+         = Σ_{j in S_u} g_ideal_j g_D_j
+           / ( ||g_ideal||_{S_u} ||g_D||_{S_u} )</code></pre>
+          </div>
+          <p>
+            Align(u) 介于 -1 和 1。正数代表 teacher+algorithm 的方向与成功方向一致；0 附近代表无关；
+            负数代表有害。注意它只在 S_u 上算，因为 P_succ 对未采样 token 不可靠。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练与推理细节对齐</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>检查点</th>
+                <th>论文做法</th>
+                <th>可能的不一致/风险</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>On-policy 分布</td>
+                <td>rollouts 来自当前 student πθ</td>
+                <td>只诊断 student 会采到的区域，无法评估从未探索到的好 token</td>
+              </tr>
+              <tr>
+                <td>Verifier / reward</td>
+                <td>BoolQ/MMLU/AIME 用最终答案对错作为 success</td>
+                <td>如果答案判定或解析错误，P_succ 和 ideal gradient 都会错</td>
+              </tr>
+              <tr>
+                <td>Teacher forcing</td>
+                <td>teacher 在 student 已生成的 node/prefix 上 forward</td>
+                <td>teacher 可能在自己的自然轨迹上很强，但在 student 奇怪前缀上分布不稳</td>
+              </tr>
+              <tr>
+                <td>采样温度</td>
+                <td>screening 中 G=32，temperature=1.0；demo generation temperature=0.7</td>
+                <td>targeted rollout 采样参数若不同，会改变生成树分布和 P_succ 估计</td>
+              </tr>
+              <tr>
+                <td>长 CoT</td>
+                <td>AIME 5K-30K tokens，N_sig 提到提高到 40</td>
+                <td>深层 node 分支更稀疏，估计方差更大；cache/rollout 成本巨大</td>
+              </tr>
+              <tr>
+                <td>训练使用</td>
+                <td>本文不直接训练，只做离线 alignment</td>
+                <td>alignment 高不保证真实 OPD 训练后一定涨，因为 batch、optimizer、loss scale 会介入</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            【不确定】targeted rollout 的具体采样超参没有在主文完全写清。合理猜测有三种：沿用 student 常规 rollout
+            temperature=1.0；对 AIME 使用更保守温度以稳定长 CoT；或按任务调整 top-p/temperature。验证方式是检查作者代码或复现实验时固定
+            temperature/top-p 做敏感性分析，看 Align(u) 排名是否稳定。
+          </p>
+          <p>
+            【不确定】distillation gradient 的符号和实现细节在不同 objective 里容易混淆。合理猜测是主实验主要用 GKD 的负梯度方向；
+            single-sample 和 MiniLLM 作为理论结构对齐；teacher ranking 未必对 MiniLLM 完全一致。验证方式是分别计算 GKD、
+            single-sample GKD、MiniLLM 的 alignment，看 ranking 是否改变。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <p>
+            实验规模不小：Qwen3-0.6B 和 Qwen3-1.7B 两个 student，8 种 teacher/context 配置，BoolQ、MMLU 主实验，
+            AIME 2025 做长链 case study。主实验中 BoolQ 约 88K/81K decision points，MMLU 约 49K/46K decision points。
+            总计算约 72 A100-days。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>结论</th>
+                <th>证据</th>
+                <th>批判</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>OPD 更适合修失败轨迹</td>
+                <td>incorrect paths 的 mean/weighted cosine 普遍高于 correct paths；BoolQ 1.7B 差距最强</td>
+                <td>这支持“失败时 teacher 最有用”，但还没证明训练时只加权失败轨迹一定提升</td>
+              </tr>
+              <tr>
+                <td>0.6B 更适合 self-distillation</td>
+                <td>0.6B 上 Self-1C / Self-Sum-1C / Self-1C(32B) 常比外部 teacher 高 2-3 倍 alignment</td>
+                <td>解释是 comprehensibility，但没有直接测量学生是否理解 teacher rationale</td>
+              </tr>
+              <tr>
+                <td>1.7B 可受益于外部 teacher</td>
+                <td>1.7B BoolQ 上 Qwen3-8B mean alignment 最高；MMLU 上 self-distillation 仍强</td>
+                <td>teacher 排名会随 metric 变化，weighted cosine 下 Self-Sum-1C 仍很强</td>
+              </tr>
+              <tr>
+                <td>wrong demo 在短任务上有害，在硬数学上可能有用</td>
+                <td>BoolQ/MMLU 中 1C1W 低于 1C；AIME 难题上 Self-1C1W 最好</td>
+                <td>AIME 只有 4 道题 case study，不能当作强统计结论</td>
+              </tr>
+              <tr>
+                <td>teacher-student divergence 是弱预测器</td>
+                <td>KL/JS/L2 与 alignment 正相关，cosine similarity 负相关，但 |ρ|≈0.02-0.04</td>
+                <td>只能当 cheap filter，不能替代 rollout-based oracle</td>
+              </tr>
+              <tr>
+                <td>选择性蒸馏有巨大 oracle 上界</td>
+                <td>只保留 Align&gt;0 的 token，约 52% tokens，mean signal 提升 10-15 倍</td>
+                <td>训练时不知道真实 Align&gt;0，这是 oracle analysis，不是可直接部署算法</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            公平性方面，诊断树在 teacher 之间共享是合理且高效的，因为 P_succ 由 student rollout 和 verifier 决定。
+            但 teacher context screening 会排除无法生成正确 demo 的题，可能让 self-distillation 设置显得更干净。
+            此外，BoolQ/MMLU 每个 500 题，AIME 只有 4 题，主结论在短/中等推理上更稳，长数学推理仍偏案例研究。
+          </p>
+          <p>
+            隐藏 confound：Qwen3 family 内部 teacher/student 风格相近；不同 teacher 的 prompt/context 长度不同；
+            correct demonstration 本身会极大提升 teacher 端 pass rate，这可能混合了“teacher 更懂”和“上下文泄露答案”。
+            论文目标是诊断 signal，不是模拟真实 test-time 可用信息，所以这个设定可以接受，但用于训练 recipe 时必须小心。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 可复现清单</h2>
+          <ul>
+            <li>学生模型：Qwen3-0.6B、Qwen3-1.7B，thinking mode enabled。</li>
+            <li>外部 teacher：Qwen3-4B、Qwen3-8B、Qwen3-14B。</li>
+            <li>Self teacher context：Self-1C、Self-Sum-1C、Self-1C1W、Self-Sum-1C1W、Self-1C(32B)。</li>
+            <li>主数据：BoolQ 500 题、MMLU 500 题；AIME 2025 四道题作为 case study。</li>
+            <li>Initial rollouts：G=200；每题选 4 representative paths，2 correct + 2 incorrect。</li>
+            <li>Targeted rollouts：重要 token 补到 N_min=100 visits；普通 node child ≥20 visits，AIME ≥40。</li>
+            <li>重要 token 阈值：Pθ^k &gt; τ 或 Pte^k &gt; τ，τ=0.02。</li>
+            <li>Depth windows：指数增长窗口，例如 1-50、51-150、151-350；每窗按 GKD 梯度和概率差分配预算。</li>
+            <li>Screening：G=32 rollouts、temperature=1.0；demo generation temperature=0.7，最多 retry 60 次。</li>
+            <li>指标：mean cosine、fraction positive、success-rate-range weighted cosine、teacher advantage、within-path correlations。</li>
+          </ul>
+          <p>
+            论文没写但复现通常必须补齐：tokenizer 版本和 chat template；答案解析规则；rollout temperature/top-p/max tokens；
+            exact representative path 选择策略；GKD 梯度是否在 full vocab 还是 S_u 截断后重归一；CI 的 bootstrap 单位；
+            AIME 长 trace 的截断策略；teacher forward 的 batch/cache 实现；以及 targeted rollout 的去重和随机种子。
+          </p>
+          <p>
+            【不确定】代表路径的选择会影响 correct-vs-incorrect 结论。合理猜测：随机选 2 correct/2 incorrect；
+            按 pass/fail 中较高概率路径选；或按树覆盖率选代表路径。验证方式是多次重采 representative paths，报告 alignment gap
+            的方差和 teacher ranking 稳定性。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 可能的改进方向</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>改动点</th>
+                <th>预期收益</th>
+                <th>风险</th>
+                <th>验证实验</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>失败轨迹加权 OPD</td>
+                <td>利用 incorrect paths alignment 更高的发现，把梯度预算放到最需要修的位置</td>
+                <td>过度训练失败样本可能牺牲已会样本的稳定性</td>
+                <td>按 rollout correctness 对 loss 加权，与 vanilla OPD 比 accuracy 和 calibration</td>
+              </tr>
+              <tr>
+                <td>Divergence-gated distillation</td>
+                <td>用 KL/JS/L2 作为 cheap filter，减少风格 token 的蒸馏噪声</td>
+                <td>相关很弱，高 divergence 也可能有害</td>
+                <td>不同 divergence threshold 下比较 alignment proxy 和真实训练结果</td>
+              </tr>
+              <tr>
+                <td>多 teacher token routing</td>
+                <td>不同 teacher 在不同 node 有互补信号，可动态选最对齐的 teacher</td>
+                <td>需要额外 teacher forward，成本高</td>
+                <td>离线 oracle routing 与 learned router 比较 mean alignment 和训练收益</td>
+              </tr>
+              <tr>
+                <td>Context selector</td>
+                <td>根据任务难度和学生容量选 raw demo、summary、wrong demo 或 external teacher</td>
+                <td>错误选择会引入 wrong-demo 噪声或过压缩上下文</td>
+                <td>用题目难度/pass-rate 预测最佳 context，跨 BoolQ/MMLU/AIME 验证</td>
+              </tr>
+              <tr>
+                <td>Approximate P_succ model</td>
+                <td>用小 verifier/value model 预测分支成功率，减少 targeted rollouts</td>
+                <td>value model 偏差会污染 ideal gradient</td>
+                <td>比较 rollout oracle、value predictor 和 hybrid 的 alignment ranking</td>
+              </tr>
+              <tr>
+                <td>跨家族 teacher/student 诊断</td>
+                <td>验证 comprehensibility 假说是否只适用于 Qwen family</td>
+                <td>prompt/tokenizer 差异会让局部 token 对齐更复杂</td>
+                <td>Llama/Qwen/Mistral 混合 teacher-student，比较 self vs external teacher ranking</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 速读备忘卡</h2>
+          <ul>
+            <li>这篇不是新 OPD 算法，而是一个 training-free token-level 诊断框架。</li>
+            <li>核心问题：teacher 的 dense supervision 并不总是朝向成功答案。</li>
+            <li>生成树 node u 上，每个 next-token k 有一个经验成功率 P_succ^k。</li>
+            <li>ideal gradient 是 Pθ^j(P_succ^j - Pbar_succ)，高于平均成功率的 token 被推高。</li>
+            <li>Dr. GRPO 在去掉 length normalization 等简化下，期望上恢复这个 per-node ideal gradient。</li>
+            <li>GKD、single-sample GKD、MiniLLM 都能写成 Pθ^j(f_j-fbar) 的局部梯度结构。</li>
+            <li>gradient alignment = ideal gradient 和 distillation gradient 的 cosine similarity。</li>
+            <li>Align&gt;0 表示 teacher 有帮助，≈0 是风格/无关噪声，&lt;0 是有害信号。</li>
+            <li>最稳结论：teacher signal 在 incorrect rollouts 上更对齐，在 correct rollouts 上更容易变噪。</li>
+            <li>0.6B 更吃 self-distillation，1.7B 在 BoolQ 上能用好 Qwen3-8B 外部 teacher。</li>
+            <li>wrong demo 在 BoolQ/MMLU 上通常有害，但在 AIME 难题上可能提供有用反例。</li>
+            <li>最大限制：诊断很贵，只能看 student 采到的 token，AIME 结果还是小样本 case study。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://arxiv.org/abs/2605.10889">Unmasking On-Policy Distillation: Where It Helps, Where It Hurts, and Why</a>, arXiv:2605.10889v1, 2026-05-11.</li>
+            <li><a href="https://arxiv.org/pdf/2605.10889v1">论文 PDF</a>.</li>
+            <li><a href="https://arxiv.org/abs/2306.13649">On-policy distillation of language models: Learning from self-generated mistakes</a>.</li>
+            <li><a href="https://arxiv.org/abs/2306.08543">MiniLLM: On-Policy Distillation of Large Language Models</a>.</li>
+            <li><a href="https://arxiv.org/abs/2503.20783">Understanding R1-Zero-Like Training: A Critical Perspective</a>.</li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="../index.html#paper-reading">回到 Paper Reading</a>
+        <a href="learning-to-foresee-effopd.html">继续读：Learning to Foresee / EffOPD</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>
