@@ -277,11 +277,19 @@ figcaption {
   margin: 22px 0;
 }
 
+.wide-figure {
+  margin: 24px 0 30px;
+}
+
 .note-figure img {
   overflow: hidden;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   background: #f4f1ea;
+}
+
+.wide-figure img {
+  border-color: rgba(128, 203, 193, 0.36);
 }
 
 figcaption {
