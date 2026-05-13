@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="PROWL 论文精读：用 KL-anchored adversarial policy 和 PAT buffer 主动发现世界模型失败轨迹，把罕见动作响应错误变成可训练 curriculum。"
+    >
+    <title>PROWL：让 RL agent 专门找世界模型短板</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513b">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#notes">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading</p>
+          <h1>PROWL：让 RL agent 专门找世界模型短板</h1>
+          <p class="article-dek">
+            精读 PROWL: Prioritized Regret-Driven Optimization for World Model Learning。
+            这篇把世界模型训练从“更多 passive 数据”推进到“主动找模型失败”：让一个 KL 约束的 VPT agent
+            在 MineRL 里专门搜索世界模型预测错、但仍接近真实玩家行为的轨迹，再把这些轨迹变成优先级课程。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.13</span>
+            <span>阅读约 45 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            PROWL 解决的是 action-conditioned video world model 在常见 passive demo 上看起来会生成、但在罕见且交互关键的动作组合上不跟手的问题；
+            核心招是用 KL-anchored adversarial policy 主动寻找高预测误差轨迹，再用 Prioritized Adversarial Trajectory buffer
+            按 latent regret、optical-flow action fidelity 和 learning progress 重排训练样本；效果是在 MineRL/BASALT 的 held-out
+            任务、cross-buffer adversarial failures、长 rollout 和 novel composite modes 上都优于 Phase 1 与 matched-compute Phase 2，
+            代价是训练系统很重、依赖可交互环境和真实 rollout 评分，且弱 KL 约束会 reward hack 成 camera-thrashing。
+          </p>
+          <p class="insight">
+            我的读法：这篇最重要的 insight 不是“让 agent 在世界模型里做任务”，而是反过来“让 agent 去真实环境里当世界模型的红队”。
+            它把世界模型训练变成一个闭环反馈系统：模型越强，红队越能发现更细的错误；红队越强，模型越能补上 passive 数据覆盖不到的状态动作组合。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            论文处在 action-conditioned video world model、active data generation、adversarial curriculum 的交叉点。
+            世界模型输入过去图像和动作，输出未来视频/latent。训练目标不是学一个下游 policy，而是让 world model 对真实动作响应更可靠。
+            环境是 MineRL/Minecraft，基础数据是 BASALT human demonstrations，参考策略是 VPT-2x。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>核心信号</th>
+                <th>旧方法瓶颈</th>
+                <th>PROWL 的差异</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Passive world-model training</td>
+                <td>人类 demo 的 teacher-forced prediction loss</td>
+                <td>常见行为多，罕见交互动作少；模型会视觉合理但不跟动作</td>
+                <td>主动生成模型当前最不擅长的 near-distribution 轨迹</td>
+              </tr>
+              <tr>
+                <td>Plan2Explore / ensemble disagreement</td>
+                <td>模型不确定性或 ensemble variance</td>
+                <td>需要 ensemble，且不一定等价于真实预测错</td>
+                <td>直接用 ground-truth rollout 与模型 rollout 的 regret 评分</td>
+              </tr>
+              <tr>
+                <td>Prioritized replay / PLR</td>
+                <td>高误差、staleness、学习潜力</td>
+                <td>多用于 agent 或 level curriculum</td>
+                <td>把优先级记忆用于 world model failure trajectories</td>
+              </tr>
+              <tr>
+                <td>Unconstrained adversarial data</td>
+                <td>最大化模型错误</td>
+                <td>容易跑到不真实动作，学到 camera thrashing 这类 reward hacking</td>
+                <td>PPO reward 加 forward KL anchor 到 frozen VPT reference</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            主流 baseline 的关键差异：它不是多训几步、也不是只换采样权重，而是把“数据从哪里来”变成一个 RL 问题。
+            matched-compute baseline 用同样 Phase 2 fine-tuning schedule，但 rollout policy 固定为 VPT reference，
+            所以 PROWL 与它的差距基本就是 adversarial discovery 的增益。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            PROWL 是两阶段系统。Phase 1 用 passive BASALT FindCave demo 训练 Wan2.1-T2V-1.3B diffusion transformer
+            世界模型；Phase 2 让 VPT 初始化的 adversarial policy 在 MineRL 中 rollout，世界模型预测同一轨迹，
+            用真实 rollout 与预测 rollout 的差异给轨迹打分，分数同时作为 PPO terminal reward 和 PAT buffer priority。
+            世界模型周期性从 PAT buffer 与 passive replay 的 50/50 混合中微调，并重新评估 buffer 里轨迹的优先级。
+          </p>
+          <div class="code-block">
+            <pre><code>Phase 1: passive pretraining
+  BASALT FindCave demos -> frozen VAE latents
+  chunk K=3 latent frames = 12 pixel frames at 20 fps
+  Wan2.1-T2V-1.3B DiT + UMT5 action text conditioning
+  train diffusion-forcing objective on target chunks
+
+Phase 2: adversarial curriculum
+  policy pi_phi starts from VPT-2x
+  reference pi_ref = frozen VPT-2x
+  rollout tau in MineRL
+  world model W_theta predicts tau autoregressively
+  compute score(tau): latent regret + AFS optical-flow error + progress
+  insert tau into PAT buffer B with priority
+  PPO updates pi_phi with score terminal reward and KL(pi_phi || pi_ref)
+  every T_wm iterations:
+    sample 50% PAT + 50% passive
+    fine-tune only cross-attention + UMT5 action adapter
+    rescore buffer so solved cases lose priority</code></pre>
+          </div>
+          <p>
+            关键张量和符号：原始视频是 MineRL 分辨率 \(480\times832\)；VAE 时间/空间压缩为 \((4,8,8)\)；
+            每个 chunk 含 \(K=3\) 个 latent frames，对应 12 个 pixel frames，即 0.6 秒；Wan2.1 的上下文窗口是
+            \(\mathrm{max}_t=21\) latent frames，也就是最多 7 个 chunks。评估短 horizon 用 seed chunks=2、
+            horizon chunks=2；长 horizon 到 18 chunks，大约 10.8 秒。
+          </p>
+          <p>
+            模块图文字版：真实环境 MineRL 产生轨迹 \(\tau\) → VAE 编码真实帧为 \(z_t^{\mathrm{real}}\) →
+            world model 根据历史和动作预测 \(z_t^{\mathrm{pred}}\) → SEA-RAFT 在 decoded pixel frames 上算 optical flow →
+            score(\(\tau\)) 进入 PPO 与 PAT buffer → PAT/passive 混合 batch 微调 world model。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：KL-constrained adversarial curriculum</h3>
+          <p>
+            旧方法为什么不行：如果只奖励“让模型预测错”，agent 会找到模型不可能学好的奇怪动作，比如高速 camera-thrashing。
+            这种轨迹误差高，但不代表有用，因为它离真实玩家行为太远，模型花容量去学它反而伤主分布。
+          </p>
+          <p>
+            它怎么改：policy \(\pi_\phi\) 最大化 trajectory score，同时加 forward KL 到 frozen behavior reference \(\pi_{\mathrm{ref}}\)。
+            \(c_{\mathrm{kl}}\) 控制 adversary 离 VPT reference 能走多远。论文 sweep \(c_{\mathrm{kl}}\in\{0.5,1.0,1.5\}\)，
+            发现太弱的 0.5 会 reward hack，1.0/1.5 才稳定。
+          </p>
+          <p>
+            为什么有效：KL anchor 把“找错”限制在行为上合理的动作区域。这样找到的 failures 既新颖又可学习，而不是纯 OOD exploit。
+          </p>
+          <p>
+            代价/限制：KL 系数很敏感。太小会 reward hacking；太大又会退化到 VPT reference rollout，覆盖不到 novel composites。
+          </p>
+
+          <h3>创新点 2：用 realized prediction regret 当探索奖励</h3>
+          <p>
+            旧方法为什么不行：ensemble disagreement 是 proxy，可能高不确定但不影响动作跟随；LPIPS/SSIM 看外观，
+            可能漏掉“画面像但动作错”的 failure。
+          </p>
+          <p>
+            它怎么改：PROWL 直接让模型 rollout 与真实环境 rollout 对齐，计算 VAE latent regret；
+            再加 Action-Follow Score，即 SEA-RAFT optical flow 的 endpoint error，抓动作响应错误。
+          </p>
+          <p>
+            为什么有效：latent regret 看全局动态是否合理，AFS 看 pixel-space motion 是否跟随动作。Appendix G 强调，
+            有些帧 LPIPS/SSIM 几乎一样，但 optical-flow error 会在动作密集帧突增。
+          </p>
+          <p>
+            代价/限制：需要真实环境 rollout 和光流计算，成本高于纯离线 loss；AFS 依赖 SEA-RAFT，在 Minecraft 外是否同样稳要验证。
+          </p>
+
+          <h3>创新点 3：PAT buffer 把失败变成动态课程</h3>
+          <p>
+            旧方法为什么不行：普通 replay 会反复训练已经被模型解决的轨迹；单次 adversarial collection 又会过时，
+            因为 world model 每轮都会变。
+          </p>
+          <p>
+            它怎么改：Prioritized Adversarial Trajectory buffer 容量 \(K=256\)，用 composite priority 排序。
+            priority 由 buffer z-score 后的 latent regret、AFS、以及同一轨迹跨 rescore cycle 的 regret change 组成。
+            world model 每次更新后重算 buffer priority，solved cases 降权，stagnant/regressing cases 留在前面。
+          </p>
+          <p>
+            为什么有效：这把 curriculum 目标从“难”改成“现在还没学会”。模型学会某类 failure 后，PAT 会自动把训练压力转向新的 failure。
+          </p>
+          <p>
+            代价/限制：buffer 小而精，但需要周期性 rescore；若 score 设计偏了，整个 curriculum 会偏向错误 failure mode。
+          </p>
+
+          <h3>创新点 4：把 Wan2.1 的 text-to-video cross-attention 改造成 action conditioning</h3>
+          <p>
+            旧方法为什么不行：从零训练 1.3B 视频世界模型太贵；但原始 Wan2.1 是 text-to-video，不直接吃 MineRL action vector。
+          </p>
+          <p>
+            它怎么改：把每个 chunk 的 per-frame MineRL actions 序列化成短文本 token，例如 <code>forward jump look(up,left)</code>，
+            经过 frozen UMT5-XXL encoder，再走 Wan2.1 原本的 cross-attention pathway。Phase 1 更新约 1.3B Wan2.1 参数；
+            Phase 2 冻结 spatial-temporal backbone，只更新 cross-attention 和 UMT5 action-text adapter，约 280M 参数。
+          </p>
+          <p>
+            为什么有效：它复用大视频模型的视觉先验，把微调压力集中在动作条件通道上，符合 Phase 2 的目标：
+            修动作响应，而不是重学视觉纹理。
+          </p>
+          <p>
+            代价/限制：action-to-text serialization 是工程折中，不一定是最优动作编码；run-length encoding 和自然语言 token
+            可能引入不必要的离散化/语义偏置。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>操作</th>
+                <th>输出</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Phase 1 passive pretraining</td>
+                <td>BASALT FindCave demos，frames/actions</td>
+                <td>VAE 编码，K=3 latent chunks，Wan2.1 diffusion forcing</td>
+                <td>Phase 1 world model checkpoint，选 10k-step checkpoint</td>
+              </tr>
+              <tr>
+                <td>Adversarial rollout</td>
+                <td>VPT-2x 初始化的 \(\pi_\phi\)，MineRL 环境</td>
+                <td>rollout 一个 episode，得到真实轨迹 \(\tau\)</td>
+                <td>真实视频、动作、状态序列</td>
+              </tr>
+              <tr>
+                <td>World-model prediction</td>
+                <td>seed chunks 和未来动作</td>
+                <td>Wan2.1 context window 21 latent frames，DPM 20 steps autoregressive rollout</td>
+                <td>预测 latent/video</td>
+              </tr>
+              <tr>
+                <td>Trajectory scoring</td>
+                <td>真实 rollout 与预测 rollout</td>
+                <td>计算 latent regret、AFS-EPE、progress delta</td>
+                <td><code>score(tau)</code> / PAT priority / PPO terminal reward</td>
+              </tr>
+              <tr>
+                <td>PPO adversary update</td>
+                <td>score terminal reward，reference \(\pi_{\mathrm{ref}}\)</td>
+                <td>PPO clip loss + value + entropy + KL anchor，每 16 episodes 更新</td>
+                <td>更会找模型失败的 adversary</td>
+              </tr>
+              <tr>
+                <td>World-model cycle</td>
+                <td>50% priority-weighted PAT + 50% passive BASALT</td>
+                <td>每 24 adversarial iterations 微调，PAT epochs per cycle=7，steps=[500,1024]</td>
+                <td>更新 action-conditioning 子集，并 rescore PAT buffer</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            推理/评估流程不是用 world model 训练 policy，而是把相同动作序列喂给 Phase 1、VPT-frozen Phase 2、PROWL checkpoint，
+            比较它们预测视频与真实视频的 latent regret、AFS-EPE、LPIPS、SSIM。短 horizon 是 2 seed chunks + 2 predicted chunks；
+            长 horizon 是 18 predicted chunks，到 frame 200 评估。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式/算法逐行讲解</h2>
+
+          <h3>公式 1：diffusion-forcing world model loss</h3>
+          <div class="math-block">
+            \[
+            \begin{aligned}
+            \mathcal{L}_{\mathrm{DF}}
+              &amp;= \sum_i
+              \left\lVert
+                v_{\theta}(z_i^{\sigma_i},\sigma_i,c)
+                -
+                (\epsilon_i-z_i)
+              \right\rVert_2^2 \\
+            z_i^{\sigma_i}
+              &amp;= (1-\sigma_i)z_i+\sigma_i\epsilon_i,
+              \quad \epsilon_i\sim\mathcal{N}(0,I)
+            \end{aligned}
+            \]
+          </div>
+          <p>
+            \(z_i\) 是 frozen VAE latent；\(\sigma_i\) 是该时间步噪声水平；\(c\) 是 action conditioning；
+            \(v_\theta\) 是 DiT 预测的 velocity。history frames 给低噪声，target frames 给高噪声，loss 只作用在 target chunk，
+            所以模型学的是 causal chunk prediction。
+          </p>
+
+          <h3>公式 2：asymmetric min-max objective</h3>
+          <div class="math-block">
+            \[
+            \begin{aligned}
+            \theta^*
+              &amp;= \arg\min_{\theta}
+              (1-r)\,\mathbb{E}_{\tau\sim p_{\mathrm{passive}}}
+                [\mathcal{L}_{\mathrm{FM}}(\tau;\theta)]
+              +
+              r\,\mathbb{E}_{\tau\sim p_B}
+                [\mathcal{L}_{\mathrm{FM}}(\tau;\theta)] \\
+            \phi^*
+              &amp;= \arg\max_{\phi}
+              \mathbb{E}_{\tau\sim\pi_{\phi}}
+                [\operatorname{score}(\tau;\theta)]
+              -
+              c_{\mathrm{kl}}\,
+              \mathbb{E}_{s\sim d^{\pi_{\phi}}}
+                [
+                  \operatorname{KL}(
+                    \pi_{\phi}(\cdot|s)\Vert\pi_{\mathrm{ref}}(\cdot|s)
+                  )
+                ]
+            \end{aligned}
+            \]
+          </div>
+          <p>
+            上面不是一次性 saddle-point 求解，而是 alternating loop：policy 先对当前 frozen-ish world model 找失败；
+            world model 再从 PAT/passive 混合数据中学习。\(r=0.5\) 是 Phase 2 中 PAT 与 passive replay 的混合比例。
+          </p>
+
+          <h3>公式 3：latent regret 与 action-follow score</h3>
+          <div class="math-block">
+            \[
+            \ell_{\mathrm{regret}}(\tau)
+            =
+            \sqrt{
+              \frac{1}{HCN_{\mathrm{lat}}}
+              \sum_{t=S}^{S+H-1}
+              \left\lVert
+                z_t^{\mathrm{pred}}-z_t^{\mathrm{real}}
+              \right\rVert_2^2
+            }
+            \]
+          </div>
+          <div class="math-block">
+            \[
+            \ell_{\mathrm{AFS}}(\tau)
+            =
+            \frac{1}{N\cdot H_{\mathrm{raw}}}
+            \sum_{t=0}^{N-1}
+            \sum_{i=1}^{H_{\mathrm{raw}}}
+            \left\lVert
+              F_{t,i}^{\mathrm{pred}}-F_{t,i}^{\mathrm{real}}
+            \right\rVert_2
+            \]
+          </div>
+          <p>
+            latent regret 在 VAE latent space 看整体预测偏差；AFS 在 decoded pixel frames 上用 SEA-RAFT 光流看动作导致的运动是否对。
+            \(H_{\mathrm{raw}}=480\cdot832\)，\(F_{t,i}\in\mathbb{R}^2\) 是第 \(t\) 对连续帧第 \(i\) 个像素的 optical-flow vector。
+          </p>
+
+          <h3>公式 4：trajectory score / PAT priority</h3>
+          <div class="math-block">
+            \[
+            \operatorname{score}(\tau)
+            =
+            z_B(\ell_{\mathrm{regret}})
+            +
+            \lambda_{\mathrm{AFS}}z_B(\ell_{\mathrm{AFS}})
+            +
+            \Delta\ell_{\mathrm{regret}}
+            \]
+          </div>
+          <p>
+            \(z_B(\cdot)\) 是当前 PAT buffer 内的 z-score normalization；\(\lambda_{\mathrm{AFS}}\) 决定更偏 latent dynamics
+            还是 action-follow motion；\(\Delta\ell_{\mathrm{regret}}\) 是同一轨迹两次 rescore 的 regret 变化。
+            如果模型已经学会某条轨迹，它的 regret 会下降，priority 随之下降。
+          </p>
+
+          <h3>公式 5：PPO loss with KL anchor</h3>
+          <div class="math-block">
+            \[
+            \mathcal{L}_{\mathrm{PPO}}
+            =
+            \mathcal{L}_{\mathrm{clip}}
+            +
+            c_v\mathcal{L}_{\mathrm{value}}
+            -
+            c_e\mathcal{H}(\pi_{\phi})
+            +
+            c_{\mathrm{kl}}\,
+            \mathbb{E}_{s\sim d^{\pi_{\phi}}}
+            [
+              \operatorname{KL}(
+                \pi_{\phi}(\cdot|s)\Vert\pi_{\mathrm{ref}}(\cdot|s)
+              )
+            ]
+            \]
+          </div>
+          <p>
+            这里 PPO 的 reward 是 terminal one-shot score/regret。KL 项是核心安全阀：没有它，policy 会找到高误差但不真实的动作模式。
+            注意 appendix algorithm 里有一处写成 \(\operatorname{KL}(\pi_{\mathrm{ref}}\Vert\pi_{\phi})\)，主文明确说使用 forward KL
+            \(\operatorname{KL}(\pi_{\phi}\Vert\pi_{\mathrm{ref}})\)。我按主文理解。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练与推理细节对齐</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>检查点</th>
+                <th>论文做法</th>
+                <th>不一致/风险</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Diffusion forcing vs autoregressive rollout</td>
+                <td>训练目标在 target chunks 上；评估滚动多个 chunks</td>
+                <td>长 horizon 10.8s 超出直接 adversarial pressure，改进只能解释为局部误差会复利下降</td>
+              </tr>
+              <tr>
+                <td>Passive pretraining vs active Phase 2</td>
+                <td>Phase 1 FindCave passive；Phase 2 PAT + passive 50/50</td>
+                <td>主动轨迹分布变了，必须保留 passive replay 防止遗忘；论文在 FindCave panel 验证了这点</td>
+              </tr>
+              <tr>
+                <td>Reward signal</td>
+                <td>PPO 用 terminal regret/score，不是任务 reward</td>
+                <td>policy 学的是找 world model bug，不是完成 Minecraft 任务；不能把它当下游控制器</td>
+              </tr>
+              <tr>
+                <td>Behavioral anchor</td>
+                <td>\(c_{\mathrm{kl}}\) 约束到 frozen VPT reference</td>
+                <td>太弱 reward hack，太强覆盖不足；这是方法最敏感的调参轴</td>
+              </tr>
+              <tr>
+                <td>Action serialization</td>
+                <td>MineRL action vector 变短文本，经 UMT5 encoder 和 cross-attention</td>
+                <td>动作语义被离散文本化，可能不是最优 action representation</td>
+              </tr>
+              <tr>
+                <td>AFS metric</td>
+                <td>decoded frame 上用 SEA-RAFT optical flow</td>
+                <td>光流本身是外部模型，可能在非 Minecraft/遮挡/快速变化场景有偏差</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            【不确定】主文说 forward KL 是 \(\operatorname{KL}(\pi_{\phi}\Vert\pi_{\mathrm{ref}})\)，Algorithm 1 的伪代码看起来写成
+            \(\operatorname{KL}(\pi_{\mathrm{ref}}\Vert\pi_{\phi})\)。合理猜测：一是算法框 typo；二是实现里用了 Schulman k3
+            estimator，符号写法简化导致方向不清；三是 PPO loss 和诊断 KL 使用方向不同。验证方式是看代码实现里 logprob ratio
+            的具体项，或复现实验时交换 KL 方向看 reward-hacking 频率。
+          </p>
+          <p>
+            【不确定】Phase 2 中 score 作为 PPO terminal reward 时，文中有时说用 score，有时 appendix step 6 写
+            \(r(\tau)=R_{\mathrm{lat}}\)。合理猜测：policy reward 主要用 latent regret，而 PAT priority 用 composite score；
+            或者最终实现用 composite score，伪代码为简化；也可能不同 sweep 用不同 reward/priority。验证方式是检查训练日志中
+            PPO reward 与 buffer priority 的字段定义。
+          </p>
+          <p>
+            【不确定】Table 4 的 steps per cycle 写为 \([500,1024]\)，没有在主文解释两值对应什么。可能是 warmup/late cycles、
+            不同硬件 batch accumulation，或不同 sweep arms 的 update steps。验证方式是看 config 或训练脚本的 cycle schedule。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <p>
+            实验比较三类 checkpoint：Phase 1 WM、matched-compute Phase 2 (VPT-frozen)、PROWL。指标是 latent regret、
+            AFS-EPE、LPIPS，长 horizon 还看 SSIM。作者把 PROWL 分成 broad-exploration 的 lam010
+            \((c_{\mathrm{kl}}=1.0,\lambda_{\mathrm{AFS}}=0.10)\) 和 focused-specialist 的 kl150
+            \((c_{\mathrm{kl}}=1.5,\lambda_{\mathrm{AFS}}=0.25)\) 两个主要 operating points。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>实验</th>
+                <th>结果</th>
+                <th>批判</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Held-out BASALT tasks</td>
+                <td>lam010 在 MakeWaterfall/BuildVillageHouse/CreateVillageAnimalPen 的 300 clips 上全部指标优于两 baseline；Top 10% hardest AFS 从 37.14 降到 29.38</td>
+                <td>held-out tasks 很有价值，但仍都在 BASALT/MineRL 生态内，不等于跨环境泛化</td>
+              </tr>
+              <tr>
+                <td>Cross-buffer adversarial transfer</td>
+                <td>kl150 在 384 off-diagonal PAT trajectories 上，Lat 0.6846、AFS 32.13、LPIPS 0.5344，均优于 VPT-frozen</td>
+                <td>off-diagonal 设计能防 memorization，是论文最干净的实验之一</td>
+              </tr>
+              <tr>
+                <td>FindCave stability</td>
+                <td>kl150 在 Phase 1 distribution 的 held-out FindCave 也优于 baseline，说明 50/50 passive mix 没明显遗忘</td>
+                <td>n=64 偏小，且只有同一个预训练任务</td>
+              </tr>
+              <tr>
+                <td>Long horizon</td>
+                <td>18-chunk rollout 到 10.8s，PROWL kl150 LPIPS 0.6947、SSIM 0.4685，优于 Phase 1 和 VPT-frozen</td>
+                <td>训练压力是短 horizon，长 horizon 只说明局部误差改进能传导，不是长程规划能力证明</td>
+              </tr>
+              <tr>
+                <td>Novel composite modes</td>
+                <td>27 个严格 novel action combinations 上，lam010 相比 Phase 1 改善 Lat 5.5%、AFS 11.5%、LPIPS 3.4%</td>
+                <td>novel mode 定义靠手工 action fingerprint 阈值，阈值合理但仍是人为设计</td>
+              </tr>
+              <tr>
+                <td>Reward hacking analysis</td>
+                <td>\(c_{\mathrm{kl}}=0.5\) 回报高但 KL 和 camera velocity 异常，产生 camera-thrashing artifacts</td>
+                <td>这恰好证明高 prediction error 不是充分信号，KL 约束是必要条件</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            公平性上，matched-compute Phase 2 baseline 很关键：同样 optimizer、passive mixture ratio \(r=0.5\)、update budget，
+            只把 adversarial policy 换成 frozen VPT reference。这把“多训了几步”从“主动发现”里剥离出来，实验设计比较扎实。
+          </p>
+          <p>
+            主要问题也很清楚：所有 sweep arm 是 single seed，作者明确说这是算力权衡；没有跨 MineRL/BASALT 的外部环境；
+            AFS 使用外部 optical-flow model；评价主要是预测指标，不是下游 agent performance。结论应读成“动作条件视频预测更稳”，
+            而不是“已经能当可靠 Minecraft simulator 做所有控制训练”。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 可复现清单</h2>
+          <ul>
+            <li>World model backbone：WanModel causal blockwise，约 1.3B 参数，dim 1536，30 layers，12 heads。</li>
+            <li>FFN/chunk/frame：ffn_dim 8960，chunk_size 3，num_frames 21。</li>
+            <li>VAE compression：\((T,H,W)=(4,8,8)\)，图像分辨率 480 x 832。</li>
+            <li>Action conditioning：MineRL actions 序列化成文本，经 frozen UMT5-XXL，走 Wan2.1 cross-attention。</li>
+            <li>Phase 1：BASALT FindCave passive training；扫描 2k/4k/6k/8k/10k checkpoints，使用 10k step checkpoint。</li>
+            <li>Phase 2 WM fine-tune：只更新 cross-attention + text-embedding adapter，约 280M 参数。</li>
+            <li>WM fine-tune lr：1e-5；batch size 1；bf16；gradient clip 1.0；CFG dropout 0.1。</li>
+            <li>PAT buffer：capacity 256；PAT epochs per cycle 7；PAT:passive replay ratio 0.5:0.5；每 24 adversarial iterations 一个 cycle。</li>
+            <li>PAT priority：\(z(\ell_{\mathrm{regret}})+\lambda_{\mathrm{AFS}}z(\ell_{\mathrm{AFS}})+\beta_{\mathrm{prog}}\Delta\ell_{\mathrm{regret}}\)，\(\lambda_{\mathrm{AFS}}\) 默认 0.25，staleness mixture 0.1。</li>
+            <li>PPO：reference VPT-2x rl-from-early-game-2x frozen；每 16 episodes 更新；epochs/minibatch 4/256；lr 3e-5；clip 0.2；value coef 0.5；entropy coef 0.05；gamma/GAE lambda 0.99/0.95。</li>
+            <li>Rollout/inference：seed chunks/horizon chunks 2/2；max context 21 latent frames；history noise 0.05；CFG scale 1.5；DPM 20 steps；action window 64 frames。</li>
+            <li>Sweep：\(c_{\mathrm{kl}}\in\{0.5,1.0,1.5\}\) at \(\lambda_{\mathrm{AFS}}=0.25\)，以及 \(\lambda_{\mathrm{AFS}}\in\{0.05,0.10\}\) at \(c_{\mathrm{kl}}=1.0\)。</li>
+            <li>硬件：7 x H200，DDP。</li>
+          </ul>
+          <p>
+            论文没写清但复现通常必须补齐：Wan2.1 checkpoint 与 action adapter 初始化细节；MineRL/BASALT 数据预处理和 episode 切片；
+            UMT5 action text 的完整 grammar；PAT priority 中 \(\beta_{\mathrm{prog}}\) 的值；steps per cycle 中 500/1024 的 schedule；
+            PPO reward 到底用 latent regret 还是 composite score；SEA-RAFT 推理分辨率和 flow normalization；多 seed 方差；
+            以及评估 clip 的固定 seed 列表。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 可能的改进方向</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>改动点</th>
+                <th>预期收益</th>
+                <th>风险</th>
+                <th>验证实验</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Adaptive KL schedule</td>
+                <td>在 early phase 鼓励探索，发现 reward hacking 征兆时自动收紧</td>
+                <td>控制器不稳会在探索/保守之间振荡</td>
+                <td>用 camera velocity、KL、buffer regret 做闭环调节，与固定 \(c_{\mathrm{kl}}\) 比较</td>
+              </tr>
+              <tr>
+                <td>Learned action-fidelity critic</td>
+                <td>替代 SEA-RAFT，减少外部光流模型依赖，适配非 Minecraft 场景</td>
+                <td>critic 可能自己被 reward hack</td>
+                <td>训练 flow/action-consistency critic，和 AFS-EPE 在 held-out failures 上相关性对比</td>
+              </tr>
+              <tr>
+                <td>Long-horizon adversarial pressure</td>
+                <td>直接优化 10s+ rollout 的 compounding errors</td>
+                <td>误差更稀疏，policy 更容易找到不可学习 exploit</td>
+                <td>逐步增加 horizon curriculum，观察 long-horizon LPIPS/SSIM 与 reward hacking</td>
+              </tr>
+              <tr>
+                <td>Cross-environment PROWL</td>
+                <td>验证方法是不是 MineRL-specific</td>
+                <td>动作空间/光流/参考 policy 都要重建</td>
+                <td>在机器人 simulator、驾驶或 3D game benchmark 上复现 Phase 2 loop</td>
+              </tr>
+              <tr>
+                <td>Hybrid uncertainty + regret scoring</td>
+                <td>没有真实 rollout 时先用 uncertainty 预筛，再用 regret 精排</td>
+                <td>重新引入 ensemble 成本</td>
+                <td>比较 regret-only、uncertainty-only、hybrid 的 discovered failures 和 compute</td>
+              </tr>
+              <tr>
+                <td>Structured action tokenizer</td>
+                <td>比自然语言动作串更直接地表示连续/离散复合动作</td>
+                <td>失去复用 UMT5 文本通道的便利</td>
+                <td>action text vs learned action tokens vs hybrid cross-attention，比较 AFS 和 novel modes</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 速读备忘卡</h2>
+          <ul>
+            <li>PROWL 是让 RL agent 主动发现 world model 失败轨迹的 adversarial curriculum。</li>
+            <li>目标不是训练下游 policy，而是提高 action-conditioned video world model 的动作响应可靠性。</li>
+            <li>Phase 1 用 BASALT FindCave passive demos 训练 Wan2.1-T2V-1.3B DiT world model。</li>
+            <li>Phase 2 adversary 从 VPT-2x 初始化，reference 也是 frozen VPT-2x。</li>
+            <li>Policy reward/priority 来自 latent regret、AFS optical-flow error 和 learning progress。</li>
+            <li>KL anchor 是必要条件；\(c_{\mathrm{kl}}=0.5\) 会出现 camera-thrashing reward hacking。</li>
+            <li>PAT buffer 容量 256，更新后 rescore，让已经解决的 failures 降权。</li>
+            <li>World model Phase 2 只微调 cross-attention 和 action-text adapter，大约 280M 参数。</li>
+            <li>lam010 更适合 broad exploration 和 novel composite modes；kl150 更适合 hard-case transfer 和 long horizon。</li>
+            <li>matched-compute VPT-frozen baseline 是实验关键，剥离了“多训几步”的影响。</li>
+            <li>最大限制：single seed、只在 MineRL/BASALT、依赖真实环境 rollout 和 SEA-RAFT。</li>
+            <li>一句话记忆：PROWL 是 world model 的红队训练系统，用可学习的失败轨迹替代盲目扩数据。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://prowl.odyssey.ml/PROWL.pdf">PROWL: Prioritized Regret-Driven Optimization for World Model Learning</a>, preprint PDF, 2026-05-08.</li>
+            <li><a href="https://odyssey.ml/introducing-prowl">Introducing PROWL: Learning Through Discovery</a>, Odyssey, 2026-05-12.</li>
+            <li><a href="https://odyssey.ml/research">Odyssey research page</a>.</li>
+            <li><a href="https://arxiv.org/abs/2407.01392">Diffusion Forcing: Next-token Prediction Meets Full-Sequence Diffusion</a>.</li>
+            <li><a href="https://arxiv.org/abs/2107.01969">BASALT: A MineRL Benchmark for Learning from Human Feedback</a>.</li>
+            <li><a href="https://arxiv.org/abs/2206.11795">Video PreTraining (VPT): Learning to Act by Watching Unlabeled Online Videos</a>.</li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="../index.html#paper-reading">回到 Paper Reading</a>
+        <a href="leworldmodel-stable-end-to-end-jepa.html">继续读：LeWorldModel</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>
