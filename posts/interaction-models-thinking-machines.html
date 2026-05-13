@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Thinking Machines Interaction Models 精读：从 200ms micro-turn、多流交互、encoder-free early fusion、后台模型和实时 serving 理解人机协作模型。"
+    >
+    <title>Interaction Models：把实时协作做进模型本体</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260513">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#notes">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading</p>
+          <h1>Interaction Models：把实时协作做进模型本体</h1>
+          <p class="article-dek">
+            这篇精读 Thinking Machines Lab 的技术文章
+            Interaction Models: A Scalable Approach to Human-AI Collaboration。它不是传统论文，
+            而是一份 research preview：主张把音频、视频、文本、工具调用和打断/沉默/同时说话这些交互状态，
+            从外部 harness 搬进模型的原生时间序列里。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.13</span>
+            <span>阅读约 35 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            这篇文章解决的是“高智商 AI 仍然不适合实时协作”的瓶颈：传统模型按回合等待输入、生成输出，无法自然处理打断、
+            同时说话、视觉触发和后台任务；Thinking Machines 的核心招是用 200ms time-aligned micro-turn 把多模态输入输出流
+            编成一个持续交错的序列，并让前台 interaction model 与异步 background model 共享上下文，效果是在交互质量和响应延迟上显著领先实时语音基线，
+            代价是训练/推理系统复杂、长会话上下文爆炸、低延迟部署成本高，而且很多训练细节和内部 benchmark 尚未公开。
+          </p>
+          <p class="insight">
+            我的读法：这不是“又一个语音助手”，而是把 LLM 的接口从 request-response 改成 time-synchronous control loop。
+            如果这条路线成立，未来模型能力不只看 reasoning depth，还要看 presence、timing、interruptibility 和 coordination。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            它所在的问题设定是实时人机协作模型：模型必须在用户说话、沉默、纠正、展示屏幕、移动身体或等待工具结果时保持在线感。
+            传统 chat model 是 turn-based：用户输入完整 turn，模型再生成完整 turn。Thinking Machines 的 interaction model
+            是 time-aligned micro-turn based：每 200ms 处理一次输入流和输出流，沉默、重叠、打断、视觉变化都保留在上下文里。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>系统范式</th>
+                <th>模型看到什么</th>
+                <th>交互由谁决定</th>
+                <th>主要短板</th>
+                <th>本文差异</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Turn-based LLM</td>
+                <td>一段完成的文本/音频转写，再输出一段完整回答</td>
+                <td>外部 UI 或 chat loop</td>
+                <td>不能边听边说，生成时感知冻结</td>
+                <td>改成连续时间流，而不是离散对话轮</td>
+              </tr>
+              <tr>
+                <td>Harness-based realtime</td>
+                <td>ASR/VAD/视觉 encoder/TTS 拼好的中间状态</td>
+                <td>VAD、turn detector、工具编排器</td>
+                <td>规则组件弱于主模型，难支持主动插话和视觉触发</td>
+                <td>把 turn-taking、interjection、simultaneous speech 交给模型学</td>
+              </tr>
+              <tr>
+                <td>Full-duplex voice model</td>
+                <td>音频流，可能支持双向同时说话</td>
+                <td>模型或轻量控制器</td>
+                <td>常偏低延迟，不一定兼顾强智能、多模态和工具</td>
+                <td>同时覆盖音频、视频、文本、工具和后台推理</td>
+              </tr>
+              <tr>
+                <td>Interaction model</td>
+                <td>200ms micro-turn 中的文本、视频 patch、音频特征和历史输出</td>
+                <td>模型本体 + 异步 background model</td>
+                <td>系统复杂，长上下文和低延迟部署难</td>
+                <td>interactivity 与 intelligence 一起 scale</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            和主流 baseline 的关键差异不是“多模态输入更多”，而是时间结构变了。普通模型把现实压扁成一个有序 token 序列；
+            interaction model 仍然用 Transformer 序列，但这个序列由时间对齐的微小输入/输出片段组成，使模型能学习“什么时候该说话”
+            和“什么时候该闭嘴”。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            宏观 pipeline 可以拆成五层：实时多模态采集、200ms micro-turn 编码、前台 interaction model、异步 background model、
+            以及低延迟 streaming serving。前台模型保持 presence，处理即时反馈、插话、翻译、视觉反应；后台模型做长推理、
+            工具调用、搜索和生成 UI，再把结果流式返回给前台模型，由前台模型选择合适时机织回对话。
+          </p>
+          <div class="code-block">
+            <pre><code>Continuous user stream
+  audio[t:t+200ms]    -> dMel -> lightweight audio embedding -> audio tokens A_i
+  video frame/patches -> 40x40 patches -> hMLP              -> visual tokens V_i
+  text events         -> tokenizer                          -> text tokens X_i
+  previous output     -> generated text/audio tokens         -> Y_{i-1}
+
+Micro-turn sequence:
+  S = [X_0, A_0, V_0, Y_0, X_1, A_1, V_1, Y_1, ...]
+
+Foreground interaction model:
+  Transformer(S_{<=i}) -> text logits + audio flow head + control/delegation decisions
+
+Async background model:
+  rich shared context C_i -> search/tool/reasoning/UI work -> streamed result R_j
+
+Coordinator:
+  interaction model observes user-now + R_j -> decide speak / wait / interrupt / weave result</code></pre>
+          </div>
+          <p>
+            关键符号：micro-turn 间隔 Δt = 200ms；第 i 个时间片输入是 m_i = {x_i, a_i, v_i}；
+            历史序列 S_{≤i} 是 interleaved token stream；前台模型输出 y_i，既可包含文本 token，也可包含 200ms 音频输出。
+            原文没有公开维度，但可合理理解为：text token 是离散 ID，audio dMel 是时间频率特征，video 被切成 40×40 patches，
+            统一映射到 Transformer hidden size d_model。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：Time-aligned micro-turn</h3>
+          <p>
+            旧方法为什么不行：turn-based 模型必须等用户说完再处理；模型生成时，新输入通常不会进入上下文，除非外部 interrupt。
+            这导致模型无法自然理解沉默、犹豫、打断、同时说话和视觉变化。外部 VAD/turn detector 能缓解，但它们没有主模型的语义能力。
+          </p>
+          <p>
+            它怎么改：把输入和输出都切成 200ms micro-turn，让模型在同一条序列中持续看到 input_i 和 output_i。
+            人类感知上是并行音视频流，模型实现上仍是单一 interleaved token sequence。
+          </p>
+          <div class="code-block">
+            <pre><code>Turn-based:
+  [user_full_turn_1] -> [model_full_turn_1] -> [user_full_turn_2] -> ...
+
+Micro-turn:
+  [input_0, output_0, input_1, output_1, input_2, output_2, ...]
+  where each input_i/output_i covers about 200ms of real time</code></pre>
+          </div>
+          <p>
+            为什么有效：交互行为本身变成可学习目标。模型不只是预测内容，还能从序列里学习何时 backchannel、何时插话、
+            何时保持沉默、何时边说边听。它把“实时协作”从产品层规则变成模型能力。
+          </p>
+          <p>
+            代价/限制：上下文增长速度极快。每秒 5 个 micro-turn，长会话会快速积累音频、视频和输出 token。
+            推理端也会出现大量小 prefill/small decode，普通 LLM serving 栈不擅长这种形状。
+          </p>
+
+          <h3>创新点 2：Encoder-free early fusion</h3>
+          <p>
+            旧方法为什么不行：很多 omni 系统依赖大型独立 encoder/decoder，比如 ASR、Whisper-like encoder、TTS 模型或视觉 encoder。
+            这会让系统成为多个子模型拼接，交互策略难随主模型 scale，延迟和对齐也复杂。
+          </p>
+          <p>
+            它怎么改：原文说音频以 dMel 进入，经轻量 embedding；图像切成 40×40 patches，经 hMLP 编码；
+            音频解码使用 flow head；这些组件和 Transformer 从头共同训练。换句话说，它不是“先转写再理解”，而是更早地把声音/图像信号并入主模型。
+          </p>
+          <p>
+            为什么有效：模型能直接学到声学细节、时间、语气、视觉事件和语言动作之间的联合结构。比如用户还没说完但语调已经显示在犹豫，
+            或代码画面里 bug 已经出现，模型可以在语义完成前行动。
+          </p>
+          <p>
+            代价/限制：从头共同训练成本很高；如果没有大规模高质量交互数据，early fusion 可能不如成熟 encoder 稳。
+            audio flow head 的质量也会影响自然语音输出，而不仅是文本正确性。
+          </p>
+
+          <h3>创新点 3：Foreground interaction model + background model</h3>
+          <p>
+            旧方法为什么不行：如果所有事情都交给一个大 reasoning model，延迟会太高；如果只用一个低延迟模型，复杂推理、搜索和工具调用能力不足。
+            这也是很多智能 agent 和实时助手之间的张力。
+          </p>
+          <p>
+            它怎么改：前台 interaction model 保持实时在场；遇到长任务时，把完整上下文包交给后台模型异步处理。
+            后台模型的结果不是突然插入，而是流回前台，由前台结合用户当前状态决定何时说、怎么说、是否等待。
+          </p>
+          <p>
+            为什么有效：它把“响应速度”和“深度智能”解耦。前台像主持人，后台像研究员；用户仍然能打断、补充、改变方向，
+            而后台任务不必阻塞整个交互通道。
+          </p>
+          <p>
+            代价/限制：上下文同步和 credit assignment 复杂。前台什么时候委托、委托什么上下文、后台结果什么时候回注，
+            都会影响体验。安全上也更难，因为后台可能在用户改变意图后继续执行旧目标。
+          </p>
+
+          <h3>创新点 4：Streaming-session serving 与 trainer-sampler alignment</h3>
+          <p>
+            旧方法为什么不行：传统 serving 每次请求都做一次小 prefill，频繁分配 KV/cache 和 metadata，延迟开销大。
+            训练和推理若数值不一致，在长流式会话中容易难以 debug。
+          </p>
+          <p>
+            它怎么改：client 每 200ms 发送一个 chunk，server 把 chunk append 到 GPU 上持久序列里，避免反复重建状态。
+            他们还提到 batch-invariant kernels、低延迟通信 kernel、以及 attention 中 Split-KV 的一致累加顺序。
+          </p>
+          <p>
+            为什么有效：实时模型的瓶颈不只是 FLOPs，而是 per-turn overhead 和尾延迟。streaming session 把长会话当成一个持续增长的 GPU-resident sequence，
+            更符合 micro-turn workload。
+          </p>
+          <p>
+            代价/限制：实现强依赖 serving 栈、硬件和 kernel。文章提到 Blackwell 上 NVLS deterministic 通信，
+            这意味着部分稳定性/延迟收益可能依赖特定硬件和基础设施。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <p>
+            原文没有公开完整训练数据配方和 loss，但可以从系统描述推断训练目标至少包含：多模态输入理解、文本输出、
+            音频输出、时间/沉默/打断行为、工具/后台委托，以及安全拒答。推理时则是一个持续在线 loop。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>模型/系统动作</th>
+                <th>输出</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>训练数据构造</td>
+                <td>带时间戳的音频、视频、文本、工具轨迹、安全对话</td>
+                <td>切成 200ms micro-turn，构造交错输入输出序列</td>
+                <td>S = [input_i, output_i] 的训练样本</td>
+              </tr>
+              <tr>
+                <td>前台模型训练</td>
+                <td>micro-turn 序列</td>
+                <td>预测文本 token、音频输出、沉默/说话/委托行为</td>
+                <td>interaction model 参数</td>
+              </tr>
+              <tr>
+                <td>安全训练</td>
+                <td>语音拒答、过拒答、多轮 red-team 数据</td>
+                <td>对齐 speech refusal 与 text refusal 行为</td>
+                <td>更自然但坚定的实时拒答边界</td>
+              </tr>
+              <tr>
+                <td>推理前台 loop</td>
+                <td>每 200ms 的音频/视频/文本 chunk</td>
+                <td>append 到 GPU persistent sequence，生成当前输出 chunk</td>
+                <td>文本/语音/沉默/插话/委托</td>
+              </tr>
+              <tr>
+                <td>后台异步 loop</td>
+                <td>rich context package</td>
+                <td>搜索、工具调用、长推理、生成 UI</td>
+                <td>流式结果 R_j，回到前台模型</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            输入是连续的，不是单次 prompt。输出也不是只有最终 answer，而是包含 timing：现在说、稍后说、保持沉默、边听边说、
+            或把任务交给后台做。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式/算法逐行讲解</h2>
+          <p>
+            原文没有给正式数学公式。下面是我根据系统描述抽象出的 5 个实现级公式/算法；它们不是原文逐字公式，
+            但对应原文的核心机制。
+          </p>
+
+          <h3>公式 1：micro-turn 序列化</h3>
+          <div class="code-block">
+            <pre><code>m_i = {x_i, a_i, v_i},  i = 0, 1, 2, ...
+Δt = 200ms
+
+e_i = EmbedText(x_i) + EmbedAudio(dMel(a_i)) + EmbedVideo(hMLP(Patch40(v_i)))
+
+S_i = [e_0, y_0, e_1, y_1, ..., e_i]
+y_i ~ pθ(· | S_i)</code></pre>
+          </div>
+          <p>
+            m_i 是第 i 个 200ms 片段；x_i 是文本事件，a_i 是音频片段，v_i 是视频帧或帧组。
+            e_i 是多模态 embedding bag 或 token set；y_i 是模型在该 micro-turn 的输出，可以是文本、音频 latent/token、
+            沉默标记或控制动作。实现中 S_i 对应 Transformer KV cache 里的持续上下文。
+          </p>
+
+          <h3>公式 2：实时输出决策</h3>
+          <div class="code-block">
+            <pre><code>pθ(y_i | S_i) = Transformerθ(S_i)
+
+y_i ∈ {speak(text/audio), stay_silent, backchannel, interrupt, delegate, tool_call}</code></pre>
+          </div>
+          <p>
+            传统模型只预测下一个 token；interaction model 的输出空间还隐含交互动作。原文没有说这些动作是否显式 token 化，
+            但从能力看，模型必须学习到“此刻输出什么”和“此刻是否输出”。
+          </p>
+
+          <h3>公式 3：前台-后台异步协调</h3>
+          <div class="code-block">
+            <pre><code>if NeedDeepWork(S_i):
+    C_i = PackContext(S_i, user_goal, visible_state, tool_state)
+    background_job_id = BackgroundModel.submit(C_i)
+
+while job not done:
+    foreground keeps processing S_{i+1}, S_{i+2}, ...
+
+when background emits R_j:
+    S_i ← Append(S_i, R_j)
+    foreground decides Weave(R_j, current_user_state)</code></pre>
+          </div>
+          <p>
+            C_i 不是一个孤立 query，而是 rich context package。R_j 是后台流式结果。关键不是“后台算完就播报”，
+            而是前台模型根据当前用户状态决定插入时机，这避免 abrupt context switch。
+          </p>
+
+          <h3>公式 4：streaming session 的 KV/cache 更新</h3>
+          <div class="code-block">
+            <pre><code>state_0 = InitSession()
+
+for each 200ms chunk c_i:
+    tokens_i = Encode(c_i)
+    state_i = AppendToPersistentKV(state_{i-1}, tokens_i)
+    output_i, state_i = DecodeSmallStep(state_i)</code></pre>
+          </div>
+          <p>
+            普通 API 可能每次请求都重建一段 prompt；streaming session 则把会话保持在 GPU memory 中持续 append。
+            这对应原文说的减少 memory reallocation 和 metadata computation。
+          </p>
+
+          <h3>公式 5：交互 benchmark 的双条件评分</h3>
+          <div class="code-block">
+            <pre><code>score(example) =
+  1[ semantic_match(response, expected_answer)
+     and timing_in_window(t_response, target_window) ]</code></pre>
+          </div>
+          <p>
+            TimeSpeak/CueSpeak 这类任务不是只看语义对不对，也看时机对不对。一个回答内容正确但晚了，仍然失败。
+            这也是 interaction model 和普通 QA model 的核心区别：time is part of the answer。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练与推理细节对齐</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>检查点</th>
+                <th>原文信息</th>
+                <th>训练-推理不一致风险</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>时间粒度</td>
+                <td>200ms micro-turn</td>
+                <td>真实网络 jitter、设备采样率、丢帧会破坏训练中整齐的 200ms 假设</td>
+              </tr>
+              <tr>
+                <td>输入模态</td>
+                <td>audio dMel、video 40×40 patch、text</td>
+                <td>训练数据若更干净，真实麦克风/摄像头噪声会影响主动插话和视觉触发</td>
+              </tr>
+              <tr>
+                <td>输出模态</td>
+                <td>text + audio，audio decoder 用 flow head</td>
+                <td>文本 token loss 与音频自然度/打断时机之间可能冲突</td>
+              </tr>
+              <tr>
+                <td>Teacher forcing</td>
+                <td>未公开</td>
+                <td>如果训练中用 teacher-forced 历史，推理中模型自己的音频/沉默动作会产生 exposure bias</td>
+              </tr>
+              <tr>
+                <td>采样/解码</td>
+                <td>未公开具体温度、语音采样、tool 调度策略</td>
+                <td>低延迟通常限制 beam/search，可能牺牲复杂推理稳定性</td>
+              </tr>
+              <tr>
+                <td>cache/窗口</td>
+                <td>persistent sequence in GPU memory；长会话仍是 future work</td>
+                <td>长时间音视频上下文会让 KV cache 和 attention 成本快速增长</td>
+              </tr>
+              <tr>
+                <td>前台/后台一致性</td>
+                <td>两者共享上下文，后台结果流回前台</td>
+                <td>用户在后台运行期间改变目标时，旧后台结果可能过时或不安全</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            【不确定】原文没有公开 loss。合理猜测有三种：第一，多任务 next-token/next-audio prediction，
+            用真实对话轨迹监督何时说话；第二，加入偏好/RL 或 imitation 数据来学 interrupt/backchannel；
+            第三，工具和后台委托用 synthetic traces 或人工标注轨迹训练。验证方式是等技术报告/模型卡，或看后续是否公开数据 schema、
+            loss ablation 和 action token 定义。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <p>
+            原文实验分两类：公开/半公开的 intelligence + interactivity benchmark，以及为新交互能力设计的内部 benchmark。
+            他们报告 TML-Interaction-Small 是 276B 参数 MoE、12B active；在 FD-bench 和响应延迟上非常强，
+            同时还保持一定音频智能和指令跟随能力。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>指标</th>
+                <th>TML-Interaction-Small</th>
+                <th>对比/说明</th>
+                <th>批判</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>FD-bench V1 latency</td>
+                <td>0.40s</td>
+                <td>比 GPT realtime/Gemini live minimal 等更快</td>
+                <td>真实端到端延迟依赖网络和客户端设备，benchmark 不能覆盖所有场景</td>
+              </tr>
+              <tr>
+                <td>FD-bench V1.5 average</td>
+                <td>77.8</td>
+                <td>明显高于表中多个实时语音 baseline</td>
+                <td>FD-bench 仍主要是 audio interaction，无法完全覆盖视频和工具协作</td>
+              </tr>
+              <tr>
+                <td>FD-bench V3 audio + tools</td>
+                <td>82.8 / 68.0</td>
+                <td>带星号，原文说明需要 reasoning/tool 时启用 background agent</td>
+                <td>与纯前台模型 baseline 比较时，background agent 会带来系统级优势</td>
+              </tr>
+              <tr>
+                <td>Audio MultiChallenge APR</td>
+                <td>43.4</td>
+                <td>高于多种 instant 模型，但低于 thinking high 类设置</td>
+                <td>说明它不是最强 reasoning model，而是在交互/智能之间折中</td>
+              </tr>
+              <tr>
+                <td>TimeSpeak / CueSpeak</td>
+                <td>64.7 / 81.7</td>
+                <td>GPT realtime-2 minimal 分别为 4.3 / 2.9</td>
+                <td>内部 benchmark，数据规模、judge 稳定性和 prompt 泄漏风险未知</td>
+              </tr>
+              <tr>
+                <td>RepCount-A / ProactiveVideoQA / Charades</td>
+                <td>35.4 / 33.5 / 32.4</td>
+                <td>测试视觉触发、计数和 temporal localization</td>
+                <td>绝对分数并不高；ProactiveVideoQA 的 no-response baseline 是 25.0，提升存在但还早期</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            公平性上，表格很有信息量，但要谨慎。第一，一些结果来自不同来源或第三方榜单设置；第二，TML 在若干任务上启用后台 agent，
+            baseline 是否拥有等价 agent/harness 需要逐项确认；第三，内部 benchmark 的定义合理，但还没有公开数据和完整评测脚本。
+          </p>
+          <p>
+            消融方面，原文没有给严格 ablation：没有看到 100ms vs 200ms vs 500ms micro-turn，对 early fusion vs encoder-based，
+            foreground-only vs foreground+background，streaming session on/off 的系统消融。因此结论更像强系统展示，
+            不是已被完整因果拆解的论文。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 可复现清单</h2>
+          <p>
+            目前无法完整复现，因为模型、数据、训练脚本和多数内部 benchmark 没有公开。但如果要复现一个研究版 interaction model，
+            关键清单大概如下。
+          </p>
+          <ul>
+            <li>带时间戳的音频/视频/文本多模态交互数据，必须保留沉默、重叠、打断、backchannel 和视觉事件。</li>
+            <li>统一 micro-turn 切分器：Δt=200ms，并定义缺失模态、静音、无视频帧、用户/模型同时说话时的编码方式。</li>
+            <li>音频前处理：dMel 参数、采样率、窗口长度、hop size、归一化；这些原文没写。</li>
+            <li>视觉前处理：40×40 patches、帧率、patch embedding/hMLP 结构、视频采样策略。</li>
+            <li>Transformer 主干：TML-small 是 276B MoE、12B active，但层数、hidden size、专家数、routing 策略未公开。</li>
+            <li>音频输出 head：flow head 的目标、采样步数、vocoder 或 waveform 重建链路。</li>
+            <li>交互 action schema：speak、silent、interrupt、delegate、tool_call 是否显式 token 化。</li>
+            <li>训练 loss：文本 CE、音频 flow loss、timing/action loss、tool/delegation loss、安全 refusal loss 的权重。</li>
+            <li>serving：GPU-resident persistent sequence、KV append、small prefill/decode 优化、MoE low-latency kernels。</li>
+            <li>评测：FD-bench、Audio MultiChallenge、VoiceBench IFEval、HarmBench，以及 TimeSpeak/CueSpeak/视觉 proactive benchmark。</li>
+          </ul>
+          <p>
+            论文没写但通常必须有的坑点：warmup/learning rate schedule、EMA 或 checkpoint averaging、音频 augmentation、
+            摄像头/麦克风噪声增强、时间戳 jitter augmentation、模态 dropout、打断数据采样比例、长会话 context compression、
+            安全数据里 speech refusal 的语气一致性，以及 LLM judge prompt 和人工校准。
+          </p>
+          <p>
+            【不确定】200ms 是否是最优粒度。合理猜测：100ms 更灵敏但 overhead 更高；200ms 是人类感知和 GPU serving 的折中；
+            500ms 更省但插话和同时翻译变差。验证方式是训练同规模模型或做控制式 fine-tune，报告 latency、FD-bench、TimeSpeak、
+            语音自然度和 GPU utilization。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 可能的改进方向</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>改动点</th>
+                <th>预期收益</th>
+                <th>风险</th>
+                <th>验证实验</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>自适应 micro-turn 长度</td>
+                <td>安静/慢速场景用长 chunk 省算力，打断/翻译场景用短 chunk 降延迟</td>
+                <td>时间编码和 cache 管理更复杂</td>
+                <td>比较固定 200ms 与 adaptive 100-500ms 的 FD-bench、TimeSpeak 和成本</td>
+              </tr>
+              <tr>
+                <td>显式交互 action token</td>
+                <td>更容易控制 silent/backchannel/interrupt/delegate 行为</td>
+                <td>动作标注成本高，可能限制模型自然行为</td>
+                <td>action-token vs implicit-output 的插话准确率和过度打断率消融</td>
+              </tr>
+              <tr>
+                <td>长会话层级记忆</td>
+                <td>缓解连续音视频上下文爆炸，支持小时级协作</td>
+                <td>压缩可能丢掉时机线索和视觉细节</td>
+                <td>长会话任务中比较 full KV、summary memory、event memory 的性能</td>
+              </tr>
+              <tr>
+                <td>后台任务取消/更新协议</td>
+                <td>用户改变意图时避免旧后台结果污染对话</td>
+                <td>需要更强任务状态机和安全审计</td>
+                <td>构造用户频繁改需求的 benchmark，测 stale-result rate</td>
+              </tr>
+              <tr>
+                <td>公开 interactivity benchmark suite</td>
+                <td>让领域从 demo 走向可比较研究</td>
+                <td>LLM judge 和时机窗口可能被模型过拟合</td>
+                <td>发布 TimeSpeak/CueSpeak/visual proactivity 的数据、脚本和 human eval 对照</td>
+              </tr>
+              <tr>
+                <td>端侧/边缘低延迟蒸馏</td>
+                <td>降低网络依赖，提高隐私和稳定性</td>
+                <td>小模型可能失去复杂交互判断和安全能力</td>
+                <td>把 TML-small 蒸馏到小 MoE/edge model，测 interactivity-intelligence frontier</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 速读备忘卡</h2>
+          <ul>
+            <li>Interaction model 的核心是实时协作，不是普通多模态 QA。</li>
+            <li>传统 turn-based 模型在用户输入时等待，在自己输出时感知冻结。</li>
+            <li>Thinking Machines 用 200ms micro-turn 把输入和输出流交错成模型上下文。</li>
+            <li>沉默、打断、同时说话、视觉变化都成为模型可学习的序列事件。</li>
+            <li>系统采用前台 interaction model + 异步 background model，兼顾低延迟和深推理。</li>
+            <li>音频用 dMel + lightweight embedding，视频用 40×40 patches + hMLP，音频输出用 flow head。</li>
+            <li>Serving 关键是 streaming session：把 200ms chunk append 到 GPU 上的 persistent sequence。</li>
+            <li>TML-Interaction-Small 是 276B MoE、12B active，主打交互质量和响应速度。</li>
+            <li>FD-bench 和内部 TimeSpeak/CueSpeak/visual proactive benchmarks 展示了明显交互优势。</li>
+            <li>最大不确定性：训练数据、loss、action token、消融、内部 benchmark 和真实部署成本都未完全公开。</li>
+            <li>这条路线的长期意义是：AI 能力评估会从“答得对不对”扩展到“何时答、是否该打断、是否保持在场”。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://thinkingmachines.ai/blog/interaction-models/">Interaction Models: A Scalable Approach to Human-AI Collaboration</a>, Thinking Machines Lab, 2026-05-11.</li>
+            <li><a href="https://arxiv.org/abs/2407.15835">dMel: Speech Tokenization made Simple</a>.</li>
+            <li><a href="https://arxiv.org/abs/2210.02747">Flow Matching for Generative Modeling</a>.</li>
+            <li><a href="https://github.com/sgl-project/sglang">SGLang</a>，原文提到其 streaming sessions 相关 upstream work。</li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="../index.html#paper-reading">回到 Paper Reading</a>
+        <a href="learning-to-foresee-effopd.html">继续读：Learning to Foresee / EffOPD</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>
