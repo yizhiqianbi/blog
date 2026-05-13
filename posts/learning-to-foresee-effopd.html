@@ -1,0 +1,602 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Learning to Foresee / EffOPD 论文精读：从参数动态解释 On-Policy Distillation 为什么高效，并分析 EffOPD 的训练加速机制。"
+    >
+    <title>Learning to Foresee：OPD 为什么能提前看见最终方向</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260513">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#notes">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#notes">← 返回文章列表</a>
+          <p class="kicker">Paper Reading</p>
+          <h1>Learning to Foresee：OPD 为什么能提前看见最终方向</h1>
+          <p class="article-dek">
+            这篇精读 arXiv:2605.11739，题为 Learning to Foresee: Unveiling the Unlocking Efficiency of
+            On-Policy Distillation。它把 OPD 的高效性从“teacher 给 dense signal”推进到参数动态层面：
+            哪些模块被更新、哪些方向被锁定，以及怎么利用这种稳定方向做训练加速。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.13</span>
+            <span>阅读约 35 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            这篇论文解决的是“大模型 post-training 里 OPD 为什么比 RL 更省样本/步数”的解释空缺：作者发现 OPD
+            会很早把更新集中到高收益模块和低秩主方向上，于是提出 EffOPD，直接沿早期稳定更新方向做参数外推，
+            平均约 3 倍训练加速，代价是依赖 OPD 方向稳定、需要轻量验证，并且不包含 teacher 训练成本。
+          </p>
+          <p class="insight">
+            我的读法：这篇真正有价值的点不是 EffOPD 这个外推技巧本身，而是“distillation 的优势可以在参数空间里被看见”。
+            这会影响之后怎么设计 OPD、RLVR acceleration、checkpoint interpolation 和 post-training diagnostics。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            任务范式是大语言模型的 post-training，重点是 reasoning/code/math 能力。论文比较两个训练范式：
+            Reinforcement Learning from Verifiable Rewards，也就是 RLVR/PPO/GRPO/DAPO 这一类；以及 On-Policy
+            Distillation，也就是 student 自己采样轨迹，再用 teacher 在这些 on-policy 轨迹上提供 token-level
+            dense supervision。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>范式</th>
+                <th>输入</th>
+                <th>监督信号</th>
+                <th>主要瓶颈</th>
+                <th>本文关注点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>RLVR</td>
+                <td>prompt x，student 生成 y</td>
+                <td>最终答案/单测等 sparse reward，外加 KL 约束</td>
+                <td>奖励稀疏、credit assignment 难、梯度噪声大</td>
+                <td>为何 RL 更新更分散、更容易积累低收益参数变化</td>
+              </tr>
+              <tr>
+                <td>OPD</td>
+                <td>prompt x，student 生成 y</td>
+                <td>teacher 对同一 student trajectory 的 token-level 分布</td>
+                <td>需要合适 teacher，且通常仍要多轮 rollout 和 teacher logprob</td>
+                <td>为何 OPD 早期就锁定接近最终模型的更新方向</td>
+              </tr>
+              <tr>
+                <td>EffOPD</td>
+                <td>OPD 训练中的若干 checkpoint</td>
+                <td>小验证集判断外推参数是否仍有效</td>
+                <td>验证噪声、外推过度、方向不稳定时会退化</td>
+                <td>把 OPD 的早期方向稳定性变成参数外推加速</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            与主流 baseline 的关键差异是：AlphaOPD/ExOPD 更像固定规则的外推或动态预测，而 EffOPD 用一个很小的验证集
+            在每个指数间隔 checkpoint 上自适应选择外推尺度。与 RL acceleration 不同，本文不试图改 PPO/GRPO 的 reward
+            或 advantage，而是利用 OPD 已经形成的参数方向稳定性。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            宏观看，论文分两段。第一段是 diagnosis：把 RL 和 OPD 从同一 base model 出发后的参数差
+            ΔW = W_trained - W_base 拿出来，对模块、层、奇异谱、子空间轨迹和早期 checkpoint 做分析。
+            第二段是 acceleration：如果 OPD 早期方向已经接近最终方向，那就沿当前 checkpoint 间的位移方向多走几步，
+            再用小验证集筛掉过头的外推。
+          </p>
+          <div class="code-block">
+            <pre><code>Base model W0
+  ├─ RL training:  W_RL(t), sparse reward, larger/noisier update
+  └─ OPD training: W_OPD(t), teacher dense token signal
+
+Analysis pipeline:
+  ΔW(t) = W(t) - W0
+  → module/layer norm analysis
+  → sliding-window intervention on layers
+  → SVD per weight matrix: ΔW = UΣV^T
+  → top-k / bottom-k subspace intervention
+  → early-vs-final subspace cosine and norm scaling
+
+EffOPD pipeline:
+  at t = 2^n:
+    Δ_n = W_{2^n} - W_{2^{n-1}}
+    candidates W~_{n,k} = W_{2^n} + 2kΔ_n, k = 1..5
+    validate on D_v with 50 examples
+    accept while validation does not degrade, else stop
+  output: same architecture student model, no inference-time module</code></pre>
+          </div>
+          <p>
+            关键张量可以这样理解：对一个 Transformer 里的线性权重矩阵，ΔW 通常是 m × n，比如 attention projection
+            或 MLP up/gate/down matrix。对 batch B、序列长度 T、词表 V，OPD 的 teacher/student logits 是
+            [B, T, V]，但作者的核心分析最后落在每个权重矩阵的 ΔW 上，而不是 token logits 上。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：Functional Redundancy Avoidance</h3>
+          <p>
+            旧方法的解释停在优化层面：OPD 有 dense supervision，所以更稳定。但这解释不了参数层面为什么同样训练后，
+            OPD 用更小的参数位移就能换来类似甚至更高的 reasoning gain。作者先把最终更新方向固定为 ΔW，再缩放成
+            W_base + αΔW，发现同样 norm budget 下 OPD 的收益更高。
+          </p>
+          <p>
+            它怎么改：作者按 embedding、attention、MLP、layer window 拆开参数更新，并做 intervention。
+            embedding 替换回 base 基本不影响 reasoning；middle-layer MLP 的局部更新最有贡献；RL 在低收益区域积累了更大
+            update norm，而 OPD 更早抑制这些低 marginal utility 的更新。
+          </p>
+          <p>
+            为什么有效：OPD 的 teacher residual 是 dense token signal，它会把梯度集中到真正能缩小 teacher-student 行为差异的模块。
+            RL 的 sparse reward 更容易把 credit spread 到很多相关性弱的参数区域。机制上，这相当于 OPD 有一个更清楚的
+            “模块分配预算”：少改 embedding 和边缘层，多改中间 MLP。
+          </p>
+          <p>
+            代价/限制：这个结论高度依赖 intervention 设计和评测任务。如果 reasoning 的关键能力在别的模块，比如长上下文检索依赖 attention，
+            或者 teacher/student 架构差异很大，middle-layer MLP dominance 未必保持。SVD/窗口替换也很费计算，不适合每次训练都完整跑。
+          </p>
+
+          <h3>创新点 2：Early Low-Rank Lock-in</h3>
+          <p>
+            旧方法的问题是只看 loss curve 或 accuracy curve，看不到“方向是否已经对了”。作者把每个 ΔW 做 SVD，
+            发现 OPD 比 RL 更低秩：例如 8B 设置里，OPD 的 top-1% subspace norm ratio 高于 RL，effective rank 更低。
+            这说明 OPD 的更新能量更集中。
+          </p>
+          <p>
+            它怎么改：作者分别保留 Top-k% singular components 和 Bottom-k% singular components，再把这些低秩更新加回 base model。
+            Top-k 主子空间能恢复绝大部分 reasoning performance；tail 子空间贡献低，RL 的 tail norm 更大但收益有限。
+            之后作者又比较早期 checkpoint 的 top-k subspace 与最终 checkpoint 的 subspace cosine，发现 OPD 在训练早期就对齐最终方向。
+          </p>
+          <p>
+            为什么有效：dense teacher signal 让更新不需要在高维参数空间到处探索，它会很快落到少数高收益方向上。
+            后续 OPD 更像是沿这些方向增加 magnitude，而不是不断改变方向。论文把这个叫 foresight。
+          </p>
+          <p>
+            代价/限制：低秩 lock-in 是经验观察加局部二次近似解释，不是全局保证。对于更长训练、分布漂移、跨家族 teacher，
+            早期方向可能不稳定。另一个限制是 SVD 只对每个矩阵局部分析，不等同于整个网络函数空间的全局低维结构。
+          </p>
+
+          <h3>创新点 3：EffOPD 的方向外推</h3>
+          <p>
+            旧加速方法的问题是固定外推尺度容易过冲，不同模型/任务/阶段的安全步长不同。EffOPD 的设计很朴素：
+            在 t = 2^n 的 checkpoint 上，用最近两个指数 checkpoint 的参数位移作为局部方向，生成 5 个外推候选，
+            再用 50 条样本验证，能涨就接受，不能涨就停止。
+          </p>
+          <p>
+            为什么有效：如果 OPD 的方向早已接近最终方向，外推就是把后续若干训练步的 magnitude growth 提前做掉。
+            小验证集的作用不是提供精确监督，而是做一个 guardrail，判断“沿这条方向再走是否仍然靠谱”。
+          </p>
+          <p>
+            代价/限制：需要频繁保存和加载 checkpoint，计算参数差并做候选验证；对 30B+ 模型会有 I/O 和显存压力。
+            如果验证集太小或太偏，可能接受坏外推；如果 teacher-student pattern 不兼容，EffOPD 会频繁退化成 vanilla OPD。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <p>
+            训练输入包括 prompt 数据集 D、base student W0、teacher π*，以及 OPD 的 rollout/logprob 配置。
+            每个 OPD step 先让 student πθ 生成自己的回答 y，然后 teacher 对这些 student-generated contexts 给出 token
+            分布或 logprob，student 最小化和 teacher 的 reverse KL。EffOPD 在 OPD 训练过程中插入参数外推搜索，
+            不改变模型结构。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>操作</th>
+                <th>输出</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>OPD rollout</td>
+                <td>prompt x，student πθ</td>
+                <td>student 采样 y = (y1...yT)，形成 on-policy context c_t = (x, y&lt;t)</td>
+                <td>student trajectory</td>
+              </tr>
+              <tr>
+                <td>Teacher scoring</td>
+                <td>同一 trajectory，teacher π*</td>
+                <td>计算 teacher 在每个 c_t 上对 y_t 或词表分布的 logprob</td>
+                <td>dense token-level supervision</td>
+              </tr>
+              <tr>
+                <td>OPD update</td>
+                <td>student logprob、teacher logprob</td>
+                <td>优化 reverse-KL 近似 loss，更新 θ</td>
+                <td>W_t</td>
+              </tr>
+              <tr>
+                <td>EffOPD search</td>
+                <td>W_{2^n}、W_{2^{n-1}}、D_v</td>
+                <td>沿 Δ_n 外推多个候选，用小验证集逐个接受或停止</td>
+                <td>W_{2^n}^{EffOPD}</td>
+              </tr>
+              <tr>
+                <td>推理</td>
+                <td>最终 student</td>
+                <td>普通 autoregressive decoding</td>
+                <td>回答文本；无 teacher、无额外模块、无特殊 cache</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            这点很重要：EffOPD 不是 inference acceleration。它只减少 post-training 所需训练步数和样本量，
+            推理时模型就是普通 student checkpoint。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式/算法逐行讲解</h2>
+
+          <h3>公式 1：RLVR 目标和梯度</h3>
+          <div class="code-block">
+            <pre><code>J_RL(θ) = max E_{x~D, y~πθ}[ r(x, y) - β KL(πθ || π_ref) ]
+
+∇θ J_RL = E[ Σ_t A_t ∇θ log πθ(y_t | x, y_{&lt;t}) ]</code></pre>
+          </div>
+          <p>
+            x 是题目，y 是当前 policy 采样的完整回答，r(x,y) 是最终奖励，比如答案正确或代码通过单测。
+            β KL 项限制模型不要离 reference 太远。A_t 是 token t 的 advantage；实现里会由 PPO/GRPO/DAPO
+            估计。张量上，logprob 通常是 [B,T]，advantage 也是 [B,T] 或可 broadcast 到 [B,T]。
+          </p>
+          <p>
+            关键问题：在 RLVR 中，reward 常在序列末尾才知道，A_t 对早期 token 的 credit assignment 噪声很大。
+            这为后文解释 RL update 更分散埋下伏笔。
+          </p>
+
+          <h3>公式 2：OPD 目标和 token-level 近似梯度</h3>
+          <div class="code-block">
+            <pre><code>J_OPD(θ) = min E_{x~D, y~πθ}[ KL( πθ(y|x) || π*(y|x) ) ]
+
+∇θ J_OPD ≈ E[ Σ_t ( log πθ(y_t|c_t) - log π*(y_t|c_t) )
+                  ∇θ log πθ(y_t|c_t) ]</code></pre>
+          </div>
+          <p>
+            π* 是 teacher，c_t = (x, y&lt;t) 是 student 自己生成的上下文。它仍是 on-policy，因为 y 来自当前 student；
+            但 supervision 是 dense 的，因为每个 token 都能和 teacher 分布比较。实现中通常会保存 student rollout，
+            再由 teacher/reference worker 计算 logprob。对应张量是 generated token ids [B,T]、student logprob [B,T]、
+            teacher logprob [B,T]，或者更完整的 logits [B,T,V]。
+          </p>
+          <p>
+            这条公式是全文机制解释的入口：teacher residual 给了每个 token 更直接的方向，因此 OPD 的参数更新更稳定。
+          </p>
+
+          <h3>公式 3：SVD 和低秩能量指标</h3>
+          <div class="code-block">
+            <pre><code>ΔW = UΣV^T,  Σ = diag(σ1, σ2, ..., σr)
+
+spectral_ratio = σ1 / sqrt(Σ_j σ_j^2)
+
+effective_rank = exp( -Σ_i σbar_i log σbar_i )
+where σbar_i = σ_i / Σ_j σ_j
+
+R_top1% = sqrt( Σ_{i=1}^k σ_i^2 / Σ_{j=1}^r σ_j^2 )
+where k = ceil(r / 100)</code></pre>
+          </div>
+          <p>
+            ΔW 是某个 weight matrix 的训练前后差值，例如 MLP up projection 的 [d_ff, d_model]。
+            U/V 是左右奇异向量，σ_i 是每个方向上的能量。spectral ratio 越高，说明最强方向越占主导；
+            effective rank 越低，说明能量越集中；R_top1% 越高，说明 1% 的主方向吃掉了更多更新能量。
+          </p>
+          <p>
+            论文表 1 的核心发现是：跨 1.5B/4B/8B/14B，OPD 的低秩集中度稳定强于 RL。
+            例如 8B 上 OPD 的 top-1% norm ratio 是 94.7%，RL 是 88.5%；effective rank OPD 更低。
+          </p>
+
+          <h3>公式 4：EffOPD 外推算法</h3>
+          <div class="code-block">
+            <pre><code>At checkpoint t = 2^n:
+  Δ_n = W_{2^n} - W_{2^{n-1}}
+
+For k = 1..5:
+  W~_{n,k} = W_{2^n} + 2k Δ_n
+
+Initialize:
+  W_acc = W_{2^n}
+  v_acc = V_Dv(W_{2^n})
+
+Sequential accept:
+  if V_Dv(W~_{n,k}) >= v_acc:
+      W_acc = W~_{n,k}
+      v_acc = V_Dv(W~_{n,k})
+  else:
+      stop
+
+Return:
+  W_{2^n}^{EffOPD} = W_acc</code></pre>
+          </div>
+          <p>
+            这里 W_t 是第 t 个 OPD checkpoint 的全模型参数。Δ_n 是两个指数 checkpoint 之间的局部更新方向。
+            2k 是外推尺度；论文最多尝试 5 个 candidate。D_v 是从训练集中随机抽的 50 条验证样本，
+            V_Dv 是在这个小集合上的验证函数。逐个接受的机制使 EffOPD 具备 fallback：如果第一个外推都不行，
+            它就退化成 vanilla OPD。
+          </p>
+
+          <h3>公式 5：局部二次视角</h3>
+          <div class="code-block">
+            <pre><code>Linearize logits:
+  zθ(c) ≈ z0(c) + J_c Δθ
+
+Teacher residual:
+  r_c = z*(c) - z0(c)
+
+Local OPD objective:
+  L(Δθ) ≈ 1/2 E_c[(J_cΔθ - r_c)^T F_c (J_cΔθ - r_c)]
+
+Let:
+  A = E_c[J_c^T F_c J_c]
+  b = E_c[J_c^T F_c r_c]
+
+Then:
+  L(Δθ) = 1/2 Δθ^T A Δθ - b^T Δθ + const
+  Δθ_s = Σ_i [1 - (1 - ηλ_i)^s] β_i / λ_i · u_i</code></pre>
+          </div>
+          <p>
+            c 是 token context，zθ(c) 是 vocab logits，维度 R^V。J_c 是 logits 对参数的 Jacobian，
+            维度近似 [V, dim(θ)]。F_c 是 softmax 分布的 Fisher/Hessian 近似，维度 [V,V]。
+            A 是局部曲率，b 是 teacher residual 投影回参数空间后的驱动力。
+          </p>
+          <p>
+            直觉是：如果 b 主要落在 A 的 top-k eigenspace，而且有 spectral gap，那么梯度下降从早期就会被限制在少数方向。
+            这给 Early Low-Rank Lock-in 一个局部解释。模块层面，如果某个模块的 b_m 近似 0，且跨模块耦合不强，
+            那该模块更新也会被抑制，这解释 Functional Redundancy Avoidance。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练与推理细节对齐</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>检查项</th>
+                <th>论文做法</th>
+                <th>潜在不一致/风险</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>on-policy 数据</td>
+                <td>student 自己采样 y，teacher 只在 student trajectory 上评分</td>
+                <td>比离线蒸馏少 exposure bias，但只覆盖 student 到过的 context</td>
+              </tr>
+              <tr>
+                <td>teacher forcing</td>
+                <td>teacher 对 student 生成的前缀和 token 计算 logprob</td>
+                <td>训练 loss 固定在已采样 token 上，不能直接监督未采样分支</td>
+              </tr>
+              <tr>
+                <td>采样/解码</td>
+                <td>OPD 命令里 rollout temperature=1.0、top_p=1.0、n=1</td>
+                <td>推理 benchmark 的采样次数和温度若不同，会影响 accuracy 对齐</td>
+              </tr>
+              <tr>
+                <td>cache/窗口</td>
+                <td>推理无新增 cache；训练最大 prompt 2048，response 16384</td>
+                <td>长响应训练很吃显存，teacher logprob 成本高</td>
+              </tr>
+              <tr>
+                <td>EffOPD 验证</td>
+                <td>D_v 只取 50 条样本，用于外推接受/拒绝</td>
+                <td>小验证集可能噪声大；不同难度据称影响不大，但仍可能任务相关</td>
+              </tr>
+              <tr>
+                <td>训练加速口径</td>
+                <td>比较 OPD/EffOPD 训练步和 wall-clock</td>
+                <td>不计入 RL teacher 的生成/训练成本，不能解释端到端从 base 到 teacher 再到 student 的总成本</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            【不确定】论文没有完全展开 V_Dv 的实现细节。合理猜测有三种：一是直接跑 D_v 的 answer accuracy；
+            二是用 teacher/student KL 或 logprob proxy；三是沿用训练框架里的 validation reward。
+            验证方式是看 EffOPD 代码中 iterative_test 的 evaluator，确认它究竟调用 reward manager、teacher KL 还是 benchmark scorer。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <p>
+            实验覆盖两类问题：第一类是解释性实验，比较 RL 和 OPD 的参数更新效率、模块贡献和低秩结构；
+            第二类是方法实验，比较 EffOPD 与 Vanilla OPD、AlphaOPD、ExOPD 在 code/math benchmark 上的收敛速度。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>实验块</th>
+                <th>设置</th>
+                <th>结论</th>
+                <th>批判点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>参数 norm scaling</td>
+                <td>W_base + αΔW，同 norm 比 RL/OPD</td>
+                <td>OPD 同等 norm 下 reasoning gain 更高</td>
+                <td>ΔW 来自不同目标函数，不能完全等价为公平优化比较</td>
+              </tr>
+              <tr>
+                <td>模块/滑窗 intervention</td>
+                <td>替换 embedding，或在 layer window 注入 MLP/Attn 更新</td>
+                <td>embedding 贡献小，中间 MLP 更关键，RL 低收益区域更新更大</td>
+                <td>窗口宽度 17 层是设计选择；其他模型结构可能不同</td>
+              </tr>
+              <tr>
+                <td>SVD 子空间</td>
+                <td>Top-k / Bottom-k singular components 加回 base</td>
+                <td>Top subspace 承载主要 performance，OPD 更低秩更高质</td>
+                <td>每个矩阵独立 SVD，不能直接说明跨层组合的全局最优性</td>
+              </tr>
+              <tr>
+                <td>早期方向对齐</td>
+                <td>比较早期与最终 top-k subspace cosine，做早期 norm scaling</td>
+                <td>OPD 10% checkpoint 经 norm scaling 可恢复约 80% final performance</td>
+                <td>这是 intervention，不等于真实训练能无损跳到该点</td>
+              </tr>
+              <tr>
+                <td>EffOPD 主结果</td>
+                <td>1.5B/4B/14B/32B，Eurus-RL-Code、DeepMath-103K，Codeforces/Taco/AIME/MINERVA/GPQA</td>
+                <td>通常 10 步左右接近收敛，vanilla OPD 约 30-40 步，平均约 3 倍加速</td>
+                <td>图上趋势强，但缺少更多 seed 方差表；部分模型/teacher 未完全开源</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            公平性上，EffOPD 与 OPD 系 baseline 的比较相对公平，因为它们共享 teacher 和训练数据。
+            但“OPD 比 RL 更高效”的表述要小心：如果 teacher 是 RL model，那么 OPD 的训练效率没有包括 teacher
+            本身获得能力的成本。更准确的说法是：给定一个能力对齐 teacher，OPD 把能力迁移到 student 时更参数高效。
+          </p>
+          <p>
+            隐藏 confound 主要有三个。第一，teacher 和 student 多数来自同一模型家族，这会增强 pattern alignment。
+            第二，reasoning benchmark 与训练数据可能存在风格相关性，尤其 DeepMath/AIME/MATH 系列。第三，
+            论文主要评估 accuracy/steps/time，没有系统评估外推后模型的安全性、格式稳定性、长尾任务和多轮对话退化。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 可复现清单</h2>
+          <p>
+            论文和代码仓库已经给出不少关键配置。复现时最重要的不是公式，而是训练系统能否稳定跑 student rollout、
+            teacher logprob、FSDP checkpoint、全模型参数外推和轻量验证。
+          </p>
+          <ul>
+            <li>模型：Qwen2.5/Qwen3 系列，规模覆盖 1.5B、4B、8B、14B、32B；teacher 通常是同 base 的 RL-tuned model。</li>
+            <li>训练数据：Eurus-RL-Code、DeepMath-103K；附录也提到 MATH-12K 等 RLVR 设置。</li>
+            <li>评测：Codeforces、Taco、AIME24、AIME25、AIME26、MINERVA、GPQA、MATH500。</li>
+            <li>OPD 长度：max prompt 2048，max response 16384，总 budget 18432。</li>
+            <li>OPD batch：train batch size 1024，rollout n=1，temperature 1.0，top_p 1.0。</li>
+            <li>优化：lr 1e-6，gradient checkpointing，remove padding，FSDP；命令里 lr_warmup_steps_ratio=0.0。</li>
+            <li>验证：val sampling n=32；EffOPD 用约 50 条样本做 lightweight validation。</li>
+            <li>EffOPD 开关：代码仓库 README 里给出 enable_iterative_test=True、max_test_iterations=5、iterative_test_files=xxx.parquet。</li>
+            <li>checkpoint：论文设置 save_freq=2、test_freq=2；EffOPD 需要在指数 checkpoint 计算 W_{2^n} - W_{2^{n-1}}。</li>
+            <li>分析：SVD 应该按矩阵做，不要对全模型拼接后硬做；ΔW 建议用 fp32 计算，否则小奇异值和 norm ratio 会不稳。</li>
+          </ul>
+          <p>
+            论文没完全写清但复现通常必须决定的细节：随机种子和多 seed 方差；D_v 是否固定；验证时 decoding 参数；
+            teacher logprob 是否缓存；checkpoint interpolation 是否包含 optimizer state；外推后 optimizer momentum/Adam states
+            如何处理；SVD 是否排除 bias/norm/embedding；benchmark pass@k 或 majority vote 的采样设置。
+          </p>
+          <p>
+            【不确定】外推后 optimizer state 的处理最关键。合理猜测有三种：直接保留原 optimizer state；重置 optimizer state；
+            或同步外推一份 optimizer moment。验证方式是查 ray_trainer/fsdp_workers 中应用外推参数后是否同时改 optimizer state。
+            如果只改 weights 不改 Adam moments，下一步训练可能出现短暂不一致，但论文结果说明至少在其实验里可控。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 可能的改进方向</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>改动点</th>
+                <th>预期收益</th>
+                <th>风险</th>
+                <th>验证实验</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Layer-wise / module-wise extrapolation scale</td>
+                <td>不同层方向稳定程度不同，可避免对低置信模块过推</td>
+                <td>超参变多，验证成本上升</td>
+                <td>按 MLP/Attn/layer group 学或搜索 α，比较外推接受率和最终 accuracy</td>
+              </tr>
+              <tr>
+                <td>用 subspace confidence 决定是否外推</td>
+                <td>当 early low-rank lock-in 不明显时自动保守</td>
+                <td>SVD 额外成本高</td>
+                <td>用 top-k energy ratio / early-final proxy 预测外推成功率</td>
+              </tr>
+              <tr>
+                <td>更稳的 D_v 构造</td>
+                <td>降低 50 条样本带来的验证噪声</td>
+                <td>如果 D_v 太难或太固定，会过拟合外推选择</td>
+                <td>比较 random、stratified、hard-only、teacher-disagreement D_v</td>
+              </tr>
+              <tr>
+                <td>外推 optimizer state</td>
+                <td>减小 weights 外推后与 Adam moments 不匹配的问题</td>
+                <td>实现复杂，可能引入不稳定</td>
+                <td>weights-only vs moments-scaled vs reset-moments 的短期 loss spike 对比</td>
+              </tr>
+              <tr>
+                <td>跨家族 teacher/student 测试</td>
+                <td>验证 foresight 是否依赖 pattern alignment</td>
+                <td>可能明显失败，削弱通用性</td>
+                <td>Qwen student + 非 Qwen teacher；比较 subspace cosine、KL、外推成功率</td>
+              </tr>
+              <tr>
+                <td>端到端 compute accounting</td>
+                <td>让“训练效率”结论更工程可信</td>
+                <td>OPD 迁移优势会被 teacher 成本稀释</td>
+                <td>报告 teacher training + OPD/EffOPD 总 GPU hours，与直接 RLVR 对比</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 速读备忘卡</h2>
+          <ul>
+            <li>这篇论文解释 OPD 为什么高效：不是只说 dense supervision，而是看参数更新动态。</li>
+            <li>核心概念是 foresight：OPD 早期就知道该改哪些模块、往哪些方向改。</li>
+            <li>Property 1 是 Functional Redundancy Avoidance：OPD 抑制低收益模块更新，集中改中间层 MLP 等关键区域。</li>
+            <li>Property 2 是 Early Low-Rank Lock-in：OPD 更新能量集中到少数主奇异方向，并且早期对齐最终方向。</li>
+            <li>RL 的 sparse reward 让梯度更噪、更分散，tail directions 的 norm 大但 marginal utility 低。</li>
+            <li>Top-k SVD 子空间能恢复大部分 reasoning performance；bottom-k tail 子空间贡献有限。</li>
+            <li>OPD 10% checkpoint 经过 norm scaling 后能恢复约 80% final performance，说明方向早就成型，差的是 magnitude。</li>
+            <li>EffOPD 在 t=2^n checkpoint 沿 Δ_n = W_{2^n}-W_{2^{n-1}} 外推，并用小验证集逐个接受候选。</li>
+            <li>EffOPD 平均约 3 倍加速，推理时没有额外模块，本质是 training-time weight extrapolation。</li>
+            <li>最大风险：teacher/student pattern alignment、验证集噪声、optimizer state、以及不计 teacher 成本的效率口径。</li>
+            <li>工程上最值得偷的是这个范式：先诊断参数方向是否稳定，再决定能不能安全外推训练。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://arxiv.org/abs/2605.11739">Learning to Foresee: Unveiling the Unlocking Efficiency of On-Policy Distillation</a>, arXiv:2605.11739, 2026-05-12.</li>
+            <li><a href="https://arxiv.org/pdf/2605.11739">论文 PDF</a>.</li>
+            <li><a href="https://github.com/caiyuchen-ustc/EffOPD">EffOPD 官方代码仓库</a>.</li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="../index.html#notes">回到文章列表</a>
+        <a href="ai-game-world-models.html">继续读：AI Game World Models</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>
