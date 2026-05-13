@@ -10,7 +10,7 @@
     <title>PROWL：让 RL agent 专门找世界模型短板</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
-    <link rel="stylesheet" href="../styles.css?v=20260513b">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
     <script defer src="../assets/article.js?v=20260513"></script>
@@ -31,9 +31,8 @@
           <p class="kicker">Paper Reading</p>
           <h1>PROWL：让 RL agent 专门找世界模型短板</h1>
           <p class="article-dek">
-            精读 PROWL: Prioritized Regret-Driven Optimization for World Model Learning。
-            这篇把世界模型训练从“更多 passive 数据”推进到“主动找模型失败”：让一个 KL 约束的 VPT agent
-            在 MineRL 里专门搜索世界模型预测错、但仍接近真实玩家行为的轨迹，再把这些轨迹变成优先级课程。
+            核心：这不是新 world model backbone，而是一个训练系统。一个 KL 约束的 VPT agent
+            在真实 MineRL 环境里找世界模型预测错的轨迹，PAT buffer 排序这些失败，再反过来训练 world model。
           </p>
           <div class="article-meta">
             <span>2026.05.13</span>
@@ -44,16 +43,18 @@
         <section class="article-section">
           <h2>0. 一句话结论</h2>
           <p>
-            PROWL 解决的是 action-conditioned video world model 在常见 passive demo 上看起来会生成、但在罕见且交互关键的动作组合上不跟手的问题；
-            核心招是用 KL-anchored adversarial policy 主动寻找高预测误差轨迹，再用 Prioritized Adversarial Trajectory buffer
-            按 latent regret、optical-flow action fidelity 和 learning progress 重排训练样本；效果是在 MineRL/BASALT 的 held-out
-            任务、cross-buffer adversarial failures、长 rollout 和 novel composite modes 上都优于 Phase 1 与 matched-compute Phase 2，
-            代价是训练系统很重、依赖可交互环境和真实 rollout 评分，且弱 KL 约束会 reward hack 成 camera-thrashing。
+            PROWL 把 world model 训练从 passive demo 拟合改成“主动找错 -> 优先修错”的闭环：VPT adversary 找高误差但仍像玩家的轨迹，
+            PAT buffer 保留当前最该学的失败样本，world model 用这些样本微调动作条件通道；收益是罕见动作组合和长 rollout 更稳，
+            代价是系统重、依赖真实环境 rollout，且 KL 约束太弱会被 reward hack。
           </p>
-          <p class="insight">
-            我的读法：这篇最重要的 insight 不是“让 agent 在世界模型里做任务”，而是反过来“让 agent 去真实环境里当世界模型的红队”。
-            它把世界模型训练变成一个闭环反馈系统：模型越强，红队越能发现更细的错误；红队越强，模型越能补上 passive 数据覆盖不到的状态动作组合。
-          </p>
+          <dl class="term-list">
+            <dt>不是</dt>
+            <dd>不是新的视频生成架构；backbone 仍是 Wan2.1。</dd>
+            <dt>是</dt>
+            <dd>world model 的红队训练系统：agent 找 bug，PAT buffer 排队，world model 修 bug。</dd>
+            <dt>关键约束</dt>
+            <dd>adversary 必须被 KL 拉回 VPT reference，否则会疯狂甩镜头骗高误差。</dd>
+          </dl>
         </section>
 
         <section class="article-section">
@@ -646,7 +647,6 @@ Phase 2: adversarial curriculum
     </main>
 
     <footer class="site-footer">
-      <p>Hosted on GitHub Pages.</p>
       <a href="../index.html">回到首页</a>
     </footer>
   </body>

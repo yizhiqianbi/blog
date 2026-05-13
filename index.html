@@ -5,50 +5,29 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta
       name="description"
-          content="一支铅笔的静态博客，记录 AI Game、机器人学习、世界模型和工程笔记。"
+      content="AI Game、世界模型、机器人学习、论文精读。"
     >
     <title>一支铅笔</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="styles.css?v=20260513b">
+    <link rel="stylesheet" href="styles.css?v=20260513c">
   </head>
   <body>
     <header class="site-header" aria-label="网站导航">
       <a class="brand" href="index.html">一支铅笔</a>
       <nav class="nav" aria-label="主要导航">
-        <a href="#notes">文章</a>
-        <a href="#about">关于</a>
+        <a href="#paper-reading">Paper</a>
+        <a href="#notes">AI Game</a>
+        <a href="#posts">Robot</a>
       </nav>
     </header>
 
     <main class="home-shell" id="top">
-      <section class="home-intro" aria-labelledby="home-title">
-        <p class="kicker">Notebook</p>
-        <h1 id="home-title">一行一行写清楚。</h1>
-        <p>
-          这里先保持静态、干净、夜间阅读友好。文章按主题拆开，每篇只处理一个问题：
-          概念是什么，state 放在哪里，代码怎么落，工程上真正有用的 insight 是什么。
-        </p>
-      </section>
-
-      <section class="line-index" id="notes" aria-labelledby="notes-title">
-        <div class="index-heading">
-          <p class="kicker">Notes</p>
-          <h2 id="notes-title">AI Game</h2>
-        </div>
-
-        <a class="blog-row" href="posts/ai-game-world-models.html">
-          <time datetime="2026-05-13">2026.05.13</time>
-          <span>
-            <strong>AI Game World Models：游戏状态应该放在哪里</strong>
-            <small>从引擎、3D、神经渲染、视频、agent、代码、物理仿真和评测体系看 AI Game 的可落地路线。</small>
-          </span>
-          <em>Survey</em>
-        </a>
+      <section class="home-intro compact" aria-labelledby="home-title">
+        <h1 id="home-title">论文笔记</h1>
       </section>
 
       <section class="line-index" id="paper-reading" aria-labelledby="paper-reading-title">
         <div class="index-heading">
-          <p class="kicker">Reading</p>
           <h2 id="paper-reading-title">Paper Reading</h2>
         </div>
 
@@ -56,7 +35,7 @@
           <time datetime="2026-05-13">2026.05.13</time>
           <span>
             <strong>PROWL：让 RL agent 专门找世界模型短板</strong>
-            <small>精读 KL-anchored adversarial curriculum、PAT buffer、regret/AFS 评分和 MineRL 实验。</small>
+            <small>World model 红队训练：KL adversary、PAT buffer、regret/AFS。</small>
           </span>
           <em>Paper</em>
         </a>
@@ -65,7 +44,7 @@
           <time datetime="2026-05-13">2026.05.13</time>
           <span>
             <strong>LeWorldModel：用 SIGReg 把像素 JEPA 训稳</strong>
-            <small>精读端到端 pixel JEPA world model：SIGReg 防坍塌、latent CEM/MPC 规划与代码实现。</small>
+            <small>Pixel JEPA：SIGReg 防坍塌，latent CEM/MPC。</small>
           </span>
           <em>Paper</em>
         </a>
@@ -74,7 +53,7 @@
           <time datetime="2026-05-13">2026.05.13</time>
           <span>
             <strong>Unmasking OPD：teacher signal 到底在帮谁</strong>
-            <small>用 per-token ideal gradient 和 alignment score 诊断 OPD 在哪里有用、哪里有害。</small>
+            <small>用 ideal gradient / alignment 诊断 teacher signal。</small>
           </span>
           <em>Paper</em>
         </a>
@@ -83,7 +62,7 @@
           <time datetime="2026-05-13">2026.05.13</time>
           <span>
             <strong>Interaction Models：把实时协作做进模型本体</strong>
-            <small>精读 Thinking Machines 的 200ms micro-turn、多流交互、后台模型和实时 serving 设计。</small>
+            <small>200ms micro-turn、多流交互、后台模型。</small>
           </span>
           <em>Paper</em>
         </a>
@@ -92,15 +71,29 @@
           <time datetime="2026-05-13">2026.05.13</time>
           <span>
             <strong>Learning to Foresee：OPD 为什么能提前看见最终方向</strong>
-            <small>从参数动态、低秩锁定和 EffOPD 外推机制精读 arXiv:2605.11739。</small>
+            <small>OPD 参数动态、低秩锁定、EffOPD。</small>
           </span>
           <em>Paper</em>
         </a>
       </section>
 
+      <section class="line-index" id="notes" aria-labelledby="notes-title">
+        <div class="index-heading">
+          <h2 id="notes-title">AI Game</h2>
+        </div>
+
+        <a class="blog-row" href="posts/ai-game-world-models.html">
+          <time datetime="2026-05-13">2026.05.13</time>
+          <span>
+            <strong>AI Game World Models：游戏状态应该放在哪里</strong>
+            <small>引擎、3D、视频、agent、代码、物理仿真、评测。</small>
+          </span>
+          <em>Survey</em>
+        </a>
+      </section>
+
       <section class="line-index" id="posts" aria-labelledby="posts-title">
         <div class="index-heading">
-          <p class="kicker">Series</p>
           <h2 id="posts-title">World Model for Robot Learning</h2>
         </div>
 
@@ -108,7 +101,7 @@
           <time datetime="2026-05-12">2026.05.12</time>
           <span>
             <strong>01. 世界模型到底建模什么</strong>
-            <small>World Model、Video Generation、Policy、IDM 的边界。</small>
+            <small>World model / video generation / policy / IDM。</small>
           </span>
           <em>Concept</em>
         </a>
@@ -117,7 +110,7 @@
           <time datetime="2026-05-12">2026.05.12</time>
           <span>
             <strong>02. VLA 策略：把大模型具身化</strong>
-            <small>从 RT-2、OpenVLA 到 pi0，离散动作和连续动作的代码形态。</small>
+            <small>RT-2、OpenVLA、pi0；离散动作与连续动作。</small>
           </span>
           <em>Policy</em>
         </a>
@@ -126,7 +119,7 @@
           <time datetime="2026-05-12">2026.05.12</time>
           <span>
             <strong>03. IDM：先想象未来，再反推动作</strong>
-            <small>predict-then-act 的实现拆法，以及像素未来为什么会变重。</small>
+            <small>predict-then-act；像素未来的成本。</small>
           </span>
           <em>IDM</em>
         </a>
@@ -135,7 +128,7 @@
           <time datetime="2026-05-12">2026.05.12</time>
           <span>
             <strong>04. Cosmos Policy：动作作为隐帧</strong>
-            <small>单一视频骨干如何同时预测 action、future image、state 和 value。</small>
+            <small>单视频骨干预测 action / future / state / value。</small>
           </span>
           <em>Backbone</em>
         </a>
@@ -144,7 +137,7 @@
           <time datetime="2026-05-12">2026.05.12</time>
           <span>
             <strong>05. Motus 与 LingBot-VA：专家世界模型</strong>
-            <small>MoT、潜动作、video-action 交错输出和异步闭环。</small>
+            <small>MoT、潜动作、video-action、异步闭环。</small>
           </span>
           <em>MoT</em>
         </a>
@@ -153,7 +146,7 @@
           <time datetime="2026-05-12">2026.05.12</time>
           <span>
             <strong>06. 潜空间世界模型：不要急着画未来</strong>
-            <small>FLARE、FRAPPE、VLA-JEPA、JEPA-VLA 的 latent alignment 路线。</small>
+            <small>FLARE、FRAPPE、VLA-JEPA、JEPA-VLA。</small>
           </span>
           <em>Latent</em>
         </a>
@@ -162,7 +155,7 @@
           <time datetime="2026-05-12">2026.05.12</time>
           <span>
             <strong>07. WoG 与 DIAL：把未来压进条件空间</strong>
-            <small>QFormer future condition、latent intent bottleneck 和两阶段训练。</small>
+            <small>QFormer future condition、latent intent bottleneck。</small>
           </span>
           <em>Control</em>
         </a>
@@ -171,7 +164,7 @@
           <time datetime="2026-05-12">2026.05.12</time>
           <span>
             <strong>08. 世界模型能做什么</strong>
-            <small>Simulator、evaluation、planning、data generation 和导航。</small>
+            <small>Simulator、evaluation、planning、data generation。</small>
           </span>
           <em>Use</em>
         </a>
@@ -179,31 +172,20 @@
 
       <section class="line-index archive" aria-labelledby="archive-title">
         <div class="index-heading">
-          <p class="kicker">Archive</p>
           <h2 id="archive-title">旧索引</h2>
         </div>
         <a class="blog-row" href="posts/world-model-robot-learning.html">
           <time datetime="2026-05-12">2026.05.12</time>
           <span>
             <strong>世界模型笔记总览</strong>
-            <small>拆分前的阅读入口，保留为系列目录。</small>
+            <small>拆分前版本。</small>
           </span>
           <em>Index</em>
         </a>
       </section>
-
-      <section class="about" id="about" aria-labelledby="about-title">
-        <p class="kicker">About</p>
-        <h2 id="about-title">静态页面，少一点装饰，多一点可回看。</h2>
-        <p>
-          当前博客没有构建步骤，推到 GitHub Pages 就能打开。新文章会继续按这种列表式结构增加，
-          方便从碎片笔记逐步整理成可检索的公开材料。
-        </p>
-      </section>
     </main>
 
     <footer class="site-footer">
-      <p>Hosted on GitHub Pages.</p>
       <a href="#top">回到顶部</a>
     </footer>
   </body>
