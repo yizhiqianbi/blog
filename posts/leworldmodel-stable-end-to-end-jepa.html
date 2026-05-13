@@ -9,7 +9,11 @@
     >
     <title>LeWorldModel：用 SIGReg 把像素 JEPA 训稳</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="../styles.css?v=20260513">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513b">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
   </head>
   <body>
     <header class="site-header" aria-label="网站导航">
@@ -299,9 +303,13 @@ Planning:
           <h2>5. 公式/算法逐行讲解</h2>
 
           <h3>公式 1：encoder 与 predictor</h3>
-          <div class="code-block">
-            <pre><code>z_t = enc_theta(o_t)
-z_hat_{t+1} = pred_phi(z_t, a_t)</code></pre>
+          <div class="math-block">
+            \[
+            \begin{aligned}
+            z_t &amp;= \operatorname{enc}_{\theta}(o_t) \\
+            \hat z_{t+1} &amp;= \operatorname{pred}_{\phi}(z_t,a_t)
+            \end{aligned}
+            \]
           </div>
           <p>
             <code>o_t</code> 是一帧 RGB 图像，实际训练中是 <code>[3,224,224]</code>；
@@ -310,9 +318,15 @@ z_hat_{t+1} = pred_phi(z_t, a_t)</code></pre>
           </p>
 
           <h3>公式 2：next-embedding prediction loss</h3>
-          <div class="code-block">
-            <pre><code>L_pred = || z_hat_{t+1} - z_{t+1} ||_2^2
-z_hat_{t+1} = pred_phi(z_t, a_t)</code></pre>
+          <div class="math-block">
+            \[
+            \begin{aligned}
+            \mathcal{L}_{\mathrm{pred}}
+              &amp;= \left\lVert \hat z_{t+1}-z_{t+1}\right\rVert_2^2 \\
+            \hat z_{t+1}
+              &amp;= \operatorname{pred}_{\phi}(z_t,a_t)
+            \end{aligned}
+            \]
           </div>
           <p>
             这是 teacher forcing：目标 <code>z_{t+1}</code> 来自同一个 encoder 对真实下一帧的编码。
@@ -321,12 +335,16 @@ z_hat_{t+1} = pred_phi(z_t, a_t)</code></pre>
           </p>
 
           <h3>公式 3：SIGReg 随机投影</h3>
-          <div class="code-block">
-            <pre><code>Z in R^{N x B x d}
-u^(m) sampled from unit sphere S^{d-1}
-h^(m) = Z u^(m)
-
-SIGReg(Z) = (1/M) sum_{m=1}^M T(h^(m))</code></pre>
+          <div class="math-block">
+            \[
+            \begin{aligned}
+            Z &amp;\in \mathbb{R}^{N\times B\times d} \\
+            u^{(m)} &amp;\sim \mathbb{S}^{d-1} \\
+            h^{(m)} &amp;= Zu^{(m)} \\
+            \operatorname{SIGReg}(Z)
+              &amp;= \frac{1}{M}\sum_{m=1}^{M}T\left(h^{(m)}\right)
+            \end{aligned}
+            \]
           </div>
           <p>
             <code>Z</code> 收集一个 batch 内所有时间步的 latent；<code>N</code> 是 history/time，
@@ -335,8 +353,14 @@ SIGReg(Z) = (1/M) sum_{m=1}^M T(h^(m))</code></pre>
           </p>
 
           <h3>公式 4：总目标</h3>
-          <div class="code-block">
-            <pre><code>L_LeWM = L_pred + lambda * SIGReg(Z)</code></pre>
+          <div class="math-block">
+            \[
+            \mathcal{L}_{\mathrm{LeWM}}
+              =
+              \mathcal{L}_{\mathrm{pred}}
+              +
+              \lambda\,\operatorname{SIGReg}(Z)
+            \]
           </div>
           <p>
             论文主文说默认 <code>M=1024</code>、<code>lambda=0.1</code>；公开训练配置里
@@ -345,12 +369,20 @@ SIGReg(Z) = (1/M) sum_{m=1}^M T(h^(m))</code></pre>
           </p>
 
           <h3>公式 5：latent planning cost 与 CEM</h3>
-          <div class="code-block">
-            <pre><code>z_hat_{t+1} = pred_phi(z_hat_t, a_t),  z_hat_1 = enc_theta(o_1)
-z_g = enc_theta(o_g)
-C(z_hat_H) = || z_hat_H - z_g ||_2^2
-
-a^*_{1:H} = argmin_{a_{1:H}} C(z_hat_H)</code></pre>
+          <div class="math-block">
+            \[
+            \begin{aligned}
+            \hat z_{t+1}
+              &amp;= \operatorname{pred}_{\phi}(\hat z_t,a_t),
+              \quad \hat z_1=\operatorname{enc}_{\theta}(o_1) \\
+            z_g
+              &amp;= \operatorname{enc}_{\theta}(o_g) \\
+            C(\hat z_H)
+              &amp;= \left\lVert \hat z_H-z_g\right\rVert_2^2 \\
+            a^*_{1:H}
+              &amp;= \arg\min_{a_{1:H}} C(\hat z_H)
+            \end{aligned}
+            \]
           </div>
           <p>
             <code>o_1</code> 是当前图，<code>o_g</code> 是目标图；CEM 不求梯度，而是采样动作序列、rollout、

@@ -9,7 +9,11 @@
     >
     <title>Unmasking OPD：teacher signal 到底在帮谁</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="../styles.css?v=20260513">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513b">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
   </head>
   <body>
     <header class="site-header" aria-label="网站导航">
@@ -283,9 +287,13 @@ Aggregate:
           <h2>5. 公式/算法逐行讲解</h2>
 
           <h3>公式 1：teacher advantage</h3>
-          <div class="code-block">
-            <pre><code>Adv(u) = Σ_{k in S_u} P_te^k P_succ^k
-       - Σ_{k in S_u} P_θ^k  P_succ^k</code></pre>
+          <div class="math-block">
+            \[
+            \operatorname{Adv}(u)=
+            \sum_{k\in S_u}P_{\mathrm{te}}^kP_{\mathrm{succ}}^k
+            -
+            \sum_{k\in S_u}P_{\theta}^kP_{\mathrm{succ}}^k
+            \]
           </div>
           <p>
             u 是生成树里的一个 node，也就是某个 prefix；S_u 是访问次数足够的候选 next-token 集。
@@ -294,13 +302,17 @@ Aggregate:
           </p>
 
           <h3>公式 2：ideal objective 和 ideal gradient</h3>
-          <div class="code-block">
-            <pre><code>L_ideal(u) = Σ_k P_θ^k P_succ^k
-
-Pbar_succ = Σ_k P_θ^k P_succ^k
-
-∂L_ideal / ∂z_j
-  = P_θ^j (P_succ^j - Pbar_succ)</code></pre>
+          <div class="math-block">
+            \[
+            \begin{aligned}
+            L_{\mathrm{ideal}}(u)
+              &amp;= \sum_k P_{\theta}^k P_{\mathrm{succ}}^k \\
+            \bar P_{\mathrm{succ}}
+              &amp;= \sum_k P_{\theta}^k P_{\mathrm{succ}}^k \\
+            \frac{\partial L_{\mathrm{ideal}}}{\partial z_j}
+              &amp;= P_{\theta}^j\left(P_{\mathrm{succ}}^j-\bar P_{\mathrm{succ}}\right)
+            \end{aligned}
+            \]
           </div>
           <p>
             z_j 是 student 在 node u 对 token j 的 logit。softmax Jacobian 给出 ∂P_θ^k/∂z_j=P_θ^k(δ_kj-P_θ^j)。
@@ -309,14 +321,22 @@ Pbar_succ = Σ_k P_θ^k P_succ^k
           </p>
 
           <h3>公式 3：GKD gradient</h3>
-          <div class="code-block">
-            <pre><code>L_GKD(u) = KL(π_θ || π_te)
-         = Σ_k P_θ^k (log P_θ^k - log P_te^k)
-
-Let ℓ_k = log P_θ^k - log P_te^k
-    ℓbar = Σ_k P_θ^k ℓ_k = KL(π_θ || π_te)
-
-∂L_GKD / ∂z_j = P_θ^j (ℓ_j - ℓbar)</code></pre>
+          <div class="math-block">
+            \[
+            \begin{aligned}
+            L_{\mathrm{GKD}}(u)
+              &amp;= \operatorname{KL}(\pi_{\theta}\Vert \pi_{\mathrm{te}}) \\
+              &amp;= \sum_k P_{\theta}^k
+                \left(\log P_{\theta}^k-\log P_{\mathrm{te}}^k\right) \\
+            \ell_k
+              &amp;= \log P_{\theta}^k-\log P_{\mathrm{te}}^k \\
+            \bar \ell
+              &amp;= \sum_k P_{\theta}^k\ell_k
+               = \operatorname{KL}(\pi_{\theta}\Vert \pi_{\mathrm{te}}) \\
+            \frac{\partial L_{\mathrm{GKD}}}{\partial z_j}
+              &amp;= P_{\theta}^j(\ell_j-\bar \ell)
+            \end{aligned}
+            \]
           </div>
           <p>
             因为训练要最小化 KL，所以实际 update direction 是这个梯度的负方向。
@@ -325,10 +345,15 @@ Let ℓ_k = log P_θ^k - log P_te^k
           </p>
 
           <h3>公式 4：统一局部梯度结构</h3>
-          <div class="code-block">
-            <pre><code>∂L / ∂z_j = P_θ^j (f_j - fbar)
-
-fbar = Σ_k P_θ^k f_k</code></pre>
+          <div class="math-block">
+            \[
+            \begin{aligned}
+            \frac{\partial L}{\partial z_j}
+              &amp;= P_{\theta}^j(f_j-\bar f) \\
+            \bar f
+              &amp;= \sum_k P_{\theta}^k f_k
+            \end{aligned}
+            \]
           </div>
           <p>
             这是论文很漂亮的统一视角。Dr. GRPO 里 f_k 是 P_succ^k；GKD 里 f_k 是 log P_θ^k - log P_te^k
@@ -337,10 +362,19 @@ fbar = Σ_k P_θ^k f_k</code></pre>
           </p>
 
           <h3>公式 5：gradient alignment score</h3>
-          <div class="code-block">
-            <pre><code>Align(u) = cos(g_ideal(u), g_D(u))
-         = Σ_{j in S_u} g_ideal_j g_D_j
-           / ( ||g_ideal||_{S_u} ||g_D||_{S_u} )</code></pre>
+          <div class="math-block">
+            \[
+            \operatorname{Align}(u)
+              =
+              \cos(g_{\mathrm{ideal}}(u), g_D(u))
+              =
+              \frac{
+                \sum_{j\in S_u}g_{\mathrm{ideal},j}g_{D,j}
+              }{
+                \lVert g_{\mathrm{ideal}}\rVert_{S_u}
+                \lVert g_D\rVert_{S_u}
+              }
+            \]
           </div>
           <p>
             Align(u) 介于 -1 和 1。正数代表 teacher+algorithm 的方向与成功方向一致；0 附近代表无关；
