@@ -342,6 +342,36 @@ code {
   text-underline-offset: 3px;
 }
 
+.data-table {
+  width: 100%;
+  max-width: 980px;
+  margin: 20px 0 0;
+  border-collapse: collapse;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.data-table th,
+.data-table td {
+  padding: 12px 10px;
+  border-top: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.data-table th {
+  color: var(--soft);
+  font-size: 0.84rem;
+  font-weight: 760;
+}
+
+.data-table td:first-child {
+  color: var(--ink);
+  font-weight: 760;
+}
+
 .next-links {
   display: flex;
   flex-wrap: wrap;
@@ -386,6 +416,12 @@ code {
   .figure-pair,
   .figure-grid {
     grid-template-columns: 1fr;
+  }
+
+  .data-table {
+    display: block;
+    overflow-x: auto;
+    white-space: nowrap;
   }
 
   .site-footer {

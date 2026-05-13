@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="整理 AI Game World Models v2 笔记：从 game state 的承载形式理解 AI 游戏世界模型。"
+    >
+    <title>AI Game World Models：游戏状态应该放在哪里</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260513">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#notes">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回首页</a>
+          <p class="kicker">AI Game Notes</p>
+          <h1>AI Game World Models：游戏状态应该放在哪里</h1>
+          <p class="article-dek">
+            整理自我的 Notion 综述，并对照 Genie、GameNGen、Hunyuan GameCraft、MatrixGame、
+            SIMA、HY-World、OpenGame 和 Roblox Reality。核心判断是：AI Game 的主战场不是单点内容生成，
+            而是 game state 的生成、表示、推进、控制和评测。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.13</span>
+            <span>阅读约 14 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>核心命题</h2>
+          <p>
+            传统游戏引擎把状态放在 code、rules、ECS、scene tree、physics、animation graph、
+            render pipeline、networking 和 persistence 里。新的 AI 路线把部分状态迁移到 3D 表示、
+            神经渲染、视频 latent、agent memory/belief，或者自动生成的代码里。
+          </p>
+          <p>
+            所以，Game World Model 不只是“生成更好看的画面”。它必须回答：这个世界能不能被编辑、运行、
+            复现、调试、联网、评测，并被玩家或 agent 使用。
+          </p>
+          <p class="insight">
+            AI Game 的问题不是 content generation，而是 state representation。谁能定义更好的状态契约，
+            谁就更接近可发布的 AI-native game stack。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>一张路线表：state 放在哪里</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>主要状态</th>
+                <th>代表系统</th>
+                <th>优势</th>
+                <th>瓶颈</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Engine-first</td>
+                <td>code / ECS / scene tree / physics</td>
+                <td>Unreal、Unity、Godot、Roblox</td>
+                <td>可运行、可调试、可联网</td>
+                <td>内容生产和迭代成本高</td>
+              </tr>
+              <tr>
+                <td>3D-first</td>
+                <td>geometry / layout / material / affordance</td>
+                <td>Hunyuan3D、HY-World、Holodeck、ProcTHOR</td>
+                <td>空间状态可编辑</td>
+                <td>缺少可玩性语义和交互元数据</td>
+              </tr>
+              <tr>
+                <td>Generative Render</td>
+                <td>显式场景 + neural pixels</td>
+                <td>DLSS / RTX neural rendering、Roblox Reality</td>
+                <td>保留引擎控制，同时提升视觉</td>
+                <td>时序稳定、延迟、视觉可信度</td>
+              </tr>
+              <tr>
+                <td>Video-first</td>
+                <td>pixels / latent video / action-conditioned frames</td>
+                <td>Genie、GameNGen、Oasis、GameCraft、MatrixGame</td>
+                <td>快速想象和可交互预览</td>
+                <td>隐藏状态难编辑、难调试、难多人同步</td>
+              </tr>
+              <tr>
+                <td>Agent / VLA</td>
+                <td>policy / memory / belief / goal</td>
+                <td>SIMA、Voyager、MineDojo、Generative Agents</td>
+                <td>NPC、playtester、社交留存</td>
+                <td>可控性、可靠性、评测困难</td>
+              </tr>
+              <tr>
+                <td>Code Agent</td>
+                <td>prompt / code / tool state / engine API</td>
+                <td>OpenGame、vibe-code game tools</td>
+                <td>最接近今天能用的原型生产</td>
+                <td>代码质量、跨文件一致性、玩法上限</td>
+              </tr>
+              <tr>
+                <td>Physical Simulator</td>
+                <td>physical state / sensor / action / dynamics</td>
+                <td>NVIDIA Cosmos、Genesis、LucidSim</td>
+                <td>连接游戏、具身智能和机器人</td>
+                <td>物理精度和 sim-to-real gap</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>Engine-first 不是旧路线，而是底座</h2>
+          <p>
+            对商业游戏来说，硬约束是 replay、rollback、server authority、collision correctness、save/load、
+            telemetry、profiling 和 creator tools。纯神经路线目前没有替代这些基础设施。
+            因此 engine-first 更像“可发布性底座”，不是 AI 生成的反面。
+          </p>
+          <p>
+            一个更合理的架构是：引擎保存确定性状态和规则，AI 负责生成 asset、layout、VFX、NPC 行为、
+            playtest trace 或视觉细节。这里的关键是把神经生成限制在不会破坏玩法真值的边界内。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3D-first：从 mesh 到 game object</h2>
+          <p>
+            3D-first 路线把世界表示成 geometry、layout、material、scene graph 和 camera path。
+            Hunyuan3D 2.0 这类模型已经在高分辨率 textured 3D assets 上进展很快；HY-World 2.0 则把输入扩展到
+            text、single-view image、multi-view images 和 videos，并输出可探索的 3DGS 世界。
+          </p>
+          <p>
+            但 mesh 不是 game object。一个杯子要进入游戏，需要 collider、grab socket、breakability、
+            weight、sound、inventory tag、LOD、network replication 和 save id。没有这些 affordance contract，
+            它更像概念资产，而不是可玩的世界状态。
+          </p>
+          <div class="figure-grid">
+            <figure class="note-figure">
+              <img src="../assets/notion/ai-game-world-models/3d-world-generation-reference-1.png" alt="Notion 中的 3D 世界生成参考图一">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/ai-game-world-models/3d-world-generation-reference-2.png" alt="Notion 中的 3D 世界生成参考图二">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/ai-game-world-models/3d-world-generation-reference-3.png" alt="Notion 中的 3D 世界生成参考图三">
+            </figure>
+            <figure class="note-figure">
+              <img src="../assets/notion/ai-game-world-models/3d-world-generation-reference-4.png" alt="Notion 中的 3D 世界生成参考图四">
+            </figure>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>Generative Render：最像中间答案</h2>
+          <p>
+            神经渲染路线不急着替代 game state machine，而是替代引擎里昂贵的视觉部分：超分、帧生成、
+            neural material、lighting、denoising、VFX 和细节动态。Roblox Reality 的说法很直接：
+            Game Engine 管 shared and consistent state，Video World Model 管 Pixels。
+          </p>
+          <p>
+            VFX 应该放在这条线上理解。法术、爆炸、天气、受击反馈、破坏、UI feedback 都必须被 gameplay event 约束。
+            好的 generative VFX 可以很夸张，但不能在伤害范围、归属、时机、遮挡和可读性上撒谎。
+          </p>
+          <div class="code-block">
+            <pre><code>event = {
+  type: "spell_hit",
+  source_player: "p7",
+  target_entity: "boss_03",
+  damage_window_ms: [420, 760],
+  radius_m: 3.5,
+  element: "ice",
+  visibility: "gameplay_critical"
+}
+
+vfx = generative_vfx(event, scene_state, style_guide)
+assert vfx.never_expands_damage_radius()
+assert vfx.preserves_ownership_color()</code></pre>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>Video-first：强在想象，弱在暴露状态</h2>
+          <p>
+            Genie 证明可以从无标签视频中学习 action-controllable virtual worlds；Genie 3 进一步强调实时交互、
+            720p、24 fps 和几分钟一致性。GameNGen 在 DOOM 上展示了 diffusion model 作为实时游戏引擎的可能性。
+            Hunyuan GameCraft、MatrixGame、LingBot-World、YuME 等继续推进 action-conditioned game video。
+          </p>
+          <p>
+            这条路线最有想象力，但也最容易被误读。视频 latent 可以生成可玩的视觉流，
+            但 inventory、quest flag、hitbox、fog of war、economy、server authority、save file 和 debug trace
+            都藏在像素背后。对开发者来说，这些隐藏状态才是游戏能不能上线的关键。
+          </p>
+          <p class="insight">
+            Video-first 近期更适合做 imagination、prototype、visual preview 和 agent training world。
+            要变成完整 shipping stack，它必须把 hidden state 暴露成可编辑、可回放、可验证的契约。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>Agent / VLA：世界模型需要演员</h2>
+          <p>
+            游戏世界不是静态容器，它需要玩家、NPC、队友、敌人、playtester 和 director。SIMA 的价值在于把视觉、
+           语言指令和键鼠动作接到多个 3D 游戏环境中；Generative Agents 则说明 memory、reflection 和 planning
+            可以制造可信的社会行为。
+          </p>
+          <p>
+            这里有一个产品判断：互动影像的留存可能受限，因为玩家消费的是分支视听体验；而持久 3D 世界加上有人味的 agent，
+            可以通过关系、声誉、竞争、合作和记忆制造长期不确定性。游戏世界本质上可以被看成大型记忆数据库：
+            玩家行动、空间痕迹、交易、冲突、成就和关系都会在未来交互中被检索。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>Code Agent：最接近今天能用的生产层</h2>
+          <p>
+            Code-agent 路线生成的是可运行 artifact：浏览器游戏、Unity/Godot 脚本、Roblox experience、Blender scene、
+            shader、UI、quest 和配置文件。OpenGame 把问题说得很清楚：游戏开发不是孤立代码题，而是 engine loop、
+            cross-file state、scene wiring 和 playable verification 的联合问题。
+          </p>
+          <div class="code-block">
+            <pre><code>awesome-game-world-models/
+  taxonomy/
+    state-representations.md
+    routes.md
+    evaluation.md
+  schemas/
+    game_spec.schema.json
+    asset_contract.schema.json
+    affordance.schema.json
+    interaction_trace.schema.json
+  adapters/
+    unity/
+    unreal/
+    godot/
+    roblox/
+    webgpu-threejs/
+  eval/
+    playability/
+    consistency/
+    balance/
+    agentability/
+    render_latency/</code></pre>
+          </div>
+          <p>
+            如果要做开源项目，我不会从“再做一个 one-shot game generator”开始，而是从 awesome list、schema、
+            adapter、trace、benchmark 和 eval harness 开始。先把比较标准做清楚，后面生成器才知道自己在优化什么。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>评测议程：别只问能不能生成</h2>
+          <p>
+            Quest、Narrative 和 Balance 不应该被当成孤立生成模块。一个 quest 有用，是因为它让玩家穿过世界、
+            触发系统、形成记忆并愿意回来；一个 balance change 有用，是因为 play trace 显示它带来了公平反制、
+            稳定经济和策略多样性。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>评测项</th>
+                <th>要问的问题</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Playability</td>
+                <td>玩家能否开始、推进、失败、恢复并完成目标？</td>
+              </tr>
+              <tr>
+                <td>State consistency</td>
+                <td>可见变化是否匹配隐藏状态，重复动作是否一致？</td>
+              </tr>
+              <tr>
+                <td>Editability</td>
+                <td>设计师能否改 layout、rule、object、quest，而不是重训模型？</td>
+              </tr>
+              <tr>
+                <td>Affordance correctness</td>
+                <td>生成物体是否有 collider、anchor、socket、action、tag？</td>
+              </tr>
+              <tr>
+                <td>Agentability</td>
+                <td>NPC/playtester 能否观察、计划、行动、学习？</td>
+              </tr>
+              <tr>
+                <td>Render trust</td>
+                <td>神经渲染是否保留 timing、ownership、range、UI 和可读性？</td>
+              </tr>
+              <tr>
+                <td>Reproducibility</td>
+                <td>trace 能否在 seed、版本和服务器状态下回放？</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>我更看好的产品形态</h2>
+          <p>
+            近中期最像可落地产品的路线，是 structured 3D worlds + local generative rendering +
+            persistent AI/human actors。服务器保存紧凑世界：map JSON、scene graph、procedural seeds、
+            asset id、interaction graph、economy table、memory log 和 player relationship state。
+            本地引擎负责碰撞、规则、UI 和同步；神经渲染负责视觉细节；agent 负责记忆、关系和社会互动。
+          </p>
+          <p class="insight">
+            这更像 AI-native MMO / UGC engine，而不是 interactive video。长期价值在于把结构化世界、
+            生成式视觉、持久记忆和人类创作者工具链接起来。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://arxiv.org/abs/1803.10122">World Models</a>, Ha & Schmidhuber, 2018.</li>
+            <li><a href="https://deepmind.google/research/publications/genie-generative-interactive-environments/">Genie: Generative Interactive Environments</a>, Google DeepMind.</li>
+            <li><a href="https://deepmind.google/blog/genie-3-a-new-frontier-for-world-models/">Genie 3: A new frontier for world models</a>, Google DeepMind.</li>
+            <li><a href="https://arxiv.org/abs/2408.14837">GameNGen: Diffusion Models Are Real-Time Game Engines</a>.</li>
+            <li><a href="https://arxiv.org/abs/2506.17201">Hunyuan-GameCraft</a> 和 <a href="https://arxiv.org/abs/2506.18701">Matrix-Game</a>.</li>
+            <li><a href="https://arxiv.org/abs/2604.14268">HY-World 2.0</a> 和 <a href="https://arxiv.org/abs/2501.12202">Hunyuan3D 2.0</a>.</li>
+            <li><a href="https://deepmind.google/blog/sima-generalist-ai-agent-for-3d-virtual-environments/">SIMA</a> 和 <a href="https://arxiv.org/abs/2304.03442">Generative Agents</a>.</li>
+            <li><a href="https://arxiv.org/abs/2604.18394">OpenGame: Open Agentic Coding for Games</a>.</li>
+            <li><a href="https://about.roblox.com/newsroom/2026/04/roblox-reality-hybrid-architecture-democratizing-photorealistic-multiplayer-gaming">Roblox Reality hybrid architecture</a>.</li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="../index.html">回到首页</a>
+        <a href="world-model-basics.html">继续读：机器人世界模型</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>
