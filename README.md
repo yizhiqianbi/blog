@@ -8,6 +8,7 @@
 - 视觉样式在 `styles.css`
 - 长文章放在 `posts/` 目录，首页只放摘要和入口
 - Notion 图已保存到 `assets/notion/`，文章引用本地图片，不依赖 Notion 临时链接
+- 新论文博客优先沿用 `posts/innerscene-paper-review.html` 的 editorial paper 风格；规范见 `docs/blog-art-direction.md`，可复制模板见 `posts/_template-editorial-paper.html`
 
 ## 访问地址
 
