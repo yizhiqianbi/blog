@@ -1,0 +1,598 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="LeWorldModel 论文精读：用 SIGReg 让端到端 JEPA 从像素稳定学习 latent world model，并用 CEM/MPC 做像素到目标图像规划。"
+    >
+    <title>LeWorldModel：用 SIGReg 把像素 JEPA 训稳</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260513">
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#notes">文章</a>
+        <a href="../index.html#about">关于</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading</p>
+          <h1>LeWorldModel：用 SIGReg 把像素 JEPA 训稳</h1>
+          <p class="article-dek">
+            精读 LeWorldModel: Stable End-to-End Joint-Embedding Predictive Architecture from Pixels。
+            这篇把 latent world model 重新推回一个很朴素的问题：能不能不用 DINOv2 冻结特征、不用 EMA/stop-gradient、
+            不用 reward 或 reconstruction，只靠像素、动作和一个防坍塌正则，训练出可规划的 JEPA 世界模型？
+          </p>
+          <div class="article-meta">
+            <span>2026.05.13</span>
+            <span>阅读约 45 分钟</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            LeWM 解决的是端到端 JEPA world model 从像素训练容易 representation collapse、而现有解法太依赖冻结大视觉模型、
+            多项 VICReg 损失或额外监督的问题；核心招是用 ViT 编码图像到 192 维 latent token，用 action-conditioned
+            Transformer 预测下一步 latent，再用 MSE 预测损失加 SIGReg 高斯分布正则防坍塌；效果是约 15M 参数、单张
+            L40S 几小时可训、规划比 DINO-WM 快约 48x 且在 Push-T/Reacher 等任务有竞争力，代价是仍依赖离线动作轨迹覆盖、
+            短视界 MPC/CEM 规划，以及 SIGReg 在低内在维度任务上可能过强。
+          </p>
+          <p class="insight">
+            我的读法：这篇不是“世界模型生成得更真”，而是“世界模型的 state 不必是像素，也不必借 DINO 的大先验”。
+            它真正有价值的地方，是把端到端 latent dynamics 的训练目标压到两个项，并把防坍塌问题变成一个可实现的分布匹配正则。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            论文位于 offline、reward-free、pixel-based latent world model。训练数据是离线轨迹
+            <code>(o_1:T, a_1:T)</code>，其中 <code>o_t</code> 是 RGB 图像，<code>a_t</code> 是连续动作。
+            训练阶段不使用 reward、不使用 task specification、不重建像素；测试阶段给定当前图像和目标图像，用 learned latent
+            dynamics 通过 CEM/MPC 优化动作序列。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>状态在哪里</th>
+                <th>防坍塌/监督来源</th>
+                <th>与 LeWM 的关键差异</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Dreamer / TD-MPC</td>
+                <td>latent state，但常绑定 reward/value/policy</td>
+                <td>reward、state、policy learning</td>
+                <td>LeWM 更 task-agnostic，训练不需要 reward，也不训练 policy</td>
+              </tr>
+              <tr>
+                <td>DINO-WM</td>
+                <td>DINOv2 patch/token latent</td>
+                <td>冻结预训练视觉 encoder</td>
+                <td>LeWM 从像素端到端训练，不被冻结 encoder 的先验和 token 数限制</td>
+              </tr>
+              <tr>
+                <td>PLDM</td>
+                <td>端到端 JEPA latent</td>
+                <td>VICReg 风格多项正则和逆动力学等项</td>
+                <td>LeWM 用 MSE + SIGReg 两项，实际有效超参主要是 <code>lambda</code></td>
+              </tr>
+              <tr>
+                <td>LeWM</td>
+                <td>每帧一个 192 维 CLS latent</td>
+                <td>latent prediction + isotropic Gaussian regularization</td>
+                <td>端到端、reward-free、reconstruction-free、planning-time 高效</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            关键 baseline 差异是：DINO-WM 用大规模预训练视觉特征避免坍塌，PLDM 用复杂多损失避免坍塌；
+            LeWM 直接把 latent 分布推向各向同性高斯，从而让 predictor 不能靠常数 embedding 取巧。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            宏观看，LeWM 是一个非常短的 pipeline：图像进 encoder，动作进 action embedder，
+            predictor 在 latent 空间自回归预测下一帧 embedding，训练时对齐真实下一帧 embedding，并对整段 embedding 加
+            SIGReg 防坍塌；推理时编码当前图和目标图，在 latent 空间用 CEM 搜动作序列。
+          </p>
+          <div class="code-block">
+            <pre><code>Training batch:
+  pixels o:  [B, T, C, H, W], H=W=224
+  actions a: [B, T, A] or action-block after frame-skip
+
+Encoder:
+  ViT-Tiny(o_t) -> CLS token -> projector(BN-MLP)
+  z: [B, T, D], D=192
+
+Action path:
+  action block a_t -> Conv1d/MLP embedder
+  e_a: [B, T, D]
+
+Predictor:
+  AR Transformer + causal mask + AdaLN(action)
+  pred_z: [B, T_ctx, D]
+
+Loss:
+  L_pred = mean(||pred_z_t - z_{t+1}||^2)
+  L_total = L_pred + lambda * SIGReg(z_{1:T})
+
+Planning:
+  encode current image z_1 and goal image z_g
+  sample action sequences with CEM
+  rollout predictor to z_hat_H
+  cost = ||z_hat_H - z_g||^2
+  execute / replan with MPC</code></pre>
+          </div>
+          <p>
+            代码上，<code>jepa.py</code> 的 <code>encode()</code> 把 <code>[B,T,...]</code> 图像展平成
+            <code>[B*T,...]</code> 喂给 ViT，取最后一层 <code>CLS</code> token，再经 projector 得到
+            <code>[B,T,D]</code>；<code>predict()</code> 调 predictor，再经 <code>pred_proj</code> 投到同一
+            embedding space；<code>rollout()</code> 则把 batch 和 CEM sample 维合并成 <code>B*S</code>，
+            按 history window 自回归追加 predicted embedding。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：用 SIGReg 代替 EMA/stop-gradient/复杂 VICReg 组合</h3>
+          <p>
+            旧方法为什么不行：JEPA 只做 latent prediction 时，encoder 可以把所有图像映射成同一个常数向量，
+            predictor 也预测这个常数，MSE 很小但 representation 完全没用。I-JEPA/V-JEPA 常用 EMA target encoder 和
+            stop-gradient 稳定训练，DINO-WM 直接冻结预训练 encoder，PLDM 则堆多项 VICReg/temporal/IDM loss。
+            这些方法要么不再端到端，要么超参多且训练曲线不稳。
+          </p>
+          <p>
+            它怎么改：LeWM 对一批 latent <code>Z in R^{N x B x d}</code> 做随机投影，
+            让每个一维投影 <code>h^(m)=Z u^(m)</code> 通过 Epps-Pulley normality statistic 接近标准高斯。
+            总损失是 <code>L_LeWM = L_pred + lambda SIGReg(Z)</code>。
+          </p>
+          <p>
+            为什么有效：如果所有输入 collapse 到常数，投影分布不可能像标准高斯；SIGReg 强迫 batch/time 中的 embedding
+            分散且有接近各向同性高斯的边际分布。根据 Cramer-Wold 直觉，足够多一维投影匹配，就约束了高维联合分布。
+          </p>
+          <p>
+            代价/限制：它不是免费午餐。随机投影和 Epps-Pulley 统计会引入额外计算；
+            更重要的是，若环境本身内在维度很低，比如 Two-Room，硬推 192 维 latent 到高斯可能反而伤规划结构。
+          </p>
+          <p>
+            设计细节：实现里 <code>SIGReg</code> 默认 <code>num_proj=1024</code>、<code>knots=17</code>，
+            在 <code>module.py</code> 中每次 forward 采样随机方向 <code>A</code>，计算投影上的 cos/sin empirical
+            characteristic function 和高斯目标 <code>exp(-t^2/2)</code> 的差，再做加权积分。
+          </p>
+
+          <h3>创新点 2：每帧压成单个低维 latent token，换取极快规划</h3>
+          <p>
+            旧方法为什么不行：DINO-WM 这类方法通常保留 patch-level features，token 多，CEM 每次评估上百条候选轨迹时，
+            predictor rollout 很贵。像素生成模型更贵，因为每一步要预测高维图像。
+          </p>
+          <p>
+            它怎么改：LeWM 用 ViT-Tiny 的 CLS token 加 1 层 BatchNorm MLP projector，把每帧变成一个 192 维向量。
+            论文强调这比 DINO-WM 约少 200 倍 token，规划时间从 DINO-WM 的约 47s 降到约 0.98s。
+          </p>
+          <p>
+            为什么有效：goal-conditioned control 只需要足够表示物体位置、姿态和可控状态，不需要还原每个像素细节。
+            单 token latent 牺牲一些视觉细节，但极大降低 CEM 内部 candidate rollout 成本。
+          </p>
+          <p>
+            代价/限制：OGBench-Cube 中 DINO-WM 仍略优，论文认为复杂 3D 视觉和旋转量更吃预训练视觉先验。
+            单 CLS token 对 end-effector orientation、block quaternion 这类细粒度状态可能不够。
+          </p>
+
+          <h3>创新点 3：action-conditioned autoregressive predictor</h3>
+          <p>
+            旧方法为什么不行：如果 predictor 只看当前 latent，不显式注入动作，就不能用于反事实规划；
+            如果使用复杂 decoder 或 reward head，又偏离 reward-free JEPA 设定。
+          </p>
+          <p>
+            它怎么改：predictor 是 6 层 Transformer，16 heads，10% dropout，带 causal mask。
+            动作通过 action embedder 编码后，以 AdaLN-zero 方式注入每层 Transformer block。AdaLN 的最后线性层初始化为 0，
+            让 action conditioning 逐步接入，避免训练早期破坏表征。
+          </p>
+          <p>
+            为什么有效：Transformer 处理短历史 latent，causal mask 保证不偷看未来；AdaLN 让动作影响归一化后的 attention/MLP
+            分支，相当于条件动态模型，而不是把动作粗暴拼接到 token 上。
+          </p>
+          <p>
+            代价/限制：它仍是短视界 autoregressive model，rollout 越长误差越积累；论文用 horizon 5、frame-skip 5，
+            实际只规划 25 environment steps。
+          </p>
+
+          <h3>创新点 4：latent-space CEM/MPC，不训练策略也能控制</h3>
+          <p>
+            旧方法为什么不行：offline RL/BC 需要训练策略，且可能被 dataset action distribution 限制；
+            generative world model 的像素 rollout 太慢。LeWM 选择测试时直接优化动作序列。
+          </p>
+          <p>
+            它怎么改：给定当前图 <code>o_1</code> 和目标图 <code>o_g</code>，encoder 得到
+            <code>z_1</code> 和 <code>z_g</code>。CEM 采样候选动作序列，predictor rollout 到
+            <code>z_hat_H</code>，以 <code>||z_hat_H-z_g||^2</code> 为 cost，选 elite 更新采样分布。
+          </p>
+          <p>
+            为什么有效：目标图像不需要显式 state label，只要 latent 保留可控物理结构，终端 latent 距离就能作为目标匹配 cost。
+            这也是 LeWM 的 planning-free training、planning-at-test-time 设计。
+          </p>
+          <p>
+            代价/限制：CEM 是零阶优化，动作维度高或 horizon 长时样本效率差；MPC 需要在线重复调用 world model，
+            对实时机器人仍要看硬件和动作频率。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>操作</th>
+                <th>输出</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>数据构造</td>
+                <td>离线 HDF5 轨迹，图像和动作</td>
+                <td>frame-skip=5，把连续动作打包成 action block；采样长度 4 的 sub-trajectory</td>
+                <td><code>pixels [B,T,3,224,224]</code>，<code>action [B,T,A]</code></td>
+              </tr>
+              <tr>
+                <td>编码</td>
+                <td>每帧图像</td>
+                <td>ViT-Tiny，取 CLS token，经 BatchNorm MLP projector</td>
+                <td><code>z [B,T,192]</code></td>
+              </tr>
+              <tr>
+                <td>动作编码</td>
+                <td>action block</td>
+                <td>Conv1d + MLP embedder</td>
+                <td><code>act_emb [B,T,192]</code></td>
+              </tr>
+              <tr>
+                <td>预测训练</td>
+                <td>history latent 和 action embedding</td>
+                <td>AR predictor 做 next-embedding prediction</td>
+                <td><code>pred_emb</code>，与 <code>z_{t+1}</code> 做 MSE</td>
+              </tr>
+              <tr>
+                <td>防坍塌</td>
+                <td>整段 latent <code>Z</code></td>
+                <td>SIGReg 对随机一维投影做 Gaussian normality matching</td>
+                <td><code>L_total = L_pred + lambda L_sigreg</code></td>
+              </tr>
+              <tr>
+                <td>推理规划</td>
+                <td>当前图、目标图、动作候选分布</td>
+                <td>CEM 采样 300 条候选，PushT 最多 30 次迭代，其它 10 次；MPC replanning</td>
+                <td>最优动作序列或要执行的首段动作</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            代码里的训练 forward 很直接：<code>train.py</code> 先 <code>self.model.encode(batch)</code>，
+            取 <code>ctx_emb = emb[:, :history_size]</code> 和 <code>ctx_act</code>，预测 <code>pred_emb</code>，
+            与 <code>tgt_emb = emb[:, num_preds:]</code> 做平方误差，同时对 <code>emb.transpose(0,1)</code> 调
+            <code>SIGReg</code>。这意味着 SIGReg 的时间维在最前，形状对应 <code>[T,B,D]</code>。
+          </p>
+          <p>
+            推理时 <code>get_cost()</code> 会先把目标图像塞进 <code>goal["pixels"]</code> 编码出 <code>goal_emb</code>，
+            再调用 <code>rollout(info_dict, action_candidates)</code>。<code>criterion()</code> 只看最后一步
+            predicted latent 和最后 goal latent 的 MSE，返回每个 CEM sample 的 cost <code>[B,S]</code>。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式/算法逐行讲解</h2>
+
+          <h3>公式 1：encoder 与 predictor</h3>
+          <div class="code-block">
+            <pre><code>z_t = enc_theta(o_t)
+z_hat_{t+1} = pred_phi(z_t, a_t)</code></pre>
+          </div>
+          <p>
+            <code>o_t</code> 是一帧 RGB 图像，实际训练中是 <code>[3,224,224]</code>；
+            <code>z_t</code> 是 192 维 latent；<code>a_t</code> 是动作 block；
+            <code>pred_phi</code> 在实现中不是只看单步，而是看最近 <code>N</code> 个 latent/action，并用 causal mask 预测下一步。
+          </p>
+
+          <h3>公式 2：next-embedding prediction loss</h3>
+          <div class="code-block">
+            <pre><code>L_pred = || z_hat_{t+1} - z_{t+1} ||_2^2
+z_hat_{t+1} = pred_phi(z_t, a_t)</code></pre>
+          </div>
+          <p>
+            这是 teacher forcing：目标 <code>z_{t+1}</code> 来自同一个 encoder 对真实下一帧的编码。
+            在代码中对应 <code>(pred_emb - tgt_emb).pow(2).mean()</code>。
+            风险是，如果没有正则，encoder 可以把所有 <code>z</code> 变成常数，预测损失仍然很低。
+          </p>
+
+          <h3>公式 3：SIGReg 随机投影</h3>
+          <div class="code-block">
+            <pre><code>Z in R^{N x B x d}
+u^(m) sampled from unit sphere S^{d-1}
+h^(m) = Z u^(m)
+
+SIGReg(Z) = (1/M) sum_{m=1}^M T(h^(m))</code></pre>
+          </div>
+          <p>
+            <code>Z</code> 收集一个 batch 内所有时间步的 latent；<code>N</code> 是 history/time，
+            <code>B</code> 是 batch size，<code>d=192</code>。每个 <code>u^(m)</code> 是随机单位方向，
+            <code>h^(m)</code> 是一维投影。<code>T</code> 是 Epps-Pulley 统计量，衡量该一维分布和标准高斯的差距。
+          </p>
+
+          <h3>公式 4：总目标</h3>
+          <div class="code-block">
+            <pre><code>L_LeWM = L_pred + lambda * SIGReg(Z)</code></pre>
+          </div>
+          <p>
+            论文主文说默认 <code>M=1024</code>、<code>lambda=0.1</code>；公开训练配置里
+            <code>num_proj=1024</code>、<code>knots=17</code>、<code>loss.sigreg.weight=0.09</code>。
+            这两个数略有差异，博客里我按“论文默认”和“代码配置”分别标注。
+          </p>
+
+          <h3>公式 5：latent planning cost 与 CEM</h3>
+          <div class="code-block">
+            <pre><code>z_hat_{t+1} = pred_phi(z_hat_t, a_t),  z_hat_1 = enc_theta(o_1)
+z_g = enc_theta(o_g)
+C(z_hat_H) = || z_hat_H - z_g ||_2^2
+
+a^*_{1:H} = argmin_{a_{1:H}} C(z_hat_H)</code></pre>
+          </div>
+          <p>
+            <code>o_1</code> 是当前图，<code>o_g</code> 是目标图；CEM 不求梯度，而是采样动作序列、rollout、
+            按 cost 选 elites，再更新采样分布。代码的 <code>criterion()</code> 和论文公式完全对应，只对最后预测 latent
+            与 goal latent 做 MSE，不使用中间轨迹监督。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练与推理细节对齐</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>检查点</th>
+                <th>论文/代码做法</th>
+                <th>不一致或风险</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Teacher forcing vs open-loop rollout</td>
+                <td>训练对真实 <code>z_{t+1}</code> 做一步预测；推理自回归滚动多步</td>
+                <td>长 horizon 会积累 latent model bias，所以论文用短 horizon + MPC</td>
+              </tr>
+              <tr>
+                <td>训练目标 vs 控制目标</td>
+                <td>训练只最小化 latent prediction + SIGReg；推理用 goal latent 距离</td>
+                <td>latent MSE 是否等价于 task progress 取决于 representation 是否保留可控物理量</td>
+              </tr>
+              <tr>
+                <td>Batch 分布 vs 单条在线状态</td>
+                <td>SIGReg 需要 batch/time 上的分布；推理只编码当前/目标图</td>
+                <td>如果 online 图像超出离线数据覆盖，latent 可能落在训练分布外</td>
+              </tr>
+              <tr>
+                <td>动作块</td>
+                <td>frame-skip=5，把 5 个环境步聚成一个动作 block</td>
+                <td>提高效率但降低控制频率，细粒度接触任务可能受影响</td>
+              </tr>
+              <tr>
+                <td>目标采样</td>
+                <td>评估从同一离线轨迹未来若干步采 goal，确保可达</td>
+                <td>这比任意 goal 更温和，不能完全代表开放目标规划</td>
+              </tr>
+              <tr>
+                <td>视觉细节</td>
+                <td>训练不加 reconstruction，decoder 只用于可视化</td>
+                <td>latent 可能丢失与控制有关的细粒度旋转、接触、遮挡信息</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            【不确定】论文说 MPC 只执行前 <code>K</code> 个动作再重规划，但 appendix 又写 horizon=5 且“entire optimized
+            action sequence is executed before replanning”。合理猜测有三种：<code>K=H=5</code>，所以两种说法等价；
+            stable-worldmodel 的 policy 内部还有 action_block 粒度；或者不同环境配置不同。验证方式是读
+            <code>stable_worldmodel.policy.WorldModelPolicy</code> 的执行逻辑，并在 eval log 中记录每次 CEM 调用间隔。
+          </p>
+          <p>
+            【不确定】主文默认 <code>lambda=0.1</code>，公开配置为 <code>0.09</code>。可能是最终代码复现实验用 0.09，
+            论文四舍五入写 0.1，或不同环境有不同 override。验证方式是检查各环境 config 和 HuggingFace checkpoint 的
+            <code>config.json</code>。
+          </p>
+          <p>
+            【不确定】训练配置 <code>max_epochs=100</code>，论文环境说明说每个 world model 训练 10 epochs。
+            可能是 config 默认值未覆盖、数据模块按 run schedule early stop、或论文实验另有命令行 override。
+            验证方式是查看官方 run scripts/WandB logs，或复现实验时显式设置 epoch 并比较 checkpoint 时间戳。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <p>
+            论文评估四个连续控制任务：Two-Room、Reacher、Push-T、OGBench-Cube。指标主要是 goal-conditioned
+            planning success rate、规划时间、固定 FLOPs 下的性能、latent probing、violation-of-expectation surprise。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>结论</th>
+                <th>证据</th>
+                <th>批判</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>规划快很多</td>
+                <td>项目页和论文报告 LeWM 约 0.98s，DINO-WM 约 47s，约 48x speedup</td>
+                <td>主要来自单 token latent；如果任务需要 dense spatial tokens，这个优势会变小</td>
+              </tr>
+              <tr>
+                <td>Push-T/Reacher 强</td>
+                <td>Push-T 上 LeWM 优于 PLDM，并可超过 DINO-WM；Reacher 也高于 PLDM/DINO-WM</td>
+                <td>Push-T 是 LeWM 叙事最强支点，但同 family/同设置调参是否完全公平要看所有 baseline config</td>
+              </tr>
+              <tr>
+                <td>Two-Room 弱</td>
+                <td>论文图 6 中 PLDM/DINO-WM 在 Two-Room 高于 LeWM</td>
+                <td>作者解释为低内在维度和高斯正则冲突，这很合理，但也可能是 planning cost 或 horizon 不适配</td>
+              </tr>
+              <tr>
+                <td>OGBench-Cube 仍输 DINO-WM</td>
+                <td>DINO-WM 在复杂 3D cube 任务略强，probing 也显示旋转/动态细节 DINO 更好</td>
+                <td>说明大规模视觉预训练不是无用，只是在许多任务上成本太高</td>
+              </tr>
+              <tr>
+                <td>latent 有物理结构</td>
+                <td>Push-T probing 中 LeWM 对 agent/block location 和 block angle 明显优于 PLDM，接近 DINO-WM</td>
+                <td>probe 能说明信息可读出，但不能单独证明 planner 真用到了这些变量</td>
+              </tr>
+              <tr>
+                <td>能检测物理违背</td>
+                <td>VoE 中 teleportation surprise 明显升高，颜色扰动通常弱于物理扰动</td>
+                <td>surprise 仍由 latent prediction error 定义，和人类物理理解不是同一回事</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            公平性上，论文明确把 DINO-WM 的 proprioception 排除在默认比较之外，但也给出 DINO-WM+prop 的对照，
+            这点比较干净。PLDM 是最接近的端到端 baseline，不过 PLDM 的六个 loss coefficient 做了 Push-T grid search
+            后固定到所有任务，这可能既避免 per-environment overfit，也可能低估 PLDM 在单环境最优调参下的上限。
+          </p>
+          <p>
+            隐藏 confound：目标从同一离线轨迹未来状态采样，保证可达，但也让评估更像 dataset-consistent goal reaching；
+            所有模型训练 10 epochs 的说法与公开默认 config 可能存在差异；DINO-WM 的大规模预训练数据是优势也是成本，
+            把“性能公平”和“训练成本公平”混在同一图里时要分开读。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 可复现清单</h2>
+          <ul>
+            <li>模型：ViT-Tiny encoder，patch size 14，hidden dim 192，约 5M 参数。</li>
+            <li>Predictor：6 层 Transformer，16 heads，dim_head 64，MLP dim 2048，dropout 0.1，约 10M 参数。</li>
+            <li>Embedding：每帧取 ViT last-layer CLS token，经 1-layer MLP + BatchNorm 投到 192 维。</li>
+            <li>Action：frame-skip=5，动作块经 <code>Embedder</code> 编到 192 维，AdaLN-zero 注入 predictor。</li>
+            <li>数据：HDF5；TwoRoom 10K episodes，Push-T 20K expert episodes，OGBench-Cube 10K episodes，Reacher 10K episodes。</li>
+            <li>训练 batch：batch size 128，sub-trajectory size 4，图像 224 x 224。</li>
+            <li>Loss：<code>L_pred + lambda SIGReg</code>；SIGReg <code>num_proj=1024</code>，<code>knots=17</code>。</li>
+            <li>优化：代码配置 AdamW，lr 5e-5，weight decay 1e-3，bf16，gradient clip 1.0，LinearWarmupCosineAnnealingLR。</li>
+            <li>规划：CEM 300 candidates，top 30 elites，initial variance 1；PushT 最多 30 iterations，其它 10。</li>
+            <li>Horizon：planning horizon 5，frame-skip 5，对应 25 environment timesteps；评估 budget PushT/Cube/Reacher 为 50 steps。</li>
+            <li>硬件：论文报告训练和规划均在单张 NVIDIA L40S GPU 上完成。</li>
+          </ul>
+          <p>
+            论文没完全写清但复现通常必须补齐：每个环境实际 override 的 epoch 数和 <code>lambda</code>；
+            图像预处理是否严格使用 ImageNet mean/std；动作 normalizer 的 fit 范围；CEM 随机种子和 action bounds/clipping；
+            goal sampling 是否排除 near-goal trivial cases；probe 的训练集/验证集切分；VoE surprise 的精确定义是 raw latent MSE
+            还是归一化误差；以及 stable-worldmodel 的 planner 是否每个 action block 都重规划。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 可能的改进方向</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>改动点</th>
+                <th>预期收益</th>
+                <th>风险</th>
+                <th>验证实验</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>自适应 latent 维度或低维 SIGReg</td>
+                <td>缓解 Two-Room 这类低内在维任务被 192 维高斯正则伤害</td>
+                <td>维度太小会丢复杂任务细节</td>
+                <td>按环境 intrinsic dimension 估计选择 D，比较 Two-Room 和 Cube 的迁移曲线</td>
+              </tr>
+              <tr>
+                <td>多 token bottleneck</td>
+                <td>保留单 token 高效性，同时给 3D/旋转/接触细节更多容量</td>
+                <td>CEM rollout 成本上升，可能接近 DINO-WM</td>
+                <td>1/4/8 CLS-like tokens 对比 OGBench-Cube、Push-T 速度和成功率</td>
+              </tr>
+              <tr>
+                <td>uncertainty-aware CEM cost</td>
+                <td>避免 planner 利用模型不确定区域，降低 open-loop exploitation</td>
+                <td>需要 ensemble 或 dropout 多次 forward，增加规划时间</td>
+                <td>cost 加 ensemble variance penalty，看长 horizon success 和失败模式</td>
+              </tr>
+              <tr>
+                <td>latent reward/value head 后训练</td>
+                <td>保留 reward-free pretraining，同时在下游任务上减少 CEM 搜索成本</td>
+                <td>会牺牲 task-agnostic 纯度，可能过拟合具体任务</td>
+                <td>LeWM frozen encoder/predictor 加小 value head，与纯 CEM 和 GCBC 比较</td>
+              </tr>
+              <tr>
+                <td>inverse dynamics 或 action-token learning</td>
+                <td>减少对显式 action label 的依赖，接近从视频学 world model</td>
+                <td>动作不可辨识问题严重，尤其是接触和多解控制</td>
+                <td>从无动作视频先学 latent dynamics，再用少量 action-labeled data 校准控制</td>
+              </tr>
+              <tr>
+                <td>视频预训练 + SIGReg finetune</td>
+                <td>把 DINO 的视觉先验和 LeWM 的端到端动态目标结合</td>
+                <td>可能重新引入大预训练成本，削弱论文的轻量优势</td>
+                <td>自然视频/机器人视频预训练 encoder，再端到端 LeWM fine-tune，测 Cube 旋转 probing</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 速读备忘卡</h2>
+          <ul>
+            <li>LeWM 是端到端 pixel-based JEPA latent world model，不是像素生成器。</li>
+            <li>训练只用离线图像和动作，不用 reward、不用 task label、不用 reconstruction。</li>
+            <li>核心损失是 next latent MSE + SIGReg，高斯正则负责防 representation collapse。</li>
+            <li>每帧压成一个 192 维 CLS latent，所以 CEM planning 很快。</li>
+            <li>Encoder 是 ViT-Tiny，predictor 是 action-conditioned Transformer。</li>
+            <li>动作通过 AdaLN-zero 注入 predictor，训练早期更稳定。</li>
+            <li>推理时编码当前图和目标图，用 CEM 搜动作序列，让最终 latent 接近 goal latent。</li>
+            <li>Push-T/Reacher 表现强，OGBench-Cube 仍受限于复杂 3D 视觉，Two-Room 暴露 SIGReg 低维任务问题。</li>
+            <li>代码实现很短，真正核心在 <code>JEPA.encode/predict/rollout</code>、<code>SIGReg.forward</code> 和训练 forward。</li>
+            <li>最重要的工程坑是训练/推理 horizon mismatch、action block、lambda/epoch config、CEM 采样成本。</li>
+            <li>这篇的 insight：好的 world model state 可以是 compact latent，只要它可预测、可控、可规划。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>参考</h2>
+          <ol class="source-list">
+            <li><a href="https://arxiv.org/pdf/2603.19312v1">LeWorldModel: Stable End-to-End Joint-Embedding Predictive Architecture from Pixels</a>, arXiv:2603.19312v1, 2026-03-13.</li>
+            <li><a href="https://le-wm.github.io/">LeWorldModel project page</a>.</li>
+            <li><a href="https://github.com/lucas-maes/le-wm">Official code base: lucas-maes/le-wm</a>.</li>
+            <li><a href="https://github.com/lucas-maes/le-wm/blob/main/jepa.py">jepa.py: JEPA encode, rollout, latent planning cost</a>.</li>
+            <li><a href="https://github.com/lucas-maes/le-wm/blob/main/module.py">module.py: SIGReg, AdaLN Transformer, ARPredictor</a>.</li>
+            <li><a href="https://github.com/lucas-maes/le-wm/blob/main/train.py">train.py: training forward and Hydra training setup</a>.</li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="../index.html#paper-reading">回到 Paper Reading</a>
+        <a href="latent-world-models.html">继续读：潜空间世界模型</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>Hosted on GitHub Pages.</p>
+      <a href="../index.html">回到首页</a>
+    </footer>
+  </body>
+</html>
