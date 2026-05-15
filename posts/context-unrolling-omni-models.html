@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Context Unrolling in Omni Models 论文精读</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,800;1,9..144,400&family=JetBrains+Mono:wght@300;400;500;700&family=Noto+Serif+SC:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script>
+window.MathJax = {
+  tex: {inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']]},
+  svg: {fontCache: 'global'}
+};
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+<style>
+:root{
+  --ink:#1a1614;
+  --paper:#f4f0e8;
+  --paper-2:#ebe4d4;
+  --accent:#c8421f;
+  --accent-soft:#e8b89c;
+  --blue:#2d4a6e;
+  --green:#5a6b3a;
+  --gold:#b8924a;
+  --line:rgba(26,22,20,0.18);
+  --muted:rgba(26,22,20,0.55);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  font-family:'Noto Serif SC','Fraunces',Georgia,serif;
+  background:var(--paper);
+  color:var(--ink);
+  line-height:1.75;
+  font-size:16px;
+  background-image:
+    radial-gradient(circle at 18% 12%, rgba(184,146,74,0.06) 0, transparent 40%),
+    radial-gradient(circle at 82% 72%, rgba(200,66,31,0.045) 0, transparent 50%);
+  overflow-x:hidden;
+}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.masthead{
+  border-bottom:3px double var(--ink);
+  padding:56px 60px 32px;
+}
+.masthead-top{
+  display:flex;
+  justify-content:space-between;
+  align-items:baseline;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.15em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin-bottom:28px;
+  border-bottom:1px solid var(--line);
+  padding-bottom:14px;
+}
+.masthead-top a{color:inherit;text-decoration:none}
+.masthead-top a:hover{color:var(--accent)}
+.masthead h1{
+  font-family:'Fraunces',serif;
+  font-weight:300;
+  font-size:clamp(42px,6vw,82px);
+  line-height:1.02;
+  letter-spacing:-0.025em;
+  margin-bottom:20px;
+  overflow-wrap:anywhere;
+}
+.masthead h1 em{font-style:italic;color:var(--accent);font-weight:400}
+.byline{
+  font-family:'Fraunces',serif;
+  font-style:italic;
+  font-size:18px;
+  color:var(--muted);
+  margin-bottom:24px;
+}
+.subtitle{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:15.5px;
+  max-width:880px;
+  line-height:1.75;
+}
+.subtitle strong{color:var(--accent)}
+.tags{margin-top:28px;display:flex;gap:10px;flex-wrap:wrap}
+.tag{
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  padding:5px 11px;
+  border:1px solid var(--ink);
+}
+.tag.filled{background:var(--ink);color:var(--paper)}
+section{
+  padding:60px;
+  border-bottom:1px solid var(--line);
+}
+.section-num{
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.2em;
+  color:var(--accent);
+  margin-bottom:12px;
+  display:block;
+}
+.section-title{
+  font-family:'Fraunces',serif;
+  font-weight:400;
+  font-size:clamp(30px,3.8vw,46px);
+  line-height:1.1;
+  letter-spacing:-0.015em;
+  margin-bottom:34px;
+  max-width:940px;
+}
+.section-title em{font-style:italic;color:var(--accent)}
+.body-text{
+  max-width:920px;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+}
+.body-text p{
+  margin-bottom:18px;
+  font-family:'Noto Serif SC',serif;
+}
+.body-text strong{color:var(--accent);font-weight:600}
+.body-text em{color:var(--blue);font-style:italic}
+.body-text ul,.body-text ol{
+  margin:14px 0 22px 1.4em;
+  font-family:'Noto Sans SC',sans-serif;
+}
+.body-text li{
+  margin:8px 0;
+  overflow-wrap:anywhere;
+  word-break:break-word;
+}
+.tldr{
+  background:var(--ink);
+  color:var(--paper);
+  padding:52px 60px;
+  display:grid;
+  grid-template-columns:1fr 2fr;
+  gap:60px;
+  position:relative;
+}
+.tldr::before{
+  content:'ONE-LINE';
+  position:absolute;
+  top:18px;
+  right:30px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.3em;
+  color:var(--accent-soft);
+}
+.tldr h2{
+  font-family:'Fraunces',serif;
+  font-weight:300;
+  font-size:36px;
+  line-height:1.15;
+  font-style:italic;
+}
+.tldr h2 strong{
+  display:block;
+  color:var(--accent-soft);
+  font-style:normal;
+  font-size:56px;
+  line-height:1;
+  margin-bottom:10px;
+}
+.tldr-content{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:15px;
+  line-height:1.85;
+}
+.tldr-content p{margin-bottom:16px}
+.tldr-content p:last-child{margin-bottom:0}
+.tldr-content strong{color:var(--accent-soft)}
+.pullquote{
+  margin:40px 0;
+  padding:36px 44px;
+  border-left:4px solid var(--accent);
+  background:var(--paper-2);
+  font-family:'Fraunces',serif;
+  font-style:italic;
+  font-size:22px;
+  line-height:1.55;
+  font-weight:300;
+  max-width:940px;
+}
+.two-col{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:22px;
+  margin:28px 0 34px;
+}
+.col-card{
+  border:1px solid var(--line);
+  background:rgba(235,228,212,0.55);
+  padding:26px 26px 24px;
+}
+.col-card strong{color:var(--accent)}
+.label{
+  display:block;
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.16em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin-bottom:12px;
+}
+.col-card h3{
+  font-family:'Fraunces',serif;
+  font-size:24px;
+  font-weight:500;
+  line-height:1.2;
+  margin-bottom:14px;
+}
+.col-card p,.col-card li{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14.5px;
+  line-height:1.85;
+}
+.col-card ul{margin-left:1.2em}
+.insight{
+  margin:40px 0;
+  padding:34px 38px;
+  border:1px solid var(--ink);
+  position:relative;
+  background:var(--paper);
+  max-width:980px;
+}
+.insight-label{
+  position:absolute;
+  top:-12px;
+  left:22px;
+  background:var(--paper);
+  padding:0 12px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.2em;
+  color:var(--accent);
+  text-transform:uppercase;
+}
+.insight h3{
+  font-family:'Fraunces',serif;
+  font-size:23px;
+  font-weight:500;
+  margin-bottom:16px;
+  font-style:italic;
+  line-height:1.3;
+}
+.insight p{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14.5px;
+  line-height:1.9;
+  margin-bottom:12px;
+}
+.insight p:last-child{margin-bottom:0}
+.insight strong{color:var(--accent);font-weight:600}
+.module-flow{
+  margin:34px 0;
+  border:1px solid var(--ink);
+  background:rgba(235,228,212,0.45);
+  padding:26px;
+}
+.flow-row{
+  display:grid;
+  grid-template-columns:1fr 34px 1.1fr 34px 1.1fr 34px 1fr;
+  align-items:stretch;
+  gap:10px;
+}
+.flow-box{
+  border:1px solid var(--line);
+  background:var(--paper);
+  padding:18px;
+  min-height:138px;
+}
+.flow-box b{
+  display:block;
+  font-family:'Fraunces',serif;
+  font-size:22px;
+  font-weight:500;
+  margin-bottom:8px;
+}
+.flow-box code{
+  display:block;
+  font-family:'JetBrains Mono',monospace;
+  font-size:12px;
+  line-height:1.65;
+  color:var(--blue);
+  white-space:normal;
+}
+.flow-arrow{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color:var(--accent);
+  font-family:'Fraunces',serif;
+  font-size:28px;
+}
+.formula,.code-block{
+  margin:18px 0;
+  padding:16px 22px;
+  background:var(--paper-2);
+  border-left:3px solid var(--ink);
+  font-family:'JetBrains Mono',monospace;
+  font-size:13px;
+  line-height:1.7;
+  overflow-x:auto;
+}
+.code-block pre{white-space:pre;min-width:720px}
+.formula .note{
+  margin-top:10px;
+  font-family:'Noto Sans SC',sans-serif;
+  color:var(--muted);
+  font-size:13px;
+}
+mjx-container{
+  max-width:100%;
+  overflow-x:auto;
+  overflow-y:hidden;
+}
+table.cmp{
+  width:100%;
+  border-collapse:collapse;
+  margin:30px 0;
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:13.5px;
+}
+table.cmp th,table.cmp td{
+  padding:12px 13px;
+  text-align:left;
+  border-bottom:1px solid var(--line);
+  vertical-align:top;
+}
+table.cmp th{
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  color:var(--muted);
+  background:var(--paper-2);
+  border-bottom:2px solid var(--ink);
+}
+table.cmp tr.best td{background:rgba(200,66,31,0.06);font-weight:600}
+table.cmp td.num{font-family:'JetBrains Mono',monospace;text-align:right;white-space:nowrap}
+.stat-grid{
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:14px;
+  margin:30px 0;
+}
+.stat{
+  border:1px solid var(--line);
+  background:var(--paper-2);
+  padding:22px 20px;
+}
+.stat-num{
+  font-family:'Fraunces',serif;
+  color:var(--accent);
+  font-size:42px;
+  font-weight:300;
+  line-height:1;
+  margin-bottom:8px;
+}
+.stat-label{
+  font-family:'JetBrains Mono',monospace;
+  color:var(--muted);
+  font-size:10.5px;
+  letter-spacing:0.14em;
+  text-transform:uppercase;
+}
+.check-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:14px;
+  margin:24px 0;
+}
+.check{
+  border-left:3px solid var(--accent);
+  background:rgba(235,228,212,0.6);
+  padding:18px 20px;
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14.5px;
+  line-height:1.8;
+}
+.check strong{color:var(--accent)}
+.sources{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14px;
+  line-height:1.85;
+  color:var(--muted);
+}
+.footer{
+  padding:40px 60px;
+  background:var(--ink);
+  color:var(--paper);
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.15em;
+  text-transform:uppercase;
+}
+.footer a{color:var(--paper);text-decoration:none}
+.footer-right{text-align:right;color:rgba(244,240,232,0.6)}
+@media (max-width:900px){
+  .masthead,section,.tldr{padding:38px 20px}
+  .masthead-top{flex-wrap:wrap;gap:8px 14px;align-items:flex-start}
+  .masthead h1{font-size:clamp(34px,12vw,50px);letter-spacing:0}
+  .tldr{grid-template-columns:1fr;gap:32px}
+  .two-col,.check-grid,.stat-grid{grid-template-columns:1fr}
+  .flow-row{grid-template-columns:minmax(0,1fr);gap:12px}
+  .flow-arrow{transform:rotate(90deg)}
+  table.cmp{display:block;max-width:100%;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .formula,.code-block,.insight,.module-flow{max-width:100%;overflow-x:auto}
+  .code-block pre{min-width:640px}
+  .footer{padding:30px 20px;flex-direction:column;align-items:flex-start;gap:10px}
+  .footer-right{text-align:left}
+}
+</style>
+</head>
+<body>
+<header class="masthead">
+  <div class="masthead-top">
+    <a href="../index.html#paper-reading">← Paper Reading</a>
+    <span>arXiv 2604.21921 · 2026.05.15</span>
+  </div>
+  <h1>Context <em>Unrolling</em><br>in Omni Models</h1>
+  <p class="byline">Native Multimodal · Shared Workspace · Text / Image / Video / 3D Context</p>
+  <p class="subtitle">
+    这篇论文的核心不是“又做了一个多任务模型”,而是把统一多模态模型重新解释成一个<strong>可调用上下文构造器</strong>:模型先调用文本、视觉 token、相机位姿、深度、novel view synthesis 等原子能力,把中间结果写回共享 context,再做最终预测。
+  </p>
+  <div class="tags">
+    <span class="tag filled">Omni Model</span>
+    <span class="tag">Context Unrolling</span>
+    <span class="tag">Multimodal CoT</span>
+    <span class="tag">3D Reasoning</span>
+    <span class="tag">Generation</span>
+  </div>
+</header>
+
+<section class="tldr">
+  <div>
+    <h2><strong>0</strong>一句话结论</h2>
+  </div>
+  <div class="tldr-content">
+    <p><strong>痛点.</strong> 现有 omni / unified multimodal model 常被当成“一个 backbone 接多个任务头”,但这种理解没有解释为什么统一模型会在复杂推理和生成中变好。</p>
+    <p><strong>核心招.</strong> 论文提出 <em>Context Unrolling</em>:把文本思考、视觉 token rollout、相机位姿、深度、novel view synthesis 等能力当成可调用 primitive,逐步构造上下文 $C_T$,再用 $C_T$ 条件化最终解码。</p>
+    <p><strong>效果.</strong> Omni 在理解、图像生成/编辑、视频生成/编辑、3D 位姿和深度上都有竞争力;在分析实验中,GenEval2 从 29.25 提到 53.44,空间理解从 27.14 提到 34.17,深度 $\delta_1$ 从 83.21% 提到 84.01%。</p>
+    <p><strong>代价.</strong> 论文更像范式论文和系统展示,训练配方、数据规模、tokenizer、loss、MoE routing 等关键复现细节严重不足;很多结果依赖内部 benchmark、inhouse evaluation 或 oracle context。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 1 · POSITIONING</span>
+  <h2 class="section-title">论文定位:<em>统一模型不是任务容器,而是上下文工作台</em></h2>
+  <div class="body-text">
+    <p>这篇论文讨论的是 <strong>native multimodal / omni model</strong> 范式。模型原生训练在文本、图像、视频、3D 几何和 hidden visual representations 上,支持 understanding、generation、editing、camera estimation、depth estimation 等多类输入输出。</p>
+    <p>它基于 BAGEL 的设计哲学继续扩展,使用 MoE 架构,论文称有 <strong>3B active parameters</strong>。与 Qwen3-VL、InternVL3.5 这类偏理解的 VLM,或 Flux、Z-Image、Wan、Hunyuan 这类偏生成的专用模型相比,Omni 的目标不是在单项任务上做一个专用最优专家,而是让多个能力在同一个模型里互相调用。</p>
+    <p>论文的关键差异是:它把统一模型的收益解释为 <strong>context construction</strong>。直接回答是 $x\\rightarrow y$;Context Unrolling 是先生成若干中间 context,再回答:文本 context 提供语义约束,视觉 token 提供结构脚手架,3D context 提供几何约束,novel views 提供“想象出的证据”。</p>
+  </div>
+
+  <div class="two-col">
+    <div class="col-card">
+      <span class="label">旧理解</span>
+      <h3>Unified model = 多任务容器</h3>
+      <ul>
+        <li>把理解、生成、编辑、3D 放进同一个 backbone</li>
+        <li>收益主要来自参数共享和数据共享</li>
+        <li>推理时仍常常是单步 direct decoding</li>
+      </ul>
+    </div>
+    <div class="col-card">
+      <span class="label">新理解</span>
+      <h3>Unified model = context 工作台</h3>
+      <ul>
+        <li>每个能力都是可调用 primitive</li>
+        <li>primitive 输出被写入共享 context</li>
+        <li>最终预测是 context-conditioned inference</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="pullquote">
+    这篇文章最有价值的 insight 是:多模态统一的真正收益,不只是“什么都能做”,而是“做 A 之前可以先调用 B/C/D 来构造更好的上下文”。
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 2 · PIPELINE</span>
+  <h2 class="section-title">方法总览:<em>从输入到 context 再到输出</em></h2>
+  <div class="body-text">
+    <p>论文没有给出完整网络结构图,但给出了清晰的推理抽象。整体 pipeline 可以概括为:</p>
+    <ol>
+      <li>输入 $x$ 可以是文本、图像、视频、多图、编辑指令、3D 任务请求等。</li>
+      <li>模型根据任务选择 primitive:describe、text-think、roll out visual tokens、predict camera pose、synthesize novel views、estimate depth。</li>
+      <li>每一步 primitive 产生一个中间 context $\\phi_t(x,C_t)$。</li>
+      <li>中间 context 通过组合算子 $\\oplus$ 写入共享 workspace。</li>
+      <li>最终 decoder $\\psi$ 在 $x$ 和 $C_T$ 条件下输出文本答案、图像、视频、depth image 或 camera 参数。</li>
+    </ol>
+  </div>
+
+  <div class="module-flow">
+    <div class="flow-row">
+      <div class="flow-box">
+        <b>Input</b>
+        <code>x = text / image / video / multi-image / edit instruction<br>tokens: [B,L,*]</code>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">
+        <b>Primitive Pool</b>
+        <code>text-think<br>visual-token rollout<br>camera pose<br>depth / NVS</code>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">
+        <b>Workspace</b>
+        <code>C_t = {text contexts, visual tokens, geometry text, hidden states}<br>iterative append</code>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">
+        <b>Decode</b>
+        <code>y = answer / image / video / depth / camera<br>conditioned on C_T</code>
+      </div>
+    </div>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>Context 类型</th><th>来源 primitive</th><th>数据形态</th><th>用途</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>短文本 thinking</td><td>模型自生成约 100 tokens</td><td>text tokens</td><td>补充属性、数量、关系、空间约束</td></tr>
+      <tr><td>长文本 thinking</td><td>模型自生成约 250 tokens</td><td>text tokens</td><td>更细的 prompt rewriting,改善复杂生成</td></tr>
+      <tr><td>视觉 token context</td><td>模型 rollout discrete visual tokens</td><td>visual tokens / hidden reps</td><td>提供结构、布局、objectness、粗几何脚手架</td></tr>
+      <tr><td>3D textural context</td><td>camera pose estimation</td><td><code>&lt;campose&gt;...&lt;/campose&gt;</code> 文本</td><td>把多视角关系显式写入推理上下文</td></tr>
+      <tr><td>3D visual context</td><td>novel view synthesis</td><td>合成的上/下/左/右视角图像</td><td>用“视觉想象”消除视角歧义</td></tr>
+      <tr><td>Depth caption</td><td>几何导向文本思考</td><td>front/back、遮挡、支撑关系文本</td><td>约束深度图生成</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 3 · INNOVATIONS</span>
+  <h2 class="section-title">关键创新点:<em>把能力变成 primitive</em></h2>
+
+  <div class="insight">
+    <span class="insight-label">创新 1</span>
+    <h3>Context Unrolling formalism: 从 direct answer 到 iterative context</h3>
+    <p><strong>旧方法为什么不行.</strong> 多模态模型即使支持多种输入输出,推理时也常被当成端到端黑盒。遇到复杂生成或空间推理,单步 latent reasoning 容易丢掉数量、位置、视角、遮挡等约束。</p>
+    <p><strong>怎么改.</strong> 论文把推理写成 $C_{t+1}=C_t\\oplus\\phi_t(x,C_t)$,最后 $y=\\psi(x\\mid C_T)$。其中 $\\phi_t$ 是可调用 primitive,$C_t$ 是逐步增长的共享 context。</p>
+    <p><strong>为什么有效.</strong> 多模态世界知识不是单一投影。文本擅长抽象约束,图像 token 擅长结构,几何输出擅长空间关系。把它们显式写入 context,相当于让模型先做可见的中间约束构造。</p>
+    <p><strong>代价/限制.</strong> 这会增加推理 token 和解码步骤;如果中间 context 错了,错误会被后续步骤放大。论文没有给出自动选择 primitive 的策略。</p>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">创新 2</span>
+    <h3>Self-unrolled text + visual contexts for generation</h3>
+    <p><strong>旧瓶颈.</strong> 文本到图像本身是一对多映射。短 prompt 往往没有写清物体数、属性、关系和位置,导致生成模型靠模糊先验补全。</p>
+    <p><strong>怎么改.</strong> 生成图像前,Omni 先自己生成短/长 textual specification,或者 rollout visual tokens,再把这些 context 输入生成过程。</p>
+    <p><strong>为什么有效.</strong> 文本 context 像 prompt rewriting,把隐含要求显式化;视觉 tokens 像粗 layout,给后续像素生成提供结构锚点。两者互补,所以 long text + visual 的 GenEval2 分数最高。</p>
+    <p><strong>代价/限制.</strong> 自生成 context 会带入 hallucination;oracle context 用 Gemini-3 Pro 得到上界,但这不是单模型闭环的真实部署成本。</p>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">创新 3</span>
+    <h3>3D geometry as context: camera pose 和 NVS 不只是输出</h3>
+    <p><strong>旧瓶颈.</strong> 纯文本 CoT 处理多视角空间问题很弱。视角变化、遮挡、左右关系会让语言推理丢失真实几何。</p>
+    <p><strong>怎么改.</strong> 论文让模型先估计相机相对位姿,把结果作为 3D textual context;或者先合成 canonical novel views,把“想象出的视角”作为 visual context。</p>
+    <p><strong>为什么有效.</strong> 位姿把“我从哪看”显式化,NVS 把未观察视角补出来。对空间题来说,这比自由文本解释更接近任务所需证据。</p>
+    <p><strong>代价/限制.</strong> Camera 参数被纯文本 tokenizer 编码,没有专门几何 tokenizer;数值精度、尺度归一化和错误传播都没有展开。</p>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">创新 4</span>
+    <h3>Depth generation with task-relevant context</h3>
+    <p><strong>旧瓶颈.</strong> 把 depth 当成图片生成任务时,模型可能只学到粗颜色-深度先验,细物体、灯、墙面深度差容易错。</p>
+    <p><strong>怎么改.</strong> 估计深度前,模型先生成 depth caption,只描述 front/back ordering、occlusion、support/contact 等几何线索;再叠加 visual token context。</p>
+    <p><strong>为什么有效.</strong> Generic caption 几乎没帮助,depth caption 有帮助,说明 context 不是越多越好,而是越“约束任务”越好。</p>
+    <p><strong>代价/限制.</strong> 提升幅度不大:论文表 4 中 $\delta_1$ 从 83.21% 到 84.01%。这说明 context unrolling 对深度有帮助,但还没有替代强专用几何模型。</p>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">创新 5</span>
+    <h3>Hidden reasoning space: 给 latent multimodal reasoning 留接口</h3>
+    <p><strong>旧瓶颈.</strong> 如果所有中间推理都必须变成文本,视觉结构和几何关系会被压缩损失。</p>
+    <p><strong>怎么改.</strong> 论文称 Omni 引入 hidden reasoning space,并把 hidden visual representations 作为训练模态之一。</p>
+    <p><strong>为什么有效.</strong> 这给模型提供了非文本的中间表示空间,让视觉/几何信息不必全部语言化。</p>
+    <p><strong>代价/限制.</strong> 【不确定】论文没有说明 hidden space 的 tokenizer、loss、训练比例和与可见 context 的接口。合理猜测是沿用 BAGEL 式离散视觉 token 或内部 latent code;验证方式是等官方代码,或看模型是否暴露 visual-token rollout API。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 4 · TRAINING & INFERENCE</span>
+  <h2 class="section-title">训练和推理:<em>论文写了什么,没写什么</em></h2>
+
+  <div class="two-col">
+    <div class="col-card">
+      <span class="label">Training</span>
+      <h3>Native multimodal pretraining</h3>
+      <ul>
+        <li>模态:文本、图像、视频、3D 几何、hidden representations</li>
+        <li>数据范式:继承 BAGEL 的 interleaved data paradigm</li>
+        <li>训练内容:加入 reasoning-oriented multimodal content</li>
+        <li>模型:MoE,3B active parameters</li>
+        <li>【不确定】优化器、LR、batch、tokenizer、loss 权重没有披露</li>
+      </ul>
+    </div>
+    <div class="col-card">
+      <span class="label">Inference</span>
+      <h3>Context-conditioned decoding</h3>
+      <ul>
+        <li>直接推理:输入 $x$,输出答案/图像/视频/深度/相机</li>
+        <li>文本 unrolling:short thinking、long thinking、depth caption</li>
+        <li>视觉 unrolling:visual tokens 或 novel views</li>
+        <li>几何 unrolling:camera pose 作为文本 context</li>
+        <li>最终输出:在 $C_T$ 条件下生成</li>
+      </ul>
+    </div>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>任务</th><th>输入</th><th>中间 context</th><th>输出</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Visual QA</td><td>图像/多图 + 问题</td><td>CoT-style thinking text</td><td>答案文本</td></tr>
+      <tr><td>Text-to-image</td><td>prompt</td><td>short/long text rewrite + visual tokens</td><td>图像</td></tr>
+      <tr><td>Image editing</td><td>图像 + instruction</td><td>隐式/显式编辑 context</td><td>编辑后图像</td></tr>
+      <tr><td>Spatial QA</td><td>多视角图像 + 空间问题</td><td>camera pose text 或 synthesized views</td><td>空间关系答案</td></tr>
+      <tr><td>Depth estimation</td><td>RGB image</td><td>depth caption + visual tokens</td><td>depth map image</td></tr>
+      <tr><td>Video generation/editing</td><td>文本/参考图/视频 + instruction</td><td>视频生成上下文</td><td>480x640,12s 视频</td></tr>
+    </tbody>
+  </table>
+
+  <div class="code-block">
+<pre># 论文抽象出的 context unrolling 伪代码
+C = empty_context()
+for t in range(T):
+    primitive = choose_primitive(x, C)       # e.g. text-think / camera / NVS / visual-token rollout
+    c_new = primitive(x, C)                 # phi_t(x, C_t)
+    C = compose(C, c_new)                   # C_{t+1} = C_t (+) c_new
+
+y = decode(x, C)                            # psi(x | C_T)</pre>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 5 · FORMULAS</span>
+  <h2 class="section-title">公式和算法:<em>把关键表达拆开</em></h2>
+
+  <h3 class="label">Formula 1 · Context Unrolling</h3>
+  <div class="formula">
+    $$C_{t+1}=C_t\\oplus\\phi_t(x,C_t),\\quad y=\\psi(x\\mid C_T)$$
+    <div class="note">$x$ 是多模态输入,$C_t$ 是第 $t$ 步已有 context,$\\phi_t$ 是 atomic primitive,$\\oplus$ 是 context composition,$\\psi$ 是最终 decoder。实现上,$C_t$ 可能是文本 token、视觉 token、图像、视频帧、相机数值文本或 hidden states 的混合序列。</div>
+  </div>
+
+  <h3 class="label">Formula 2 · Direct Prediction vs Context-conditioned Prediction</h3>
+  <div class="formula">
+    $$\\text{Direct: } y=f(x)$$
+    $$\\text{Unrolled: } y=\\psi(x\\mid C_{text},C_{vis},C_{geo},C_{hid})$$
+    <div class="note">论文的核心差异就在这里:不是直接从 prompt 到 image,也不是直接从 RGB 到 depth,而是先把任务相关的上下文显式构造出来。</div>
+  </div>
+
+  <h3 class="label">Formula 3 · Depth as Context-conditioned Generation</h3>
+  <div class="formula">
+    $$D=Depth(I\\mid C_{text},C_{vis})$$
+    <div class="note">$I$ 是输入 RGB,$D$ 是输出深度图。$C_{text}$ 可以是 depth caption,$C_{vis}$ 是 visual tokens。论文表 4 显示 generic detailed caption 几乎无效,depth caption 和 visual tokens 更有效。</div>
+  </div>
+
+  <h3 class="label">Formula 4 · Camera Pose as Text</h3>
+  <div class="formula">
+    $$C_{geo}=\\texttt{<campose>}\\ t_x\\ t_y\\ t_z\\ r_x\\ r_y\\ r_z\\ \\texttt{</campose>}\\ \\texttt{<fov>}f_h\\texttt{</fov>}\\ \\texttt{<fov>}f_w\\texttt{</fov>}$$
+    <div class="note">项目页说明 novel view generation 的 instruct 会包含相机位姿和 FOV,且整个 instruct 由 language tokenizer 编码,没有单独几何 encoder。这是很大胆的设计,也暴露了数值精度和泛化风险。</div>
+  </div>
+
+  <h3 class="label">Formula 5 · Visual Generation with Rolled Context</h3>
+  <div class="formula">
+    $$I_{out}\\sim p_\\theta(I\\mid x,C_{short/long},C_{visual})$$
+    <div class="note">这不是论文原文中的显式训练目标,而是对表 2 实验的实现抽象。$C_{short/long}$ 是模型自生成的文本改写,$C_{visual}$ 是离散视觉 tokens。GenEval2 中 long + visual 达到 53.44,明显高于 baseline 29.25。</div>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 6 · TRAIN/INFER ALIGNMENT</span>
+  <h2 class="section-title">训练与推理细节对齐:<em>最危险的是 context 分布</em></h2>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>检查项</th><th>论文做法</th><th>训练-推理不一致风险</th><th>验证方式</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Self-rollout context</td><td>推理时模型自己生成 short/long/depth captions 或 visual tokens</td><td>训练时若更多见到 clean context,推理时 noisy context 会放大错误</td><td>比较 self context、oracle context、人工 context 三组结果</td></tr>
+      <tr><td>Oracle context</td><td>用 Gemini-3 Pro 产生 oracle text 上界</td><td>高估 context unrolling 的实际闭环能力</td><td>报告 self-only 和 oracle-only 分开曲线</td></tr>
+      <tr><td>Primitive selection</td><td>论文手工指定何时 thinking/pose/NVS/depth caption</td><td>真实部署不知道何时该多花 compute</td><td>做难度自适应 policy 或 ablation:direct vs fixed vs learned routing</td></tr>
+      <tr><td>Visual tokens</td><td>作为结构 context 注入生成和深度</td><td>tokenizer/codebook 细节未披露,难复现</td><td>公开 visual token rollout API 或用 VQ tokenizer 替代</td></tr>
+      <tr><td>Camera pose text</td><td>数值由 language tokenizer 编码</td><td>数字格式、精度、单位、坐标系会影响 NVS 和空间推理</td><td>扰动 pose 小数位和坐标系,测 NVS/QA 鲁棒性</td></tr>
+      <tr><td>Video generation</td><td>当前 480x640,12s</td><td>与专用视频模型的长时长/高分辨率能力不对齐</td><td>按分辨率、时长、fps 分层评估</td></tr>
+      <tr><td>隐藏推理空间</td><td>论文称有 hidden reasoning space</td><td>不可见 latent context 难调试,也难判断是否真的执行多步推理</td><td>要求可视化/导出 hidden visual tokens 和中间 context</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 7 · EXPERIMENTS</span>
+  <h2 class="section-title">实验复盘:<em>证据强在趋势,弱在复现</em></h2>
+  <div class="body-text">
+    <p>论文的实验分两类:一类是证明 Omni 这个统一模型本身够强;另一类是证明 context unrolling 这个机制有效。后者更重要,因为它直接支持论文主张。</p>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>实验</th><th>Baseline</th><th>Context 后</th><th>结论</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Visual understanding self-thinking</td><td>MMStar 59.4 / ChartQA 85.5</td><td>66.5 / 88.0</td><td>文本 thinking 对理解任务有稳定增益</td></tr>
+      <tr><td>T2I GenEval2</td><td>29.25</td><td>long + visual 53.44</td><td>文本改写和视觉 token 对复杂组合生成很关键</td></tr>
+      <tr><td>Spatial MMSI</td><td>27.14</td><td>visual contexts 34.17</td><td>NVS 作为视觉想象比纯文本 CoT 更强</td></tr>
+      <tr><td>Depth estimation context</td><td>δ1 83.21%</td><td>visual contexts 84.01%</td><td>几何相关 context 有小幅但一致提升</td></tr>
+      <tr><td>Image generation main</td><td>Z-Image GenEval2 41.83</td><td>Omni 54.12</td><td>统一模型在图像生成 benchmark 上很强</td></tr>
+      <tr><td>Video generation</td><td>Wan2.1 total 83.69</td><td>Omni total 83.35 / semantic 84.29</td><td>总分略低,semantic 更强;分辨率和时长落后专用模型</td></tr>
+      <tr><td>Camera pose</td><td>VGGT RE10K AUC@30 88.23</td><td>Omni 88.32</td><td>RealEstate10K 接近/略超 VGGT</td></tr>
+      <tr><td>CO3Dv2 camera pose</td><td>VGGT AUC@30 86.23</td><td>Omni 75.21</td><td>物体中心数据上明显不如 VGGT,数据覆盖是 confound</td></tr>
+      <tr><td>Monocular depth</td><td>DA3/VGGT specialists</td><td>Omni 多项接近或超过</td><td>统一模型可做几何,但不是每项指标都赢</td></tr>
+    </tbody>
+  </table>
+
+  <div class="two-col">
+    <div class="col-card">
+      <span class="label">支持结论的地方</span>
+      <h3>趋势比较一致</h3>
+      <ul>
+        <li>越任务相关的 context 越有帮助</li>
+        <li>文本 context 和视觉 context 互补</li>
+        <li>3D context 对空间推理比普通 CoT 更有效</li>
+        <li>统一模型能覆盖理解、生成、视频和 3D</li>
+      </ul>
+    </div>
+    <div class="col-card">
+      <span class="label">需要警惕的地方</span>
+      <h3>公平性并不完美</h3>
+      <ul>
+        <li>内部 downsampled benchmark 和 inhouse evaluation 比例较高</li>
+        <li>很多 baseline 是专用模型,训练数据和算力不同</li>
+        <li>oracle context 使用外部 Gemini-3 Pro,不是同一系统能力</li>
+        <li>缺少 context 成本:多生成 100/250 tokens、visual tokens 或 NVS 的延迟没有报告</li>
+        <li>训练配方缺失,复现实验很难验证</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="pullquote">
+    实验最可信的部分是“context 类型越贴近任务约束,收益越明显”;最不够的部分是“没有完整说明如何训练出能稳定产生这些 context 的 Omni”。
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 8 · REPRODUCTION</span>
+  <h2 class="section-title">可复现清单:<em>先复现机制,别急着复现整模</em></h2>
+
+  <div class="check-grid">
+    <div class="check"><strong>基础模型.</strong> 需要一个支持 text/image/video/generation/editing/3D 的统一模型。论文称 Omni 是 MoE,3B active parameters,基于 BAGEL 思路。</div>
+    <div class="check"><strong>context primitives.</strong> 至少实现 text-think、visual-token rollout、camera pose text、NVS、depth caption 五类 primitive。</div>
+    <div class="check"><strong>prompt 预算.</strong> T2I 中 short thinking 平均约 100 tokens,long thinking 约 250 tokens。复现时要固定 token budget。</div>
+    <div class="check"><strong>几何文本格式.</strong> NVS 使用 <code>&lt;campose&gt;tx ty tz rx ry rz&lt;/campose&gt;</code> 和双 FOV 标签,整个 instruct 走 language tokenizer。</div>
+    <div class="check"><strong>depth 协议.</strong> 把 depth 当 image generation,比较 no context、generic caption、depth caption、visual tokens 四组。</div>
+    <div class="check"><strong>空间 QA 协议.</strong> 在 MMSI 类多图空间问题上比较 direct、text thinking、camera pose textual context、NVS visual context。</div>
+    <div class="check"><strong>成本记录.</strong> 必须记录额外 token、额外 forward、NVS 时间、context 长度,否则 context unrolling 的代价被隐藏。</div>
+    <div class="check"><strong>上下文质量评估.</strong> 对 self-rollout context 做人工/模型评分,区分 context 本身错误和 final decoder 错误。</div>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>论文没写清楚 / 不确定</th><th>合理猜测</th><th>验证方式</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>【不确定】完整训练 loss</td><td>可能是 interleaved autoregressive / diffusion-style 多模态目标混合</td><td>等代码或技术报告;用 BAGEL 训练目标作近似复现</td></tr>
+      <tr><td>【不确定】视觉 token tokenizer</td><td>可能沿用 BAGEL 的离散视觉 token 或内部视觉 latent tokenizer</td><td>检查项目是否开放 visual-token API;替换 VQ tokenizer 做 ablation</td></tr>
+      <tr><td>【不确定】数据规模和混合比例</td><td>文本、图像、视频、3D、hidden reps 有阶段化混合</td><td>做小规模混合比例 sweep,看 context 能力何时出现</td></tr>
+      <tr><td>【不确定】MoE routing 细节</td><td>不同模态/任务可能激活不同专家,但论文只报告 3B active</td><td>需要 router logs;比较 task-specific expert activation</td></tr>
+      <tr><td>【不确定】post-training/SFT/RL 细节</td><td>论文称没有 heavy post-training/distillation,但未说明 SFT 数据</td><td>复现实验要分 pretrain-only、SFT、context prompting 三阶段报告</td></tr>
+      <tr><td>【不确定】hidden reasoning space</td><td>可能是不可见 latent context 或 hidden visual representation channel</td><td>要求导出 hidden states/token,用 probing 检查是否含几何/语义信息</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 9 · IMPROVEMENTS</span>
+  <h2 class="section-title">可能的改进方向:<em>从手工 unroll 到学会何时 unroll</em></h2>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>学习 primitive selection policy</td><td>根据任务难度自动决定是否 text-think、NVS、pose、depth caption</td><td>RL 成本高,可能学会冗长无效 context</td><td>用 latency-regularized reward,比较 direct/fixed/learned policy</td></tr>
+      <tr><td>Context verifier / critic</td><td>过滤错误的 self-rollout context,降低错误传播</td><td>额外模型增加系统复杂度</td><td>对生成 context 做置信度打分,只保留高置信 context</td></tr>
+      <tr><td>数值几何 tokenizer</td><td>比纯文本 camera pose 更稳,提高 NVS/pose 泛化</td><td>破坏语言统一性,需要额外 embedding 设计</td><td>比较 text pose、quantized pose token、continuous pose embedding</td></tr>
+      <tr><td>可视化 hidden reasoning space</td><td>提升可解释性,确认模型是否真的在多模态推理</td><td>hidden probes 可能扰动模型</td><td>linear probe / retrieval / nearest context visualization</td></tr>
+      <tr><td>Context distillation</td><td>把多步 unrolling 的结果蒸馏到单步推理,降低延迟</td><td>可能丢失复杂场景下的动态适应性</td><td>teacher=unrolled,student=direct,比较质量-延迟 Pareto</td></tr>
+      <tr><td>公开 context-unrolling benchmark</td><td>让领域能比较“会不会调用中间模态”而非只看最终分数</td><td>标注成本高,容易被 prompt hack</td><td>构造必须使用中间几何/视觉证据才能答对的数据集</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 10 · MEMORY CARD</span>
+  <h2 class="section-title">速读备忘卡:<em>下次回忆用</em></h2>
+  <div class="body-text">
+    <ul>
+      <li>Omni 是一个 native multimodal unified model,覆盖文本、图像、视频、3D 几何和 hidden reps。</li>
+      <li>论文称模型有 3B active parameters,MoE 架构,基于 BAGEL 设计哲学。</li>
+      <li>核心概念是 Context Unrolling:先构造 context,再最终预测。</li>
+      <li>核心公式:先用 primitive 更新 context,再基于最终 context 解码。</li>
+      <li>Context 可以是文本 thinking、visual tokens、camera pose、novel views、depth caption。</li>
+      <li>T2I 中 long text + visual context 把 GenEval2 从 29.25 提到 53.44。</li>
+      <li>空间推理中 visual contexts 把 MMSI subset overall 从 27.14 提到 34.17。</li>
+      <li>Depth caption 比 generic caption 更有效,说明 context 要任务相关。</li>
+      <li>3D 能力不是单独炫技,而是作为下游推理的 context primitive。</li>
+      <li>实验亮点强,但复现弱:训练细节、数据、tokenizer、loss、MoE routing 都没充分披露。</li>
+      <li>最重要的未来方向是让模型自动决定何时、用什么模态 unroll context。</li>
+      <li>一句话记忆:Omni 的价值不是“多模态输出”,而是“多模态思考过程可被写入上下文”。</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">SOURCES</span>
+  <h2 class="section-title">资料来源:<em>本文使用的原始材料</em></h2>
+  <div class="sources">
+    <p>论文 PDF: <a href="https://arxiv.org/pdf/2604.21921">https://arxiv.org/pdf/2604.21921</a></p>
+    <p>arXiv 页面: <a href="https://arxiv.org/abs/2604.21921">https://arxiv.org/abs/2604.21921</a></p>
+    <p>官方项目页: <a href="https://omni-model.com/">https://omni-model.com/</a></p>
+    <p>本文写于 2026-05-15。项目页和 PDF 中没有完整公开训练配方,因此复现部分明确标注了不确定项。</p>
+  </div>
+</section>
+
+<footer class="footer">
+  <div><a href="../index.html#paper-reading">Paper Reading Notes</a></div>
+  <div class="footer-right">Context Unrolling · Omni Models</div>
+</footer>
+</body>
+</html>
