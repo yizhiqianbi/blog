@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VGGT-Ω 论文精读</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,800;1,9..144,400&family=JetBrains+Mono:wght@300;400;500;700&family=Noto+Serif+SC:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script>
+window.MathJax = {
+  tex: {inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']]},
+  svg: {fontCache: 'global'}
+};
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+<style>
+:root{
+  --ink:#1a1614;
+  --paper:#f4f0e8;
+  --paper-2:#ebe4d4;
+  --accent:#c8421f;
+  --accent-soft:#e8b89c;
+  --blue:#2d4a6e;
+  --green:#5a6b3a;
+  --gold:#b8924a;
+  --line:rgba(26,22,20,0.18);
+  --muted:rgba(26,22,20,0.55);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  font-family:'Noto Serif SC','Fraunces',Georgia,serif;
+  background:var(--paper);
+  color:var(--ink);
+  line-height:1.75;
+  font-size:16px;
+  background-image:
+    radial-gradient(circle at 18% 12%, rgba(184,146,74,0.06) 0, transparent 40%),
+    radial-gradient(circle at 82% 72%, rgba(200,66,31,0.045) 0, transparent 50%);
+  overflow-x:hidden;
+}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.masthead{
+  border-bottom:3px double var(--ink);
+  padding:56px 60px 32px;
+}
+.masthead-top{
+  display:flex;
+  justify-content:space-between;
+  align-items:baseline;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.15em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin-bottom:28px;
+  border-bottom:1px solid var(--line);
+  padding-bottom:14px;
+}
+.masthead-top a{color:inherit;text-decoration:none}
+.masthead-top a:hover{color:var(--accent)}
+.masthead h1{
+  font-family:'Fraunces',serif;
+  font-weight:300;
+  font-size:clamp(42px,6vw,82px);
+  line-height:1.02;
+  letter-spacing:-0.025em;
+  margin-bottom:20px;
+  overflow-wrap:anywhere;
+}
+.masthead h1 em{font-style:italic;color:var(--accent);font-weight:400}
+.byline{
+  font-family:'Fraunces',serif;
+  font-style:italic;
+  font-size:18px;
+  color:var(--muted);
+  margin-bottom:24px;
+}
+.subtitle{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:15.5px;
+  max-width:860px;
+  line-height:1.75;
+}
+.subtitle strong{color:var(--accent)}
+.tags{margin-top:28px;display:flex;gap:10px;flex-wrap:wrap}
+.tag{
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  padding:5px 11px;
+  border:1px solid var(--ink);
+}
+.tag.filled{background:var(--ink);color:var(--paper)}
+section{
+  padding:60px;
+  border-bottom:1px solid var(--line);
+}
+.section-num{
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.2em;
+  color:var(--accent);
+  margin-bottom:12px;
+  display:block;
+}
+.section-title{
+  font-family:'Fraunces',serif;
+  font-weight:400;
+  font-size:clamp(30px,3.8vw,46px);
+  line-height:1.1;
+  letter-spacing:-0.015em;
+  margin-bottom:34px;
+  max-width:920px;
+}
+.section-title em{font-style:italic;color:var(--accent)}
+.body-text{max-width:900px}
+.body-text p{
+  margin-bottom:18px;
+  font-family:'Noto Serif SC',serif;
+}
+.body-text strong{color:var(--accent);font-weight:600}
+.body-text em{color:var(--blue);font-style:italic}
+.body-text ul,.body-text ol{
+  margin:14px 0 22px 1.4em;
+  font-family:'Noto Sans SC',sans-serif;
+}
+.body-text li{margin:8px 0}
+.tldr{
+  background:var(--ink);
+  color:var(--paper);
+  padding:52px 60px;
+  display:grid;
+  grid-template-columns:1fr 2fr;
+  gap:60px;
+  position:relative;
+}
+.tldr::before{
+  content:'ONE-LINE';
+  position:absolute;
+  top:18px;
+  right:30px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.3em;
+  color:var(--accent-soft);
+}
+.tldr h2{
+  font-family:'Fraunces',serif;
+  font-weight:300;
+  font-size:36px;
+  line-height:1.15;
+  font-style:italic;
+}
+.tldr h2 strong{
+  display:block;
+  color:var(--accent-soft);
+  font-style:normal;
+  font-size:56px;
+  line-height:1;
+  margin-bottom:10px;
+}
+.tldr-content{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:15px;
+  line-height:1.85;
+}
+.tldr-content p{margin-bottom:16px}
+.tldr-content p:last-child{margin-bottom:0}
+.tldr-content strong{color:var(--accent-soft)}
+.pullquote{
+  margin:40px 0;
+  padding:36px 44px;
+  border-left:4px solid var(--accent);
+  background:var(--paper-2);
+  font-family:'Fraunces',serif;
+  font-style:italic;
+  font-size:22px;
+  line-height:1.55;
+  font-weight:300;
+  max-width:940px;
+}
+.two-col{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:22px;
+  margin:28px 0 34px;
+}
+.col-card{
+  border:1px solid var(--line);
+  background:rgba(235,228,212,0.55);
+  padding:26px 26px 24px;
+}
+.col-card strong{color:var(--accent)}
+.label{
+  display:block;
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.16em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin-bottom:12px;
+}
+.col-card h3{
+  font-family:'Fraunces',serif;
+  font-size:24px;
+  font-weight:500;
+  line-height:1.2;
+  margin-bottom:14px;
+}
+.col-card p,.col-card li{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14.5px;
+  line-height:1.85;
+}
+.col-card ul{margin-left:1.2em}
+.insight{
+  margin:40px 0;
+  padding:34px 38px;
+  border:1px solid var(--ink);
+  position:relative;
+  background:var(--paper);
+  max-width:980px;
+}
+.insight-label{
+  position:absolute;
+  top:-12px;
+  left:22px;
+  background:var(--paper);
+  padding:0 12px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.2em;
+  color:var(--accent);
+  text-transform:uppercase;
+}
+.insight h3{
+  font-family:'Fraunces',serif;
+  font-size:23px;
+  font-weight:500;
+  margin-bottom:16px;
+  font-style:italic;
+  line-height:1.3;
+}
+.insight p{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14.5px;
+  line-height:1.9;
+  margin-bottom:12px;
+}
+.insight p:last-child{margin-bottom:0}
+.insight strong{color:var(--accent);font-weight:600}
+.module-flow{
+  margin:34px 0;
+  border:1px solid var(--ink);
+  background:rgba(235,228,212,0.45);
+  padding:26px;
+}
+.flow-row{
+  display:grid;
+  grid-template-columns:1.1fr 34px 1.2fr 34px 1.15fr 34px 1fr;
+  align-items:stretch;
+  gap:10px;
+}
+.flow-box{
+  border:1px solid var(--line);
+  background:var(--paper);
+  padding:18px;
+  min-height:134px;
+}
+.flow-box b{
+  display:block;
+  font-family:'Fraunces',serif;
+  font-size:22px;
+  font-weight:500;
+  margin-bottom:8px;
+}
+.flow-box code{
+  display:block;
+  font-family:'JetBrains Mono',monospace;
+  font-size:12px;
+  line-height:1.65;
+  color:var(--blue);
+  white-space:normal;
+}
+.flow-arrow{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color:var(--accent);
+  font-family:'Fraunces',serif;
+  font-size:28px;
+}
+.formula,.code-block{
+  margin:18px 0;
+  padding:16px 22px;
+  background:var(--paper-2);
+  border-left:3px solid var(--ink);
+  font-family:'JetBrains Mono',monospace;
+  font-size:13px;
+  line-height:1.7;
+  overflow-x:auto;
+}
+.code-block pre{white-space:pre;min-width:720px}
+.formula .note{
+  margin-top:10px;
+  font-family:'Noto Sans SC',sans-serif;
+  color:var(--muted);
+  font-size:13px;
+}
+table.cmp{
+  width:100%;
+  border-collapse:collapse;
+  margin:30px 0;
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:13.5px;
+}
+table.cmp th,table.cmp td{
+  padding:12px 13px;
+  text-align:left;
+  border-bottom:1px solid var(--line);
+  vertical-align:top;
+}
+table.cmp th{
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  color:var(--muted);
+  background:var(--paper-2);
+  border-bottom:2px solid var(--ink);
+}
+table.cmp tr.best td{background:rgba(200,66,31,0.06);font-weight:600}
+table.cmp td.num{font-family:'JetBrains Mono',monospace;text-align:right;white-space:nowrap}
+.stat-grid{
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:14px;
+  margin:30px 0;
+}
+.stat{
+  border:1px solid var(--line);
+  background:var(--paper-2);
+  padding:22px 20px;
+}
+.stat-num{
+  font-family:'Fraunces',serif;
+  color:var(--accent);
+  font-size:42px;
+  font-weight:300;
+  line-height:1;
+  margin-bottom:8px;
+}
+.stat-label{
+  font-family:'JetBrains Mono',monospace;
+  color:var(--muted);
+  font-size:10.5px;
+  letter-spacing:0.14em;
+  text-transform:uppercase;
+}
+.check-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:14px;
+  margin:24px 0;
+}
+.check{
+  border-left:3px solid var(--accent);
+  background:rgba(235,228,212,0.6);
+  padding:18px 20px;
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14.5px;
+  line-height:1.8;
+}
+.check strong{color:var(--accent)}
+.marker{
+  display:inline-block;
+  padding:1px 8px;
+  background:var(--accent);
+  color:var(--paper);
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.1em;
+  margin:0 2px;
+  vertical-align:1px;
+}
+.sources{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14px;
+  line-height:1.85;
+  color:var(--muted);
+}
+.footer{
+  padding:40px 60px;
+  background:var(--ink);
+  color:var(--paper);
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.15em;
+  text-transform:uppercase;
+}
+.footer a{color:var(--paper);text-decoration:none}
+.footer-right{text-align:right;color:rgba(244,240,232,0.6)}
+@media (max-width:900px){
+  .masthead,section,.tldr{padding:38px 20px}
+  .masthead-top{flex-wrap:wrap;gap:8px 14px;align-items:flex-start}
+  .masthead h1{font-size:clamp(34px,12vw,50px);letter-spacing:0}
+  .tldr{grid-template-columns:1fr;gap:32px}
+  .two-col,.check-grid,.stat-grid{grid-template-columns:1fr}
+  .flow-row{grid-template-columns:minmax(0,1fr);gap:12px}
+  .flow-arrow{transform:rotate(90deg)}
+  table.cmp{display:block;max-width:100%;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .formula,.code-block,.insight,.module-flow{max-width:100%;overflow-x:auto}
+  .footer{padding:30px 20px;flex-direction:column;align-items:flex-start;gap:10px}
+  .footer-right{text-align:left}
+}
+</style>
+</head>
+<body>
+<header class="masthead">
+  <div class="masthead-top">
+    <a href="../index.html#paper-reading">← Paper Reading</a>
+    <span>CVPR 2026 Oral · 2026.05.15</span>
+  </div>
+  <h1>VGGT-<em>Ω</em><br>Scaling Feed-Forward 3D</h1>
+  <p class="byline">Register Attention · 4D Reconstruction · Self-Supervised Video · Spatial Tokens</p>
+  <p class="subtitle">
+    这篇论文不是只提出一个小模块,而是把 VGGT 推到<strong>可扩展 3D/4D 几何基础模型</strong>的一次系统升级:架构省显存,数据管线扩大监督规模,自监督吃未标注视频,再证明 scene registers 可以服务 VLA 和语言对齐。
+  </p>
+  <div class="tags">
+    <span class="tag filled">3D Reconstruction</span>
+    <span class="tag">World Model</span>
+    <span class="tag">Vision Transformer</span>
+    <span class="tag">Dynamic Scenes</span>
+    <span class="tag">VLA</span>
+  </div>
+</header>
+
+<section class="tldr">
+  <div>
+    <h2><strong>0</strong>一句话结论</h2>
+  </div>
+  <div class="tldr-content">
+    <p><strong>痛点.</strong> VGGT 这类前馈 3D 重建模型已经很强,但训练显存、dense head 冗余、动态视频标注和未标注视频利用都卡住了继续 scaling。</p>
+    <p><strong>核心招.</strong> VGGT-Ω 用 <em>scene registers + register attention</em> 压缩跨帧信息交换,用单一 dense depth head 加 training-only point/matching losses 省掉冗余头,再用大规模视频标注管线和 teacher-student 自监督扩数据。</p>
+    <p><strong>效果.</strong> 训练显存约降到 VGGT 的 30%,监督数据扩大到 15x 以上,在静态和动态 6 个 benchmark 上刷新 camera/depth 结果;Sintel camera AUC@3° 从 22.5 提到 40.0,相对提升 77%。</p>
+    <p><strong>代价.</strong> 结果强依赖内部数据、128 张 96GB H100、大规模伪标注过滤和 10B 模型;论文 preview 版尚未给出完整代码细节,复现门槛非常高。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 1 · POSITIONING</span>
+  <h2 class="section-title">论文定位:<em>从重建器到几何基础模型</em></h2>
+  <div class="body-text">
+    <p>VGGT-Ω 处在 <strong>feed-forward 3D reconstruction</strong> 这条线上。输入是一组图像或视频帧,模型不跑 SfM/MVS 的迭代优化,而是一次 transformer forward 直接输出每帧相机和深度。它继承 VGGT 的核心范式:把多视角几何估计做成一个可训练的大模型。</p>
+    <p>与传统 COLMAP、bundle adjustment、MegaSaM 这类方法相比,关键差异不是“更换一个优化器”,而是<strong>把几何推断从测试时优化搬到训练时学习</strong>。推理时不需要显式匹配、三角化、BA 循环,而是依赖大规模数据学到的几何先验。</p>
+    <p>与 VGGT 相比,VGGT-Ω 的核心不是单点提升,而是三个层面的 scaling recipe:架构层面省显存,数据层面扩大到动态视频,训练层面引入未标注视频自监督。论文真正的 insight 是:前馈重建模型可能像语言模型一样有比较稳定的 scaling law,并且中间的 scene registers 可以成为通用空间表征。</p>
+  </div>
+
+  <div class="two-col">
+    <div class="col-card">
+      <span class="label">Baseline Paradigm</span>
+      <h3>传统几何 / 优化式动态重建</h3>
+      <ul>
+        <li>依赖特征匹配、RANSAC、三角化、bundle adjustment</li>
+        <li>在 well-conditioned 静态场景可极准,但动态、弱纹理、少视差会崩</li>
+        <li>测试时计算重,很难直接变成可迁移的空间 token</li>
+      </ul>
+    </div>
+    <div class="col-card">
+      <span class="label">VGGT-Ω Paradigm</span>
+      <h3>大模型前馈几何</h3>
+      <ul>
+        <li>一次 forward 输出 camera + depth</li>
+        <li>用动态和静态大数据学习几何先验</li>
+        <li>scene registers 同时是跨帧通信瓶颈和下游空间表征</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="pullquote">
+    这篇论文的主张是:3D 重建不只是一个输出点云的工具,也可以成为训练空间智能表征的 proxy task。
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 2 · PIPELINE</span>
+  <h2 class="section-title">方法总览:<em>一条更可扩展的 VGGT</em></h2>
+  <div class="body-text">
+    <p>宏观上,VGGT-Ω 的 pipeline 可以压缩成 6 步:</p>
+    <ol>
+      <li>输入 $N$ 张图像或视频帧,不显式依赖时间顺序。</li>
+      <li>DINOv3 ViT 把每帧切成 patch tokens。</li>
+      <li>每帧追加 1 个 camera token 和 16 个 scene registers。</li>
+      <li>多层 alternating attention 在帧内和跨帧之间传播信息;其中 25% 的 global attention 被 register attention 替代。</li>
+      <li>depth head 输出每帧 depth/confidence;camera head 从 camera token + registers 输出 9D camera 参数。</li>
+      <li>训练时额外用 point loss 和 matching loss 监督 latent,但推理时不输出 point map 和 tracking head。</li>
+    </ol>
+  </div>
+
+  <div class="module-flow">
+    <div class="flow-row">
+      <div class="flow-box">
+        <b>Input</b>
+        <code>I:[B,N,3,H,W]<br>N ∈ [1,24] during training<br>~512×512 area</code>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">
+        <b>Tokenizer</b>
+        <code>zF_i = DINOv3(I_i)<br>[B,N,H'W',C]<br>H'=H/r, W'=W/r</code>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">
+        <b>Aggregator</b>
+        <code>append camera:1<br>append registers:16<br>[B,N,H'W'+17,C]</code>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">
+        <b>Heads</b>
+        <code>camera: [B,N,9]<br>depth: [B,N,H,W,1]<br>confidence: [B,N,H,W,1]</code>
+      </div>
+    </div>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>模块</th><th>数据流</th><th>实现含义</th><th>为什么重要</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>DINOv3 tokenizer</td><td>RGB → patch tokens</td><td>用 16 patch 的 DINOv3 初始化,训练中不冻结</td><td>优化更快,从零训练需要 4-8x iterations</td></tr>
+      <tr><td>Scene registers</td><td>每帧 16 个 register</td><td>跨帧聚合全局场景信息</td><td>既省 attention,又可作为 VLA/语言对齐 token</td></tr>
+      <tr><td>Register attention</td><td>只让 registers 跨帧 self-attend</td><td>替代 25% global attention</td><td>训练 backbone 约省 23% FLOPs 和 16% memory</td></tr>
+      <tr><td>Single dense head</td><td>tokens → depth/confidence</td><td>保留低分辨率 DPT conv,高分辨率用 MLP + pixel shuffle</td><td>省掉最吃显存的高分辨率卷积激活</td></tr>
+      <tr><td>Training-only losses</td><td>depth/camera → point/matching supervision</td><td>不直接预测 point map/tracks,但用它们训练 latent</td><td>保留多任务好处,减少推理和训练头部负担</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 3 · INNOVATIONS</span>
+  <h2 class="section-title">关键创新点:<em>三个省钱设计加两个扩数据设计</em></h2>
+
+  <div class="insight">
+    <span class="insight-label">创新 1</span>
+    <h3>Register attention: 把跨帧通信压缩到 scene tokens</h3>
+    <p><strong>旧瓶颈.</strong> VGGT 的 global attention 让所有帧的所有 patch tokens 互相看见,复杂度随总 token 数二次增长。长视频、多帧输入、训练反传都会被 attention activation 卡住。</p>
+    <p><strong>怎么改.</strong> VGGT-Ω 观察到 VGGT 中 global attention map 很稀疏,于是把部分 global layers 改成 register attention:跨帧 self-attention 只发生在每帧的 16 个 registers 之间,patch tokens 不直接跨帧通信。</p>
+    <p><strong>为什么有效.</strong> 如果多视角几何需要的是少量全局 scene state,那么 registers 可以当信息瓶颈:先收集各帧信息,再通过后续 frame attention 把全局信息回写到本帧 patch tokens。它类似一个可学习的多视角工作记忆。</p>
+    <p><strong>代价.</strong> 只替换 25% global layers 基本不掉性能;全部替换会把 FLOPs 降到约 6%,但性能掉回 VGGT 水平。说明 registers 不是万能总线,高精度几何仍需要一部分 dense cross-frame interaction。</p>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">创新 2</span>
+    <h3>单 dense head + 多任务 loss: 不输出也能监督</h3>
+    <p><strong>旧瓶颈.</strong> VGGT 有多个 dense prediction heads,例如 depth、point map、tracking features。多头训练确实有益,但高分辨率 dense head 的 forward activations 极其吃显存,FSDP 和 checkpointing 也不能消掉这类激活存储。</p>
+    <p><strong>怎么改.</strong> VGGT-Ω 推理时只保留 depth dense head 和 sparse camera head,但训练时通过 camera、depth、point、matching 四类 loss 继续给 latent 施加几何监督。point map 由 depth + camera 反投影得到,matching loss 直接作用在最后一层 tokens。</p>
+    <p><strong>为什么有效.</strong> 监督信号和输出头被解耦了。模型仍然被迫学习点级几何和跨帧匹配,但不需要维护多个昂贵 dense decoders。</p>
+    <p><strong>代价.</strong> 原 VGGT 多头多任务的 point error 可到 0.070,VGGT-Ω 的单头多 loss 为 0.073,略差但可扩展。去掉 point/matching losses 后升到 0.078,说明这些 training-only losses 仍然有必要。</p>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">创新 3</span>
+    <h3>MLP + pixel shuffle: 针对 dense decoder 的显存手术</h3>
+    <p><strong>旧瓶颈.</strong> DPT head 的高分辨率卷积层参数不多,但 activation 大,训练时很贵。</p>
+    <p><strong>怎么改.</strong> 在超过输入 1/4 分辨率的部分,用一个 MLP 输出 $2u^2$ 个通道,再用 pixel shuffle 变成 $(uH')\\times(uW')\\times2$。论文实现里 $u=4$,两个通道对应 depth 和 confidence。</p>
+    <p><strong>为什么有效.</strong> Pixel shuffle 把空间上采样变成通道重排,避免维护多个高分辨率卷积特征图。低分辨率卷积仍保留,用于减少纯 MLP depth 的 block artifacts。</p>
+    <p><strong>代价.</strong> 完全去卷积的 decoder 定量不差,但户外远景会出现块状伪影。几何输出不像图像像素那样数值有界,纯 token-to-pixel MLP 更难保证空间平滑。</p>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">创新 4</span>
+    <h3>动态视频标注管线: 先保守过滤,再大规模伪标注</h3>
+    <p><strong>旧瓶颈.</strong> 动态视频是最大的数据源,但传统 SfM/MVS 假设场景静态。直接用互联网视频做监督会把镜头切换、运动模糊、反光、纯旋转、动态物体等噪声注入模型。</p>
+    <p><strong>怎么改.</strong> 论文构建约 4000 万内部视频池:VLM 先做 hard/soft reject 和动态性判断;Grounding DINO 掩掉人、车等可动物体;SuperPoint/SuperGlue、ALIKED/LightGlue、VGGSfM Tracker 做匹配和 track;VGGT 初始化困难相机;COLMAP 做 BA;再用多视角一致性和监督几何分类器过滤。</p>
+    <p><strong>为什么有效.</strong> 这条线的策略不是最大化样本数,而是最大化 pseudo GT 置信度。论文最终保留约 60 万静态和 20 万动态高质量视频序列,再和其他数据合成总计约 400 万 scenes/sequences。</p>
+    <p><strong>代价.</strong> 这部分是最大复现门槛。VLM、内部视频、人工标注 1000 条过滤器训练集、多个 matcher 和 SfM/MVS 工具链都要稳定协同。</p>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">创新 5</span>
+    <h3>Teacher-student 自监督: 用未标注视频学不变性</h3>
+    <p><strong>旧瓶颈.</strong> 监督重建数据昂贵,而视频海量。直接新视角合成或从零自监督在动态场景上并不稳。</p>
+    <p><strong>怎么改.</strong> 从 supervised VGGT-Ω checkpoint 初始化 teacher/student。对同一帧集合施加不同增强和随机帧重排,恢复共同顺序后,student 匹配 teacher 的多层 tokens、camera 和 depth;teacher 用 EMA 更新,heads 在自监督阶段冻结防坍塌。</p>
+    <p><strong>为什么有效.</strong> 它没有要求像素级重建,而是把已经学到的几何函数蒸馏成对颜色扰动、遮挡、旋转、帧顺序更稳定的表征。论文用 1800 万未标注视频,自监督替换 10% supervised steps 后 point error 从 0.073 到 0.070。</p>
+    <p><strong>代价.</strong> 作者自己承认其他自监督方案基本没打通;这套 teacher-student 仍依赖一个强 supervised checkpoint,不是完全从零的自监督 4D 重建。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 4 · TRAINING & INFERENCE</span>
+  <h2 class="section-title">训练和推理:<em>输入、输出和实际跑法</em></h2>
+
+  <div class="two-col">
+    <div class="col-card">
+      <span class="label">Supervised Training</span>
+      <h3>有 camera/depth 的序列</h3>
+      <ul>
+        <li>输入: $N$ 帧 RGB,训练时 $N\\sim U[1,24]$</li>
+        <li>GT: camera $g_i$, depth $D_i$, valid mask,可由 camera/depth 推出 point map</li>
+        <li>增强: aspect ratio [0.33,1.33],面积约 $512\\times512$, color jitter, grayscale, patch masking</li>
+        <li>loss: camera + depth + point + matching</li>
+      </ul>
+    </div>
+    <div class="col-card">
+      <span class="label">Self-supervised Training</span>
+      <h3>未标注视频蒸馏</h3>
+      <ul>
+        <li>teacher/student 都从 supervised checkpoint 初始化</li>
+        <li>同一帧集合,不同增强和帧重排</li>
+        <li>对齐顺序后匹配 tokens、多层特征、camera/depth predictions</li>
+        <li>teacher EMA decay 0.999;depth/camera heads 冻结防坍塌</li>
+      </ul>
+    </div>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>阶段</th><th>输入</th><th>输出</th><th>关键操作</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>训练前数据构造</td><td>公开数据 + 内部 synthetic/real + 互联网视频</td><td>camera/depth/valid mask 或 unlabeled clips</td><td>VLM 过滤、dynamic mask、COLMAP、MVS、多视角一致性、几何分类器</td></tr>
+      <tr><td>监督训练</td><td>$I_{1:N}$ + GT camera/depth</td><td>model weights</td><td>160K steps,AdamW,bf16,FSDP,gradient checkpointing</td></tr>
+      <tr><td>自监督训练</td><td>unlabeled videos</td><td>更泛化的 model weights</td><td>50K steps,teacher-student,EMA,feature/prediction matching</td></tr>
+      <tr><td>最后监督微调</td><td>clean supervised sequences</td><td>final checkpoint</td><td>30K steps,把自监督后模型拉回几何指标</td></tr>
+      <tr><td>推理</td><td>一组图像/视频帧</td><td>$\\hat g_i\\in R^9$, $\\hat D_i\\in R^{H\\times W}$,confidence</td><td>无需 BA;可反投影得到点云/4D reconstruction</td></tr>
+    </tbody>
+  </table>
+
+  <div class="stat-grid">
+    <div class="stat"><div class="stat-num">128</div><div class="stat-label">96GB H100</div></div>
+    <div class="stat"><div class="stat-num">240K</div><div class="stat-label">training iterations</div></div>
+    <div class="stat"><div class="stat-num">4M</div><div class="stat-label">annotated sequences pool</div></div>
+    <div class="stat"><div class="stat-num">18M</div><div class="stat-label">unlabeled videos</div></div>
+  </div>
+
+  <div class="code-block">
+<pre># 代码实现视角的 forward 伪代码
+images = load_frames(...)                 # [B, N, 3, H, W]
+patch = dinov3(images)                    # [B, N, H'W', C]
+cam_tok = camera_token.expand(B, N, 1, C)
+reg_tok = scene_registers.expand(B, N, 16, C)
+z = concat([patch, cam_tok, reg_tok], dim=2)
+
+for block in blocks:
+    if block.use_register_attention:
+        z.registers = attention_across_frames(z.registers)
+    else:
+        z = global_attention_across_all_tokens(z)
+    z = frame_attention_within_each_image(z)
+
+depth, conf = depth_head(z.patch_tokens)
+camera = camera_head(z.camera_tokens, z.registers)  # [B, N, 9]
+return camera, depth, conf</pre>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 5 · FORMULAS</span>
+  <h2 class="section-title">公式和算法:<em>把关键 5 个式子拆开</em></h2>
+
+  <h3 class="label">Formula 1 · Problem Formulation</h3>
+  <div class="formula">
+    $$((g_1,D_1),\\ldots,(g_N,D_N))=f(I_1,\\ldots,I_N)$$
+    $$D_i\\in\\mathbb{R}^{H\\times W},\\quad g_i=(q_i,t_i,f_i)\\in\\mathbb{R}^{9}$$
+    <div class="note">这里 $q_i\\in R^4$ 是 rotation quaternion,$t_i\\in R^3$ 是 translation,$f_i\\in R^2$ 是 field of view。论文默认 principal point 在图像中心。实现中就是每帧预测一个 9D pose encoding 和一张 dense depth。</div>
+  </div>
+
+  <h3 class="label">Formula 2 · Tokenization</h3>
+  <div class="formula">
+    $$z_i^F=DINOv3(I_i)\\in\\mathbb{R}^{H'W'\\times C},\\quad H'=H/r,\\ W'=W/r$$
+    $$z_i=(z_i^F,z_i^{cam},z_i^{scene}),\\quad z\\in\\mathbb{R}^{N\\times(H'W'+17)\\times C}$$
+    <div class="note">每帧 1 个 camera token 和 16 个 scene tokens。$17=1+16$。训练和推理都不需要显式 frame index embedding,只区分 reference/non-reference token 参数。</div>
+  </div>
+
+  <h3 class="label">Formula 3 · Register Attention</h3>
+  <div class="formula">
+    $$\\left(z_1^{scene'},\\ldots,z_N^{scene'}\\right)=attn\\left(z_1^{scene},\\ldots,z_N^{scene}\\right)$$
+    <div class="note">普通 global attention 是所有帧所有 tokens 相互 attention。Register attention 只更新各帧 registers,再依赖后续 frame attention 把 scene-level 信息回写给 patch tokens。论文默认只替换 25% global attention layers。</div>
+  </div>
+
+  <h3 class="label">Formula 4 · Multi-task Training Loss</h3>
+  <div class="formula">
+    $$\\mathcal{L}=\\lambda_{cam}\\mathcal{L}_{cam}+\\lambda_{depth}\\mathcal{L}_{depth}+\\lambda_{point}\\mathcal{L}_{point}+\\lambda_{match}\\mathcal{L}_{match}$$
+    $$\\lambda_{cam}=5.0,\\quad \\lambda_{depth}=1.0,\\quad \\lambda_{point}=0.5,\\quad \\lambda_{match}=0.1$$
+    <div class="note">$\\mathcal{L}_{cam}$ 是 camera L1。$\\mathcal{L}_{point}$ 不需要额外 point head,而是用 $\\pi^{-1}(\\hat D_i,\\hat g_i)$ 反投影后和 GT point map 比。这个设计是省显存的关键。</div>
+  </div>
+
+  <h3 class="label">Formula 5 · Matching Loss and EMA Teacher</h3>
+  <div class="formula">
+    $$\\mathcal{L}_{match}=\\mathbb{E}_{pos}[-\\log\\sigma(s)]+\\mathbb{E}_{neg}[-\\log(1-\\sigma(s))]$$
+    $$\\theta_T\\leftarrow m\\theta_T+(1-m)\\theta_S,\\quad m=0.999$$
+    <div class="note">$s$ 是 L2-normalized tokens 的 cosine similarity。Positive pairs 来自跨视角投影重叠超过阈值的 patches;negative pairs 同时满足 epipolar/Sampson 距离大和 RGB appearance 差异大。EMA teacher 用于未标注视频蒸馏。</div>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">实现提醒</span>
+    <h3>最容易写错的是 reference frame 和归一化</h3>
+    <p>论文训练时会把 GT 变换到第一相机坐标系,再用所有 3D 点到原点的平均距离做 unit-space scale normalization;这个 normalization 只作用于 GT,不直接 normalize predictions。实现里如果把 prediction 也在线 normalize,训练曲线会更陡,也更容易 gradient explosion。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 6 · TRAIN/INFER ALIGNMENT</span>
+  <h2 class="section-title">训练和推理细节对齐:<em>哪些地方容易不一致</em></h2>
+  <table class="cmp">
+    <thead>
+      <tr><th>检查项</th><th>论文做法</th><th>潜在不一致</th><th>复现时怎么查</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>帧顺序</td><td>没有显式 frame index;自监督还随机 frame permutation</td><td>视频推理时模型未必使用时间方向,更像 unordered multi-view</td><td>同一视频打乱帧顺序,比较 camera/depth 差异</td></tr>
+      <tr><td>动态场景</td><td>不输出 motion mask/ray map/dynamic point map</td><td>动态物体 depth 靠 learned prior,不是显式非刚体优化</td><td>单独评估人物/车辆区域 depth 和静态背景 depth</td></tr>
+      <tr><td>训练监督</td><td>point/matching 是 training-only</td><td>推理没有 point confidence 或 tracking head 可用</td><td>如果下游需要 tracks,要额外解码或接 matcher</td></tr>
+      <tr><td>尺度</td><td>GT unit normalization;principal point 默认中心</td><td>现实相机内参/metric scale 可能需要后处理或 fine-tune</td><td>用已知尺度数据检查 scale drift</td></tr>
+      <tr><td>confidence</td><td>depth/confidence 用 aleatoric uncertainty loss</td><td>小数据 fine-tune 时 confidence loss 可能不稳</td><td>先关 confidence loss,再单独微调 uncertainty head</td></tr>
+      <tr><td>self-supervision</td><td>heads frozen,teacher EMA</td><td>如果不冻结 heads 可能 collapse 或学习 shortcut</td><td>监控 camera/depth 分布和 token variance</td></tr>
+      <tr><td>长视频</td><td>推理可到约 1000+ frames,但不是 SLAM loop closure</td><td>全局一致性不等于 BA 级精度</td><td>长轨迹上比较 loop closure error 和局部漂移</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 7 · EXPERIMENTS</span>
+  <h2 class="section-title">实验复盘:<em>强,但强在哪里要拆开看</em></h2>
+  <div class="body-text">
+    <p>实验覆盖三类问题:重建 benchmark、scaling/ablation、register 下游应用。最关键的结论是:Ours-1B 已经明显强于现有 feed-forward 和动态优化方法,Ours-10B 继续提升,说明这不是单纯“大模型压小模型”,而是架构和数据都在起作用。</p>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>任务</th><th>代表 benchmark</th><th>最好 baseline</th><th>VGGT-Ω 10B</th><th>解读</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Camera Pose</td><td>Sintel AUC@3°</td><td>MegaSaM 22.5</td><td class="num">40.0</td><td>动态场景严格阈值下相对提升 77%</td></tr>
+      <tr><td>Camera Pose</td><td>ETH3D AUC@30°</td><td>DA3 87.0</td><td class="num">90.4</td><td>宽基线静态场景也没有牺牲</td></tr>
+      <tr><td>Depth</td><td>Sintel δ1.25</td><td>DA3 86.1</td><td class="num">93.5</td><td>动态深度比当前 feed-forward baseline 更稳</td></tr>
+      <tr><td>Depth</td><td>TUM-Dynamic AbsRel</td><td>Ours-1B 0.041 / DA3 0.049</td><td class="num">0.035</td><td>10B 继续降低相对误差</td></tr>
+      <tr><td>VLA</td><td>LIBERO avg SR</td><td>OpenVLA-OFT 97.1</td><td class="num">98.5</td><td>冻结 scene tokens 作为几何 encoder 也能加分</td></tr>
+      <tr><td>Language</td><td>100 video retrieval top-3</td><td>无直接 baseline</td><td class="num">97.0</td><td>registers 能对齐 VLM 生成的 scene description</td></tr>
+    </tbody>
+  </table>
+
+  <div class="two-col">
+    <div class="col-card">
+      <span class="label">Ablation Evidence</span>
+      <h3>消融支持了主要论点</h3>
+      <ul>
+        <li>数据规模 2K→2M sequences,point error 0.275→0.073</li>
+        <li>模型 0.2B→10B,point error 约 0.107→0.046</li>
+        <li>25% register attention:0.071→0.073,几乎不掉</li>
+        <li>移除 point/matching losses:0.073→0.078</li>
+        <li>10% steps 改自监督:0.073→0.070</li>
+      </ul>
+    </div>
+    <div class="col-card">
+      <span class="label">Critical Reading</span>
+      <h3>公平性和 confound</h3>
+      <ul>
+        <li>Ours-10B 对很多 baseline 有明显参数和数据优势</li>
+        <li>4M 标注池、18M 未标注视频和内部数据不可复现</li>
+        <li>伪标注质量评估只在过滤后的 Sintel 子集上做,偏乐观</li>
+        <li>随机 10 帧评估不等同于长视频 SLAM 或闭环场景</li>
+        <li>动态区域被过滤或依赖 synthetic,真实复杂非刚体仍可能不足</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="pullquote">
+    论文最强的证据不是某一个表格,而是 scaling curve、memory ablation、动态/静态 benchmark 和 register 下游应用同时指向同一个结论:学几何的 transformer 正在变成空间表征模型。
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 8 · REPRODUCTION</span>
+  <h2 class="section-title">可复现清单:<em>真正会卡住的地方</em></h2>
+
+  <div class="check-grid">
+    <div class="check"><strong>模型规模.</strong> 论文用 200M/500M/1B/10B 四档。Blocks/hidden sizes 分别为 12/12/24/16 和 384/768/1024/4096。10B 不是个人工作站级别。</div>
+    <div class="check"><strong>训练硬件.</strong> 主训练使用 128 张 96GB H100,bfloat16,FSDP,gradient checkpointing。小规模复现应先从 200M 或 1B 子集开始。</div>
+    <div class="check"><strong>学习率.</strong> AdamW,总 240K steps:160K supervised,50K self-supervised,30K supervised。Warmup 5%,cosine decay;监督 peak LR 2e-4,自监督 1e-4。</div>
+    <div class="check"><strong>数据采样.</strong> 每 batch 随机帧数 [1,24],根据显存动态调 batch size。视频数据优先从局部时间窗口采样,不是纯 covisibility。</div>
+    <div class="check"><strong>增强.</strong> Aspect ratio [0.33,1.33],面积约 512×512;color jitter 0.5/0.5/0.5/hue 0.1;patch mask 概率 0.05,mask rectangle 32-128 px。</div>
+    <div class="check"><strong>loss 权重.</strong> camera/depth/point/match = 5.0/1.0/0.5/0.1。Camera 用 L1,不是 VGGT 的 Huber。</div>
+    <div class="check"><strong>matching pairs.</strong> Positive 来自跨视角投影 overlap >10%;negative 同时要求 epipolar/Sampson 距离大和 RGB 均值差大。</div>
+    <div class="check"><strong>数据质量.</strong> 伪标注宁可少不要脏。需要过滤 doming effect、传感器漏深度、薄结构错标、fake background、人被贴到墙等错误。</div>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>论文没完全写清楚 / 复现不确定</th><th>合理猜测</th><th>验证方式</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>【不确定】每档模型的 heads/MLP 具体宽度和层细节</td><td>沿用 VGGT camera head,depth head 只改高分辨率部分</td><td>等官方 code;或从 released checkpoint config 反推</td></tr>
+      <tr><td>【不确定】大规模数据混合的精确 sampling ratio</td><td>正文建议 synthetic/real 约 80/20,clean synthetic 可 90/10</td><td>跑 3 组混合比例,比较 in-domain/OOD point error</td></tr>
+      <tr><td>【不确定】VLM pre-filter 使用的具体模型</td><td>可能使用内部多模态模型或强商用/开源 VLM</td><td>用 Qwen2.5-VL/Gemini/Claude-Vision 替代,比较 accept precision</td></tr>
+      <tr><td>【不确定】self-supervised token matching 选哪些层</td><td>多层中间 token + final token,类似 DINO multi-layer feature distillation</td><td>只蒸 final / 蒸 4 层 / 蒸 all layers 做 ablation</td></tr>
+      <tr><td>【不确定】动态区域 GT depth 如何覆盖</td><td>真实动态区域多被 mask,动态 depth 主要靠 synthetic 和模型 prior</td><td>对动态 object mask 内外分别评估 depth 和 temporal consistency</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 9 · IMPROVEMENTS</span>
+  <h2 class="section-title">可能的改进方向:<em>从系统到模型的 6 个实验</em></h2>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>自适应 register/global attention routing</td><td>简单片段走 registers,困难片段保留 full global</td><td>routing 可能引入训练不稳或负载不均</td><td>按 attention entropy/视差估计动态选择层,比较 FLOPs-point error 曲线</td></tr>
+      <tr><td>显式 motion token 或 dynamic mask head</td><td>提高动态物体重建和分割可解释性</td><td>破坏当前简洁输出,可能让 camera/depth entangle</td><td>只在 fine-tune 阶段加 head,对 Sintel/TUM 动态区域评估</td></tr>
+      <tr><td>10B→1B distillation</td><td>把 scaling 得到的 prior 压到可用模型</td><td>student 可能丢失长尾几何能力</td><td>teacher depth/camera/token distillation + benchmark/OOD 测试</td></tr>
+      <tr><td>VGGT-Ω + BA/GS 初始化</td><td>保留前馈鲁棒性,给高精度 NVS/GS 任务补优化精度</td><td>优化可能放大错误 confidence 或动态区域</td><td>用 VGGT-Ω 初始化 COLMAP/3DGS,比较收敛速度和 PSNR/pose error</td></tr>
+      <tr><td>数据质量模型端建模</td><td>减少脏 GT 对模型的记忆和 artifact</td><td>需要额外 noise labels 或不确定性建模</td><td>把 doming/thin/fake-bg 类错误作为 auxiliary detection task</td></tr>
+      <tr><td>多模态 reconstruction pretraining</td><td>让语言/动作/几何更自然对齐</td><td>训练目标冲突,数据配对复杂</td><td>在统一 transformer 中混合 depth/camera token、caption、VLA action loss</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 10 · MEMORY CARD</span>
+  <h2 class="section-title">速读备忘卡:<em>下次回忆用</em></h2>
+  <div class="body-text">
+    <ul>
+      <li>VGGT-Ω 是 VGGT 的 scaling 版本,核心不是一个模块,而是架构 + 数据 + 自监督 + 下游表征的系统升级。</li>
+      <li>输入 $N$ 帧,输出每帧 camera 9D 和 depth map;不直接输出 point map/tracks。</li>
+      <li>每帧加 1 个 camera token 和 16 个 scene registers。</li>
+      <li>Register attention 只让 registers 跨帧通信,替换 25% global attention 基本不掉点。</li>
+      <li>单 dense head 保留 depth/confidence,point 和 matching 变成 training-only losses。</li>
+      <li>高分辨率 DPT conv 被 MLP + pixel shuffle 替换,训练显存降到 VGGT 约 30%。</li>
+      <li>数据管线核心是保守过滤:4000 万视频进来,最后留约 80 万高质量真实视频标注。</li>
+      <li>自监督不是从零学几何,而是强 supervised checkpoint 的 teacher-student consistency。</li>
+      <li>Sintel camera AUC@3° 从 22.5 到 40.0;depth δ1.25 从 86.1 到 93.5。</li>
+      <li>Registers 能加到 OpenVLA-OFT,LIBERO 平均 SR 从 97.1 到 98.5。</li>
+      <li>最大限制是复现门槛:内部数据、巨大算力、复杂伪标注和 preview 版代码缺口。</li>
+      <li>最值得带走的 insight:重建模型的中间 token 可能是通用空间智能的底座,不只是点云输出。</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">SOURCES</span>
+  <h2 class="section-title">资料来源:<em>本文使用的原始材料</em></h2>
+  <div class="sources">
+    <p>官方项目页: <a href="https://vggt-omega.github.io/">https://vggt-omega.github.io/</a></p>
+    <p>论文 PDF preview v3: <a href="https://vggt-omega.github.io/assets/paper/preview_v3.pdf">https://vggt-omega.github.io/assets/paper/preview_v3.pdf</a></p>
+    <p>VGGT 原始仓库作为 baseline 背景: <a href="https://github.com/facebookresearch/vggt">https://github.com/facebookresearch/vggt</a></p>
+    <p>截至 2026-05-15,项目页显示 VGGT-Ω code/model 链接,但完整代码发布状态仍需以官方仓库为准。</p>
+  </div>
+</section>
+
+<footer class="footer">
+  <div><a href="../index.html#paper-reading">Paper Reading Notes</a></div>
+  <div class="footer-right">VGGT-Ω · Feed-Forward 3D Reconstruction</div>
+</footer>
+</body>
+</html>
