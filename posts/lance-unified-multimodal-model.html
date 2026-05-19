@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Lance 论文与 bytedance/Lance 代码精读: unified context, dual experts, MaPE, flow matching, image/video generation and understanding.">
+<title>Lance 论文精读</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,800;1,9..144,400&family=JetBrains+Mono:wght@300;400;500;700&family=Noto+Serif+SC:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script>
+window.MathJax = {
+  tex: {inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']]},
+  svg: {fontCache: 'global'}
+};
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+<script type="application/json" id="paper-metadata">
+{
+  "title": "Lance: Unified Multimodal Modeling by Multi-Task Synergy",
+  "paper": "https://lance-project.github.io/assets/lance.pdf",
+  "authors": ["Fengyi Fu", "Mengqi Huang", "Shaojin Wu", "Yunsheng Jiang", "Yufei Huo", "Hao Li", "Yinghang Song", "Fei Ding", "Jianzhu Guo", "Qian He", "Zheren Fu", "Zhendong Mao", "Yongdong Zhang"],
+  "date": "2026-05-19",
+  "category": "diffusion-generation",
+  "tags": ["unified-multimodal-model", "video-generation", "flow-matching", "mape", "multi-task-learning", "qwen2.5-vl", "wan2.2-vae"],
+  "systems": ["Lance", "Qwen2.5-VL", "Wan2.2 VAE"],
+  "datasets": ["GenEval", "DPG-Bench", "GEdit-Bench", "VBench", "MVBench"],
+  "methods": ["Unified context learning", "Dual-stream mixture-of-experts", "Modality-aware RoPE", "Flow matching", "Staged multi-task training", "GRPO post-training"],
+  "code": "https://github.com/bytedance/Lance",
+  "related_posts": ["posts/context-unrolling-omni-models.html", "posts/ai-game-world-models.html"],
+  "graph_nodes": ["Lance", "MaPE", "LLM_UND", "LLM_GEN", "Qwen2.5-VL", "Wan2.2 VAE", "GenEval", "VBench"],
+  "graph_edges": [
+    "Lance -> uses -> Qwen2.5-VL ViT",
+    "Lance -> uses -> Wan2.2 3D causal VAE",
+    "Lance -> introduces -> MaPE",
+    "Lance -> optimizes -> next-token CE + flow matching",
+    "MaPE -> separates -> ViT semantic / clean VAE / noisy VAE tokens",
+    "Lance -> evaluated_on -> GenEval / DPG-Bench / GEdit-Bench / VBench / MVBench"
+  ]
+}
+</script>
+<style>
+:root{
+  --ink:#1a1614;
+  --paper:#f4f0e8;
+  --paper-2:#ebe4d4;
+  --accent:#c8421f;
+  --accent-soft:#e8b89c;
+  --blue:#2d4a6e;
+  --green:#5a6b3a;
+  --gold:#b8924a;
+  --line:rgba(26,22,20,0.18);
+  --muted:rgba(26,22,20,0.55);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  font-family:'Noto Serif SC','Fraunces',Georgia,serif;
+  background:var(--paper);
+  color:var(--ink);
+  line-height:1.75;
+  font-size:16px;
+  background-image:
+    radial-gradient(circle at 18% 10%, rgba(184,146,74,0.06) 0, transparent 38%),
+    radial-gradient(circle at 84% 72%, rgba(200,66,31,0.045) 0, transparent 48%);
+  overflow-x:hidden;
+}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+img{display:block;max-width:100%;height:auto}
+.masthead{
+  border-bottom:3px double var(--ink);
+  padding:56px 60px 32px;
+}
+.masthead-top{
+  display:flex;
+  justify-content:space-between;
+  align-items:baseline;
+  gap:18px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.15em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin-bottom:28px;
+  border-bottom:1px solid var(--line);
+  padding-bottom:14px;
+}
+.masthead-top a{color:inherit;text-decoration:none}
+.masthead-top a:hover{color:var(--accent)}
+.masthead h1{
+  font-family:'Fraunces',serif;
+  font-weight:300;
+  font-size:clamp(42px,6vw,82px);
+  line-height:1.02;
+  letter-spacing:-0.025em;
+  margin-bottom:20px;
+  overflow-wrap:anywhere;
+}
+.masthead h1 em{font-style:italic;color:var(--accent);font-weight:400}
+.byline{
+  font-family:'Fraunces',serif;
+  font-style:italic;
+  font-size:18px;
+  color:var(--muted);
+  margin-bottom:24px;
+}
+.subtitle{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:15.5px;
+  max-width:880px;
+  line-height:1.75;
+}
+.subtitle strong{color:var(--accent)}
+.tags{margin-top:28px;display:flex;gap:10px;flex-wrap:wrap}
+.tag{
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  padding:5px 11px;
+  border:1px solid var(--ink);
+}
+.tag.filled{background:var(--ink);color:var(--paper)}
+section{padding:60px;border-bottom:1px solid var(--line)}
+.section-num{
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.2em;
+  color:var(--accent);
+  margin-bottom:12px;
+  display:block;
+}
+.section-title{
+  font-family:'Fraunces',serif;
+  font-weight:400;
+  font-size:clamp(30px,3.8vw,46px);
+  line-height:1.1;
+  letter-spacing:-0.015em;
+  margin-bottom:34px;
+  max-width:980px;
+}
+.section-title em{font-style:italic;color:var(--accent)}
+.body-text{max-width:920px}
+.body-text p{
+  margin-bottom:18px;
+  font-family:'Noto Serif SC',serif;
+  line-height:1.9;
+}
+.body-text strong{color:var(--accent);font-weight:600}
+.body-text em{color:var(--blue);font-style:italic}
+.body-text ul,.body-text ol{
+  margin:14px 0 22px 1.35em;
+  font-family:'Noto Sans SC',sans-serif;
+}
+.body-text li{margin:8px 0}
+.tldr{
+  background:var(--ink);
+  color:var(--paper);
+  padding:52px 60px;
+  display:grid;
+  grid-template-columns:1fr 2fr;
+  gap:60px;
+  position:relative;
+}
+.tldr::before{
+  content:'ONE-LINE';
+  position:absolute;
+  top:18px;
+  right:30px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.3em;
+  color:var(--accent-soft);
+}
+.tldr h2{
+  font-family:'Fraunces',serif;
+  font-weight:300;
+  font-size:36px;
+  line-height:1.15;
+  font-style:italic;
+}
+.tldr h2 strong{
+  display:block;
+  color:var(--accent-soft);
+  font-style:normal;
+  font-size:56px;
+  line-height:1;
+  margin-bottom:10px;
+}
+.tldr-content{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:15px;
+  line-height:1.85;
+}
+.tldr-content p{margin-bottom:16px}
+.tldr-content p:last-child{margin-bottom:0}
+.tldr-content strong{color:var(--accent-soft)}
+.pullquote{
+  margin:40px 0;
+  padding:36px 44px;
+  border-left:4px solid var(--accent);
+  background:var(--paper-2);
+  font-family:'Fraunces',serif;
+  font-style:italic;
+  font-size:22px;
+  line-height:1.55;
+  font-weight:300;
+  max-width:960px;
+}
+.two-col{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:22px;
+  margin:28px 0 34px;
+}
+.col-card{
+  border:1px solid var(--line);
+  background:rgba(235,228,212,0.55);
+  padding:26px 26px 24px;
+}
+.col-card strong{color:var(--accent)}
+.label{
+  display:block;
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.16em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin-bottom:12px;
+}
+.col-card h3{
+  font-family:'Fraunces',serif;
+  font-size:24px;
+  font-weight:500;
+  line-height:1.2;
+  margin-bottom:14px;
+}
+.col-card p,.col-card li{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14.5px;
+  line-height:1.85;
+}
+.col-card ul{margin-left:1.2em}
+.insight{
+  margin:40px 0;
+  padding:34px 38px;
+  border:1px solid var(--ink);
+  position:relative;
+  background:var(--paper);
+  max-width:1000px;
+}
+.insight-label{
+  position:absolute;
+  top:-12px;
+  left:22px;
+  background:var(--paper);
+  padding:0 12px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.2em;
+  color:var(--accent);
+  text-transform:uppercase;
+}
+.insight h3{
+  font-family:'Fraunces',serif;
+  font-size:23px;
+  font-weight:500;
+  margin-bottom:16px;
+  font-style:italic;
+  line-height:1.3;
+}
+.insight p{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14.5px;
+  line-height:1.9;
+  margin-bottom:12px;
+}
+.insight p:last-child{margin-bottom:0}
+.insight strong{color:var(--accent);font-weight:600}
+.module-flow{
+  margin:34px 0;
+  border:1px solid var(--ink);
+  background:rgba(235,228,212,0.45);
+  padding:26px;
+}
+.flow-row{
+  display:grid;
+  grid-template-columns:1.05fr 34px 1.08fr 34px 1.12fr 34px 1fr;
+  align-items:stretch;
+  gap:10px;
+}
+.flow-box{
+  border:1px solid var(--line);
+  background:var(--paper);
+  padding:18px;
+  min-height:146px;
+}
+.flow-box b{
+  display:block;
+  font-family:'Fraunces',serif;
+  font-size:22px;
+  font-weight:500;
+  margin-bottom:8px;
+}
+.flow-box code{
+  display:block;
+  font-family:'JetBrains Mono',monospace;
+  font-size:12px;
+  line-height:1.65;
+  color:var(--blue);
+  white-space:normal;
+}
+.flow-arrow{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color:var(--accent);
+  font-family:'Fraunces',serif;
+  font-size:28px;
+}
+.formula,.code-block{
+  margin:18px 0;
+  padding:16px 22px;
+  background:var(--paper-2);
+  border-left:3px solid var(--ink);
+  font-family:'JetBrains Mono',monospace;
+  font-size:13px;
+  line-height:1.7;
+  overflow-x:auto;
+}
+.code-block pre{white-space:pre;min-width:760px}
+.formula .note{
+  margin-top:10px;
+  font-family:'Noto Sans SC',sans-serif;
+  color:var(--muted);
+  font-size:13px;
+}
+table.cmp{
+  width:100%;
+  border-collapse:collapse;
+  margin:30px 0;
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:13.5px;
+}
+table.cmp th,table.cmp td{
+  padding:12px 13px;
+  text-align:left;
+  border-bottom:1px solid var(--line);
+  vertical-align:top;
+}
+table.cmp th{
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  color:var(--muted);
+  background:var(--paper-2);
+  border-bottom:2px solid var(--ink);
+}
+table.cmp tr.best td{background:rgba(200,66,31,0.06);font-weight:600}
+table.cmp td.num{font-family:'JetBrains Mono',monospace;text-align:right;white-space:nowrap}
+.stat-grid{
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:14px;
+  margin:30px 0;
+}
+.stat{
+  border:1px solid var(--line);
+  background:var(--paper-2);
+  padding:22px 20px;
+}
+.stat-num{
+  font-family:'Fraunces',serif;
+  color:var(--accent);
+  font-size:42px;
+  font-weight:300;
+  line-height:1;
+  margin-bottom:8px;
+}
+.stat-label{
+  font-family:'JetBrains Mono',monospace;
+  color:var(--muted);
+  font-size:10.5px;
+  letter-spacing:0.14em;
+  text-transform:uppercase;
+}
+.figure-wrap{
+  margin:34px 0;
+  padding:18px;
+  border:1px solid var(--line);
+  background:var(--paper-2);
+}
+.figure-wrap figcaption{
+  margin-top:12px;
+  color:var(--muted);
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:13px;
+  line-height:1.65;
+}
+.check-grid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:14px;
+  margin:24px 0;
+}
+.check{
+  border-left:3px solid var(--accent);
+  background:rgba(235,228,212,0.6);
+  padding:18px 20px;
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14.5px;
+  line-height:1.8;
+}
+.check strong{color:var(--accent)}
+.sources{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14px;
+  line-height:1.85;
+  color:var(--muted);
+}
+.footer{
+  padding:40px 60px;
+  background:var(--ink);
+  color:var(--paper);
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.15em;
+  text-transform:uppercase;
+}
+.footer a{color:var(--paper);text-decoration:none}
+.footer-right{text-align:right;color:rgba(244,240,232,0.6)}
+@media (max-width:900px){
+  .masthead,section,.tldr{padding:38px 20px}
+  .masthead-top{flex-wrap:wrap;gap:8px 14px;align-items:flex-start}
+  .masthead h1{font-size:clamp(34px,12vw,50px);letter-spacing:0}
+  .tldr{grid-template-columns:1fr;gap:32px}
+  .two-col,.check-grid,.stat-grid{grid-template-columns:1fr}
+  .flow-row{grid-template-columns:minmax(0,1fr);gap:12px}
+  .flow-arrow{transform:rotate(90deg)}
+  table.cmp{display:block;max-width:100%;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .formula,.code-block,.insight,.module-flow{max-width:100%;overflow-x:auto}
+  .footer{padding:30px 20px;flex-direction:column;align-items:flex-start;gap:10px}
+  .footer-right{text-align:left}
+}
+</style>
+</head>
+<body>
+<header class="masthead">
+  <div class="masthead-top">
+    <a href="../index.html#paper-reading">← Paper Reading</a>
+    <span>Unified Multimodal Model · 2026.05.19</span>
+  </div>
+  <h1>Lance:<br><em>统一多模态</em>不是把路走成一条</h1>
+  <p class="byline">MaPE · Dual Experts · Flow Matching · Image/Video Generation · Understanding</p>
+  <p class="subtitle">
+    这篇文章整理 <strong>Lance: Unified Multimodal Modeling by Multi-Task Synergy</strong> 和
+    <strong>bytedance/Lance</strong> 代码。核心判断: Lance 的统一不是 single token space,而是
+    <strong>shared context + decoupled pathways</strong>。语义理解和视觉生成在同一个上下文里交互,但分别用不同视觉表征、专家参数和训练目标。
+  </p>
+  <div class="tags">
+    <span class="tag filled">Diffusion Generation</span>
+    <span class="tag">Unified MM</span>
+    <span class="tag">Flow Matching</span>
+    <span class="tag">MaPE</span>
+    <span class="tag">Qwen2.5-VL</span>
+    <span class="tag">Wan2.2 VAE</span>
+  </div>
+</header>
+
+<section class="tldr">
+  <div>
+    <h2><strong>0</strong>一句话结论</h2>
+  </div>
+  <div class="tldr-content">
+    <p><strong>痛点.</strong> 统一模型要同时做图文/视频理解、图像/视频生成、编辑和 subject-driven generation,但理解需要语义特征,生成需要连续低层 latent,直接共享表征和参数会互相干扰。</p>
+    <p><strong>核心招.</strong> Lance 把 text tokens、ViT semantic tokens、clean VAE latents、noisy VAE latents 放进同一个 interleaved context,再用 LLM<sub>UND</sub>/LLM<sub>GEN</sub> 双专家、MaPE 位置编码和 CE + flow matching 双目标分工。</p>
+    <p><strong>效果.</strong> 3B activated parameters 在 GenEval 0.90、VBench 85.11、GEdit 7.30、MVBench 62.0,在 unified models 里非常靠前。</p>
+    <p><strong>代价.</strong> 它不是轻量可复现 recipe:训练依赖 1.5T+300B+72B tokens 的多阶段数据、Qwen2.5-VL/Wan2.2 初始化、128 GPU 级预算和未完整释放的训练代码。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 1 · POSITIONING</span>
+  <h2 class="section-title">这篇到底在解决什么:<em>统一模型里的表征冲突</em></h2>
+  <div class="body-text">
+    <p>Lance 的问题设定是 native unified multimodal modeling:同一个系统支持 image/video understanding、image/video generation、editing、subject-driven generation。它不是把理解模型接一个外部生成器,也不是把所有任务都改写成离散 token next-token prediction。</p>
+    <p>主流路线有两种取舍。第一种是 Chameleon/Emu3 风格的全自回归 token 统一:接口干净,但视觉生成效率和高保真度吃亏。第二种是 BAGEL/Show-o2 风格的 AR + diffusion/flow hybrid:语言继续 next-token,视觉生成走连续 latent。Lance 属于第二类,但它更强调<strong>全 image/video 任务覆盖</strong>和<strong>多任务协同训练</strong>。</p>
+    <p>论文最重要的判断是:统一不等于完全共享。理解和生成确实需要共享上下文,这样 caption、VQA、OCR、T2I、T2V、I2V、editing 可以互相提供监督;但它们不应该强行共享同一种视觉表征和同一套 transformer 参数。</p>
+  </div>
+
+  <div class="pullquote">
+    Lance 的核心不是 one model one path,而是 one context, multiple capability paths。
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 2 · PIPELINE</span>
+  <h2 class="section-title">方法总览:<em>同一上下文,两条能力路径</em></h2>
+  <div class="module-flow">
+    <div class="flow-row">
+      <div class="flow-box">
+        <b>Inputs</b>
+        <code>text / image / video<br>caption, VQA, OCR<br>T2I, I2I, S2I<br>T2V, I2V, V2V, S2V</code>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">
+        <b>Tokenizers</b>
+        <code>text tokenizer<br>Qwen2.5-VL ViT<br>Wan2.2 3D causal VAE</code>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">
+        <b>Shared Context</b>
+        <code>T tokens<br>V_vit semantic tokens<br>V_clean_vae condition<br>V_noisy_vae target</code>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box">
+        <b>Two Heads</b>
+        <code>LLM_UND → LM head<br>LLM_GEN → velocity head<br>CE + flow matching</code>
+      </div>
+    </div>
+  </div>
+
+  <div class="body-text">
+    <p>论文里的统一序列写成:</p>
+  </div>
+  <div class="formula">
+    $$S=\cdots\oplus B_{text}(T)\oplus B_{vis}(V_{vit})\oplus B_{vis}(V^{clean}_{vae})\oplus B_{vis}(V^{noisy}_{vae})\oplus B_{text}(T')\oplus\cdots$$
+    $$B_{text}(T)=[BOT,T,EOT],\qquad B_{vis}(V)=[BOV,V,EOV]$$
+    <div class="note">实现上就是把不同模态编码后的 embedding 填进同一个 packed sequence,再用 split_lens 和 attn_modes 控制 causal/full/noise attention。</div>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>Token 类型</th><th>来源</th><th>用途</th><th>走哪条路径</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Text tokens</td><td>Qwen tokenizer</td><td>指令、问题、回答、系统 prompt</td><td>主要走 LLM<sub>UND</sub>;生成条件也参与 LLM<sub>GEN</sub></td></tr>
+      <tr><td>ViT semantic tokens</td><td>Qwen2.5-VL ViT,14x spatial,2x temporal patching,2x2 merge</td><td>图像/视频理解,也可作为编辑/参考条件</td><td>LLM<sub>UND</sub></td></tr>
+      <tr><td>Clean VAE tokens</td><td>Wan2.2 3D causal VAE</td><td>编辑或参考图/视频条件</td><td>LLM<sub>GEN</sub></td></tr>
+      <tr><td>Noisy VAE tokens</td><td>VAE latent 加噪/interpolation</td><td>视觉生成目标,预测 velocity</td><td>LLM<sub>GEN</sub></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 3 · INSIGHT</span>
+  <h2 class="section-title">关键 insight:<em>统一上下文和解耦路径不是矛盾</em></h2>
+
+  <div class="two-col">
+    <div class="col-card">
+      <span class="label">旧方法瓶颈</span>
+      <h3>单一路径会产生目标冲突</h3>
+      <ul>
+        <li>理解想要 high-level semantic abstraction。</li>
+        <li>生成想要 continuous latent 里的纹理、几何和时序细节。</li>
+        <li>自回归 CE 和 flow/diffusion MSE 的优化动态不同。</li>
+        <li>所有 token 共享同一套参数会让两个目标抢容量。</li>
+      </ul>
+    </div>
+    <div class="col-card">
+      <span class="label">Lance 改法</span>
+      <h3>Context 共享,representation/pathway/head 解耦</h3>
+      <ul>
+        <li>共享序列让多任务上下文可以互相看见。</li>
+        <li>ViT 和 VAE 分别负责语义和生成 latent。</li>
+        <li>LLM<sub>UND</sub> 和 LLM<sub>GEN</sub> 用 token index 硬分专家路径。</li>
+        <li>LM head 做 next-token,latent head 做 velocity prediction。</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">实现洞察</span>
+    <h3>代码里的 MoE 不是 router MoE</h3>
+    <p>在 <code>modeling/lance/qwen2_navit.py</code> 里,<code>PackedAttentionMoT</code> 为 generation tokens 单独定义 <code>q_proj_moe_gen/k_proj_moe_gen/v_proj_moe_gen/o_proj_moe_gen</code>。<code>Qwen2MoTDecoderLayer</code> 也有独立的 <code>mlp_moe_gen</code>、<code>input_layernorm_moe_gen</code> 和 <code>post_attention_layernorm_moe_gen</code>。</p>
+    <p>这不是让 router 选择专家,而是由 <code>packed_und_token_indexes</code> 和 <code>packed_gen_token_indexes</code> 直接决定 token 走理解路径还是生成路径。好处是稳定、可控;代价是任务边界需要数据打包阶段清楚标出来。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 4 · MaPE</span>
+  <h2 class="section-title">MaPE:<em>给不同视觉 token 组留出位置身份</em></h2>
+  <div class="body-text">
+    <p>标准 Qwen2.5-VL 3D-RoPE 会给文本 token 位置 $[i,i,i]$,给视觉 token 位置 $N+[t,h,w]$。这个设计对普通图文/视频理解是够的,但 Lance 的一个样本可能同时包含 ViT semantic tokens、clean VAE condition tokens 和 noisy VAE target tokens。它们空间位置可能相近,功能角色却完全不同。</p>
+  </div>
+
+  <div class="formula">
+    $$\hat p^{vis}_{t,h,w}=N+[t,h,w]=[N+t,N+h,N+w]$$
+    $$p^{(m)}_{t,h,w}=\hat p^{(m)}_{t,h,w}+[\Delta_m,0,0]$$
+    <div class="note">MaPE 只沿 temporal axis 加 modality-specific offset。这样不同 visual token groups 在全局 RoPE 空间里分开,但 spatial coordinates 不变,不会破坏图像/视频内部布局。</div>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">代码对应</span>
+    <h3>repo 里没有一个叫 MaPE 的类</h3>
+    <p>实现上它复用 Qwen2.5-VL 的 mrope,再在 <code>data/common.py::shift_position_ids</code> 里根据 <code>sample_modality</code> 修改 temporal coordinate。比如代码把 modality 4 移到 1000 附近,modality 3 移到 2000 附近。这个实现和论文公式一致:不是加一个新的 embedding table,而是改 RoPE position ids。</p>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>消融</th><th>GenEval</th><th>GEdit</th><th>VBench</th><th>MVBench</th><th>解读</th></tr>
+    </thead>
+    <tbody>
+      <tr class="best"><td>w/ MaPE</td><td class="num">80.94</td><td class="num">6.86</td><td class="num">81.81</td><td class="num">59.16</td><td>编辑收益最大,说明条件图和目标 latent 的角色区分最需要位置身份。</td></tr>
+      <tr><td>w/o MaPE</td><td class="num">80.56</td><td class="num">6.30</td><td class="num">80.95</td><td class="num">59.02</td><td>不是决定性模块,但能稳定减少 token group ambiguity。</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 5 · FORMULAS & CODE</span>
+  <h2 class="section-title">公式和代码:<em>从 paper loss 到 tensor 操作</em></h2>
+
+  <h3 class="label">Understanding loss</h3>
+  <div class="formula">
+    $$\mathcal L_{UND}=-\sum_i \log p_{\theta_{UND}}(y_i\mid y_{<i},S)$$
+    <div class="note">代码路径: <code>lance.py</code> 中 <code>ce_loss_indexes</code> 取 hidden states,过 <code>language_model.lm_head</code>,再对 <code>packed_label_ids</code> 做 cross entropy。</div>
+  </div>
+
+  <h3 class="label">Generation loss</h3>
+  <div class="formula">
+    $$x_t=t x_1+(1-t)x_0,\qquad x_0\sim\mathcal N(0,I),\quad t\sim U(0,1)$$
+    $$\mathcal L_{GEN}=\mathbb E\left[\lVert v_{\theta_{GEN}}(x_t,S,t)-(x_1-x_0)\rVert_2^2\right]$$
+    <div class="note">论文用从 noise 到 clean 的写法。代码里采用相反时间约定: <code>x_t=(1-t)*clean+t*noise</code>,target 写成 <code>noise-clean</code>,推理从 1 到 0 做 Euler 更新。方向不同,动力学等价。</div>
+  </div>
+
+  <h3 class="label">Overall objective</h3>
+  <div class="formula">
+    $$\mathcal L=\lambda_u\mathcal L_{UND}+\lambda_g\mathcal L_{GEN}$$
+    <div class="note">训练表里 CE:MSE 权重随阶段变化:PT 0.25:1,CT 0.5:1,SFT 0.25:1。这个比值决定理解任务和生成任务的梯度强度。</div>
+  </div>
+
+  <div class="code-block">
+<pre># Lance forward 的代码视角
+packed_sequence = zeros([L, hidden])
+packed_sequence[text_idx] = token_embedding(text_ids)
+
+vit_embed = qwen25_vl_vit(pixels, grid_thw)
+packed_sequence[vit_idx] = vit_embed
+
+clean = patchify(vae_latent)                 # [num_vae_tokens, patch_latent_dim]
+noise = randn_like(clean)
+t = shifted_sigmoid_or_uniform_timestep(...)
+x_t = (1 - t) * clean + t * noise
+vae_embed = vae2llm(x_t) + time_embed(t) + latent_pos_embed(pos_ids)
+packed_sequence[vae_idx] = vae_embed
+
+h = dual_expert_llm(packed_sequence, sparse_mask, position_ids)
+ce = cross_entropy(lm_head(h[ce_idx]), labels)
+mse = (llm2vae(h[mse_idx]) - (noise - clean)) ** 2</pre>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>代码文件</th><th>负责什么</th><th>阅读结论</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>modeling/lance/lance.py</code></td><td>LanceConfig、Lance forward、validation_gen、validation_video_to_text</td><td>CE 和 flow matching 都能直接对应论文公式。</td></tr>
+      <tr><td><code>modeling/lance/qwen2_navit.py</code></td><td>Packed attention、MoT decoder layer、Qwen2ForCausalLM wrapper</td><td>双专家是按 token index 分支,不是动态 router。</td></tr>
+      <tr><td><code>data/data_utils.py</code></td><td>position id、patchify、sparse attention mask、special tokens</td><td>text causal,visual/noise segment full/bidirectional,且 sample 间隔离。</td></tr>
+      <tr><td><code>data/common.py</code></td><td>system prompt 和 shift_position_ids</td><td>MaPE 通过 mrope temporal position shift 实现。</td></tr>
+      <tr><td><code>inference_lance.py</code></td><td>加载模型、VAE、ViT、dataset,分发理解/生成任务</td><td>公开 repo 主要是推理和 benchmark,没有完整训练 loop。</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 6 · TRAINING</span>
+  <h2 class="section-title">训练 recipe:<em>真正的壁垒在数据调度</em></h2>
+
+  <div class="stat-grid">
+    <div class="stat"><div class="stat-num">1.5T</div><div class="stat-label">PT seen tokens</div></div>
+    <div class="stat"><div class="stat-num">300B</div><div class="stat-label">CT seen tokens</div></div>
+    <div class="stat"><div class="stat-num">72B</div><div class="stat-label">SFT seen tokens</div></div>
+    <div class="stat"><div class="stat-num">128</div><div class="stat-label">max GPU budget</div></div>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>阶段</th><th>目标</th><th>数据</th><th>关键超参</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>PT</td><td>建立基础图像/视频理解和生成</td><td>约 1B image-text,140M video-text</td><td>LR 1e-4,350K steps,max context 40K,CE:MSE=0.25:1,timestep shift 1.0</td></tr>
+      <tr><td>CT</td><td>扩展 interleaved multi-task 能力</td><td>2.73M X2T,2.8M image editing,2.6M video editing,subject-driven data</td><td>LR 1e-4,80K steps,max context 70K,CE:MSE=0.5:1,timestep shift 4.0</td></tr>
+      <tr><td>SFT</td><td>提升 instruction fidelity、visual fidelity、editing accuracy</td><td>高质量 caption、T2I、editing、T2V/I2V、X2V</td><td>LR 2.5e-5,15K steps,cosine,CE:MSE=0.25:1</td></tr>
+      <tr><td>RL</td><td>优化文字渲染和复杂 prompt 对齐</td><td>20K text-heavy image generation prompts</td><td>GRPO,LR 2e-6,800 steps,PaddleOCR reward</td></tr>
+    </tbody>
+  </table>
+
+  <div class="insight">
+    <span class="insight-label">批判点</span>
+    <h3>“trained from scratch”需要谨慎理解</h3>
+    <p>论文摘要和 README 说 Lance trained from scratch,但实验设置又说它 implemented upon Qwen2.5-VL 3B,用 Qwen2.5-VL 初始化 visual understanding encoder 和 LLM<sub>UND</sub>/LLM<sub>GEN</sub>,生成 encoder 采用 Wan2.2 3D causal VAE。</p>
+    <p>我的理解:它不是从已有 unified model 继续微调,但也不是从随机初始化训练所有组件。更准确的说法是:在 Qwen2.5-VL/Wan2.2 组件初始化之上,训练一个 native unified multimodal system。复现时不能忽略这个初始化前提。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 7 · INFERENCE</span>
+  <h2 class="section-title">推理流程:<em>repo 里实际放出了什么</em></h2>
+  <div class="body-text">
+    <p>公开仓库支持统一命令行入口,任务包括 <code>t2i</code>、<code>t2v</code>、<code>image_edit</code>、<code>video_edit</code>、<code>x2t_image</code>、<code>x2t_video</code>。模型路径默认分 image/video 两套 checkpoint: <code>downloads/lance_3b</code> 和 <code>downloads/lance_3b_video</code>。</p>
+  </div>
+
+  <div class="code-block">
+<pre># README / inference_lance.sh 的典型配置
+TASK_NAME=t2v                 # t2i | image_edit | t2v | video_edit | x2t_image | x2t_video
+VALIDATION_NUM_TIMESTEPS=30
+VALIDATION_TIMESTEP_SHIFT=3.5
+CFG_TEXT_SCALE=4.0
+NUM_FRAMES=50                # max 121
+VIDEO_HEIGHT=768
+VIDEO_WIDTH=768
+RESOLUTION="video_480p"
+USE_KVCACHE=true</pre>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>推理任务</th><th>输入</th><th>输出</th><th>内部动作</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>T2I/T2V</td><td>text prompt</td><td>image/video</td><td>从随机 VAE latent 出发,30/50 步 Euler flow sampling,CFG text scale 默认 4。</td></tr>
+      <tr><td>Image/Video editing</td><td>instruction + source image/video</td><td>edited image/video</td><td>source 走 clean VAE condition,target 走 noisy VAE tokens。</td></tr>
+      <tr><td>X2T image/video</td><td>image/video + question</td><td>text answer</td><td>ViT semantic tokens 替换视觉占位符,走 autoregressive text generation。</td></tr>
+      <tr><td>KV cache generation</td><td>同生成任务</td><td>更快采样</td><td>repo 有 <code>validation_gen_KVcache</code> 路径,用于反复 denoise 时缓存条件上下文。</td></tr>
+    </tbody>
+  </table>
+
+  <p class="pullquote">公开代码能帮你理解模型如何打包 token、如何做双专家 forward、如何采样;但不能完整复现论文训练。</p>
+</section>
+
+<section>
+  <span class="section-num">§ 8 · RESULTS</span>
+  <h2 class="section-title">实验复盘:<em>强项、弱项和公平性</em></h2>
+
+  <figure class="figure-wrap">
+    <img src="../assets/lance/benchmark-overview.png" alt="Lance benchmark overview">
+    <figcaption>官方 benchmark overview。本文本地保存了官方仓库里的图,避免页面依赖远端资源。</figcaption>
+  </figure>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>任务</th><th>指标</th><th>Lance 3B</th><th>应该怎么读</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Image generation</td><td>GenEval overall</td><td class="num">0.90</td><td>追平 TUNA,在 unified models 里第一梯队;count/color/position 很强。</td></tr>
+      <tr><td>Image generation</td><td>DPG-Bench overall</td><td class="num">84.67</td><td>不是全场最佳,低于 TUNA/TUNA-2/InternVL-U 等若干 unified baselines;relation 维度突出。</td></tr>
+      <tr><td>Image editing</td><td>GEdit Avg/G-O</td><td class="num">7.30</td><td>统一模型里最好,但低于专用 Qwen-Image-Edit 20B 的 8.01。</td></tr>
+      <tr><td>Video generation</td><td>VBench total</td><td class="num">85.11</td><td>统一模型里最高;论文标注使用 LLM rewriter,比较公平性要看 baseline 是否同样 rewrite。</td></tr>
+      <tr><td>Video understanding</td><td>MVBench avg</td><td class="num">62.0</td><td>统一模型里最好,但低于 Qwen2.5-VL 3B 67.0、TimeMarker 67.4 等专用理解模型。</td></tr>
+    </tbody>
+  </table>
+
+  <figure class="figure-wrap">
+    <img src="../assets/lance/text-to-image-overview.webp" alt="Lance text to image overview examples">
+    <figcaption>Text-to-image examples from the official repository. Lance 的优势更偏 prompt composition、文字/物体绑定和整体画面质量。</figcaption>
+  </figure>
+
+  <figure class="figure-wrap">
+    <img src="../assets/lance/image-editing-overview.webp" alt="Lance image editing overview examples">
+    <figcaption>Image editing examples from the official repository. 编辑任务最能体现 clean VAE condition、noisy VAE target 和 MaPE 的价值。</figcaption>
+  </figure>
+
+  <div class="two-col">
+    <div class="col-card">
+      <span class="label">Evidence-backed</span>
+      <h3>消融确实支持 multi-task synergy</h3>
+      <ul>
+        <li>加入 understanding data 后 GenEval/VBench 都涨。</li>
+        <li>加入 editing/subject-driven multi-task generation 后生成和理解都受益。</li>
+        <li>MaPE 移除后四类 benchmark 都下降,尤其 GEdit。</li>
+      </ul>
+    </div>
+    <div class="col-card">
+      <span class="label">Weak Spots</span>
+      <h3>结论边界也要明确</h3>
+      <ul>
+        <li>训练数据和 filtering recipe 不可复现。</li>
+        <li>VBench 使用 LLM rewriter,对比需要谨慎。</li>
+        <li>“from scratch”和 Qwen2.5-VL 初始化之间有表述张力。</li>
+        <li>repo 没有完整训练/RL 代码,只能复现实验推理链。</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 9 · REPRODUCTION</span>
+  <h2 class="section-title">可复现清单:<em>真的要复现会卡在哪里</em></h2>
+
+  <div class="check-grid">
+    <div class="check"><strong>初始化.</strong> 需要 Qwen2.5-VL 3B 的 LLM/ViT 权重和 Wan2.2 3D causal VAE。随机初始化不是同一个实验。</div>
+    <div class="check"><strong>token 打包.</strong> 必须正确维护 <code>packed_text_indexes</code>、<code>packed_vit_token_indexes</code>、<code>packed_vae_token_indexes</code>、<code>split_lens</code>、<code>attn_modes</code>。</div>
+    <div class="check"><strong>attention mask.</strong> text causal,visual full/noise segment bidirectional,noise 不能错误看见其他 target noise。</div>
+    <div class="check"><strong>MaPE.</strong> 如果启用 Qwen2.5-VL mrope,要按 modality 给 temporal coordinate shift,否则 clean/noisy/ref token 容易混。</div>
+    <div class="check"><strong>loss 权重.</strong> CE:MSE 不是固定值,PT/CT/SFT 不同。CT 把 CE 权重提高到 0.5:1。</div>
+    <div class="check"><strong>timestep schedule.</strong> 训练有 timestep shift,推理默认 30 steps、shift 3.5、CFG text scale 4.0。</div>
+    <div class="check"><strong>多阶段数据.</strong> PT 只做基础 paired data 不够,CT/SFT 的 editing 和 subject-driven data 是能力来源。</div>
+    <div class="check"><strong>代码缺口.</strong> 公开 repo 主要是 inference/benchmark/modeling,没有完整 optimizer/backward/data pipeline/RL reward 训练脚本。</div>
+  </div>
+
+  <table class="cmp">
+    <thead>
+      <tr><th>不确定点</th><th>合理猜测</th><th>验证方式</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>【不确定】“trained from scratch”的精确定义</td><td>可能指不是从已有 unified multimodal model 继续训练;但组件权重来自 Qwen2.5-VL/Wan2.2。</td><td>看官方后续技术报告或 checkpoint 初始化说明;比较随机初始化 ablation。</td></tr>
+      <tr><td>【不确定】训练数据过滤和 prompt rewriting 细节</td><td>内部数据质量和 prompt rewrite 对结果贡献不小。</td><td>用公开数据子集复刻同架构,评估 GenEval/VBench gap。</td></tr>
+      <tr><td>【不确定】RL 阶段除 PaddleOCR 外是否还有其他 reward</td><td>论文只明确写 text rendering/text-image alignment reward。</td><td>等待训练代码或附录;检查生成文字 benchmark 的 RL 前后变化。</td></tr>
+      <tr><td>【不确定】image/video checkpoint 是否共享完全同一套权重</td><td>README 默认区分 <code>lance_3b</code> 和 <code>lance_3b_video</code>,可能是不同 resolution/task specialization checkpoint。</td><td>下载 HF 权重后比较 config/state_dict key 和 shape。</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 10 · MEMORY CARD</span>
+  <h2 class="section-title">速读备忘卡:<em>下次回忆用</em></h2>
+  <div class="body-text">
+    <ul>
+      <li>Lance 是 image/video understanding + generation + editing 的 unified multimodal model。</li>
+      <li>核心不是单一路径统一,而是 shared interleaved context + decoupled capability pathways。</li>
+      <li>理解用 Qwen2.5-VL ViT semantic tokens,生成用 Wan2.2 VAE continuous latent tokens。</li>
+      <li>LLM<sub>UND</sub> 负责 text/semantic visual tokens 和 next-token CE。</li>
+      <li>LLM<sub>GEN</sub> 负责 VAE latent tokens 和 flow velocity prediction。</li>
+      <li>MaPE 给 ViT semantic、clean VAE、noisy VAE token groups 在 temporal RoPE 维度加 offset。</li>
+      <li>generalized 3D causal attention:文本 causal,视觉 segment bidirectional,不同 sample 隔离。</li>
+      <li>训练分 PT/CT/SFT/RL,真正的能力来自多任务数据调度。</li>
+      <li>代码里的 MoE 是 token-index-based dual path,不是 router-based dynamic MoE。</li>
+      <li>公开 repo 主要能看推理、benchmark、模型结构,不能完整复现训练。</li>
+      <li>实验强项是 unified image/video generation 和 editing;理解能力强但仍低于专用理解模型。</li>
+      <li>最大 caveat 是 “from scratch” 表述、LLM rewriter、公私数据差异和训练代码缺失。</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">SOURCES</span>
+  <h2 class="section-title">资料来源:<em>本文使用的原始材料</em></h2>
+  <div class="sources">
+    <p>论文 PDF: <a href="https://lance-project.github.io/assets/lance.pdf">https://lance-project.github.io/assets/lance.pdf</a></p>
+    <p>项目页: <a href="https://lance-project.github.io/">https://lance-project.github.io/</a></p>
+    <p>代码仓库: <a href="https://github.com/bytedance/Lance">https://github.com/bytedance/Lance</a></p>
+    <p>模型权重: <a href="https://huggingface.co/bytedance-research/Lance">https://huggingface.co/bytedance-research/Lance</a></p>
+    <p>代码阅读重点: <code>modeling/lance/lance.py</code>, <code>modeling/lance/qwen2_navit.py</code>, <code>data/data_utils.py</code>, <code>data/common.py</code>, <code>inference_lance.py</code>, <code>config/config_factory.py</code>。</p>
+  </div>
+</section>
+
+<footer class="footer">
+  <div><a href="../index.html#paper-reading">Paper Reading Notes</a></div>
+  <div class="footer-right">Lance · Unified Multimodal Modeling</div>
+</footer>
+</body>
+</html>
