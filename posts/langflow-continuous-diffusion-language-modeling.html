@@ -1,0 +1,694 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="LangFlow 技术博客解读：连续扩散语言模型如何通过 embedding-space flow matching、Gumbel logNSR schedule、self-conditioning 和 ODE NLL bound 追上离散扩散。"
+    >
+    <title>LangFlow：连续扩散如何追上离散扩散语言模型</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+    <script type="application/json" id="paper-metadata">
+{
+  "title": "LangFlow：连续扩散如何追上离散扩散语言模型",
+  "paper": "https://arxiv.org/abs/2604.11748",
+  "authors": ["Yuxin Chen", "Chumeng Liang", "Hangke Sui", "Ruihan Guo", "Chaoran Cheng", "Jiaxuan You", "Ge Liu"],
+  "date": "2026-05-21",
+  "category": "diffusion-generation",
+  "tags": ["langflow", "continuous-diffusion", "diffusion-language-model", "flow-matching", "embedding-space-diffusion", "gumbel-noise-schedule", "self-conditioning", "ode-nll-bound", "language-modeling"],
+  "systems": ["LangFlow", "MDLM", "Duo", "SEDD", "Plaid", "FLM", "autoregressive Transformer"],
+  "datasets": ["LM1B", "OpenWebText", "PTB", "Wikitext", "Lambada", "AG News", "PubMed", "Arxiv"],
+  "methods": ["Embedding-space Flow Matching", "Bregman posterior matching", "cross-entropy denoising", "Gumbel logNSR proposal", "self-conditioning", "ODE-based NLL bound", "Euler-EDM sampling"],
+  "code": "https://github.com/nealchen2003/LangFlow",
+  "related_posts": ["posts/lance-unified-multimodal-model.html", "posts/context-unrolling-omni-models.html", "posts/prowl-regret-driven-world-model-learning.html", "posts/interaction-models-thinking-machines.html"],
+  "graph_nodes": ["LangFlow", "continuous diffusion language model", "embedding-space flow matching", "Bregman posterior matching", "Gumbel logNSR proposal", "self-conditioning", "ODE NLL bound", "LM1B", "OpenWebText", "MDLM", "Duo", "autoregressive Transformer"],
+  "graph_edges": [
+    "LangFlow -> implements -> continuous diffusion language model",
+    "LangFlow -> trains_with -> embedding-space flow matching",
+    "Bregman posterior matching -> justifies -> cross-entropy clean-token prediction",
+    "Gumbel logNSR proposal -> allocates_steps_to -> high-information noise levels",
+    "self-conditioning -> stabilizes -> continuous ODE denoising trajectory",
+    "ODE NLL bound -> evaluates -> flow-based language model perplexity",
+    "LangFlow -> evaluated_on -> LM1B / OpenWebText / zero-shot corpora",
+    "LangFlow -> rivals -> MDLM / Duo on diffusion language modeling",
+    "autoregressive Transformer -> remains_stronger_on -> many raw language modeling metrics",
+    "LangFlow -> suggests -> continuous diffusion for controllable multimodal systems"
+  ]
+}
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#paper-reading">Paper</a>
+        <a href="../index.html#notes">AI Game</a>
+        <a href="../index.html#posts">Robot</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading · Diffusion Language Models</p>
+          <h1>LangFlow：连续扩散如何追上离散扩散语言模型</h1>
+          <p class="article-dek">
+            这是一篇对 Chumeng Liang 的 LangFlow 博客和 arXiv 论文的中文解读，不是逐字全文翻译。
+            核心问题很清楚：文本是离散 token，为什么还要把连续扩散搬回来？
+            LangFlow 的回答不是“连续一定更强”，而是：只要训练目标、噪声日程、自条件和 likelihood 评估协议设计对了，
+            连续 embedding-space diffusion 至少可以和主流离散扩散语言模型站到同一张表上。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.21</span>
+            <span>阅读约 30 分钟</span>
+            <span>arXiv:2604.11748</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            <strong>痛点：</strong>早期连续扩散语言模型在文本上明显落后，因为 embedding 空间稀疏、直接回归容易坍塌，
+            训练噪声区间浪费严重，评估又常用不匹配 ODE 生成过程的 likelihood bound。
+            <strong>核心招：</strong>LangFlow 在 token embedding 空间做 flow matching，但用 cross-entropy 预测 clean token posterior；
+            再用 Gumbel logNSR schedule 把训练/采样步骤集中到高信息噪声区间，用 self-conditioning 稳住 ODE 轨迹，并给连续 flow 推导 ODE-based NLL bound。
+            <strong>效果：</strong>130M DiT 规模下，LM1B PPL 30.0、OpenWebText PPL 24.6，Gen PPL 接近或优于多个离散扩散 baseline；
+            zero-shot PPL 在 7 个 benchmark 中有 4 个超过自回归 baseline。
+            <strong>代价：</strong>它仍没有整体取代自回归 Transformer；OWT 采样常用 1024 NFE，训练代码暂未公开，NLL 也是 upper-bound/estimate 而非 AR 那种精确 likelihood。
+          </p>
+          <dl class="term-list">
+            <dt>不是</dt>
+            <dd>不是证明“连续扩散比 AR 语言模型更强”；论文和博客都承认语言建模主指标上 AR 仍是强基线。</dd>
+            <dt>是</dt>
+            <dd>证明“连续扩散在文本上落后不是天然定律”，很多差距来自训练 recipe 和评估协议没调对。</dd>
+            <dt>核心 insight</dt>
+            <dd>文本扩散不一定要越来越像 AR；如果想保留 diffusion 的连续 latent、可控轨迹和多模态兼容性，就要把连续扩散自己的训练/评估问题解决掉。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 这篇在反驳什么</h2>
+          <p>
+            扩散语言模型过去几年的路线大致是：连续扩散先探索，后来离散扩散和 masked diffusion 变强，再到 block diffusion 越来越接近自回归。
+            这个趋势带来一个尴尬结论：扩散越像 AR，PPL 越好；但它也越失去扩散本来的优势，比如连续 latent 轨迹、可编辑性、少步生成潜力和多模态自然性。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>生成状态</th>
+                <th>优势</th>
+                <th>瓶颈</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Autoregressive Transformer</td>
+                <td>左到右 token prefix</td>
+                <td>likelihood 清楚、KV cache 高效、规模化成熟</td>
+                <td>缺连续 latent 轨迹；全局可控和并行修改困难</td>
+              </tr>
+              <tr>
+                <td>Masked / absorbing diffusion</td>
+                <td>mask token 到真实 token</td>
+                <td>文本离散性匹配好，PPL 进步快</td>
+                <td>prior 常塌成全 mask；few-step 时容易混多个 target mode</td>
+              </tr>
+              <tr>
+                <td>Uniform-state discrete diffusion</td>
+                <td>随机 token / uniform state</td>
+                <td>保留更多 diffusion 多样先验</td>
+                <td>语言建模表上通常不如 masked diffusion</td>
+              </tr>
+              <tr>
+                <td>Continuous embedding diffusion</td>
+                <td>Gaussian latent 到 token embedding</td>
+                <td>保留连续轨迹，适合 guidance 和多模态统一</td>
+                <td>过去训练不稳、评估不准、sample quality 差</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            LangFlow 的定位是最后一类。它不是把文本扩散再推向 AR，而是回头修连续扩散：目标函数不要直接 MSE 回归 embedding；
+            schedule 不要套图像扩散的直觉；likelihood 不要拿 SDE/NELBO 去评估 ODE flow；self-conditioning 不要为了“公平”随手关掉。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            宏观上，LangFlow 是一个 <strong>embedding-space flow matching language model</strong>。
+            输入 token 先变成连续 embedding，向 embedding 加 Gaussian noise；模型看到 noisy embedding 和噪声强度 \(\gamma\)，输出每个位置的 clean token logits。
+            采样时从 Gaussian noise 开始，沿 ODE 逐步去噪到 clean embedding，最后再 argmax 成 token。
+          </p>
+          <div class="code-block">
+            <pre><code>tokens x: (B, L)
+  -> embedding table E: (V, D)
+z = E[x]: (B, L, D)
+  -> VP noise path with gamma
+z_gamma = alpha(gamma) * z + sigma(gamma) * eps
+  -> bidirectional DiT backbone + gamma embedding + RoPE
+logits = f_theta(z_gamma, gamma, x_self_cond): (B, L, V)
+  -> CE target: original token ids x
+  -> expected clean embedding: z_hat = softmax(logits) @ E
+  -> ODE/Euler-EDM denoising step during sampling
+  -> final logits -> argmax token ids</code></pre>
+          </div>
+          <p>
+            关键张量规模以官方 config 为例：\(V=50257\)、\(D=768\)、\(L=1024\)、12 层 DiT、12 个 attention heads、\(\gamma\) 的条件维度为 128。
+            注意这里的 attention 是双向的，不是 causal mask；扩散模型每一步都能看整段 noisy sequence。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：连续空间走 ODE，但训练目标仍预测 token posterior</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>如果直接在 embedding 空间回归 velocity 或 clean embedding，embedding table 又是和模型一起训练的，
+            那么不同 token embedding 可能被模型压到相似位置，形成一种“低损失但没语言意义”的坍塌解。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>LangFlow 让 DiT 从 noisy embedding \(\mathbf{z}_\gamma\) 预测 clean token distribution
+            \(\hat{\mathbf{x}}_\theta^{(i)}\)，用 cross-entropy 对每个位置的原 token 做监督。连续 denoiser 不直接回归，而是由 token distribution 反推：
+          </p>
+          <div class="math-block">
+            \[
+            \hat{\mathbf{z}}_\theta^{(i)}(\mathbf{z}_\gamma,\gamma)
+            = \mathcal{E}^{\top}\hat{\mathbf{x}}_\theta^{(i)}(\mathbf{z}_\gamma,\gamma)
+            \]
+          </div>
+          <p>
+            <strong>为什么有效：</strong>CE 锁住了离散 token 语义，避免 embedding 回归的退化；同时模型输入仍是连续 noisy embedding，
+            因此采样阶段还可以用连续 ODE 轨迹和 guidance-style 控制。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>最终输出仍要经过 vocabulary logits，不能完全摆脱离散 decoder；embedding table 的归一化、bias skip 和最后 argmax 都会影响生成质量。
+          </p>
+          <p>
+            <strong>实现细节：</strong>官方代码的 <code>EmbeddingLayer</code> 支持 token ids 或概率分布输入。
+            如果输入是概率 \((B,L,V)\)，它执行 \(\mathrm{probs} @ E\) 得到 expected embedding；
+            <code>LangFlow.forward()</code> 加了 embedding-similarity skip logits，<code>generate_samples()</code> 每步 softmax 后再嵌回连续空间。
+          </p>
+
+          <h3>创新点 2：用 Gumbel logNSR schedule 把步数放到“真的有信息”的噪声区间</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>图像扩散常把计算放在中等 SNR 区间，但文本 embedding 是稀疏孤岛。
+            用 naive \(t\) schedule 时，大量区间 loss 近似为 0，说明模型几乎不用学；有用的变化集中在高噪声区。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>LangFlow 不直接用 \(t\)，而用 log noise-to-signal ratio：
+          </p>
+          <div class="math-block">
+            \[
+            \gamma=\log\frac{\sigma^2}{\alpha^2}, \qquad
+            \mathbf{z}_\gamma=\sqrt{\operatorname{sigmoid}(-\gamma)}\,\mathbf{z}
+            +\sqrt{\operatorname{sigmoid}(\gamma)}\,\epsilon
+            \]
+          </div>
+          <p>
+            论文观察到每个 \(\gamma\) 上的 CE loss 近似 posterior entropy \(H(x|\mathbf{z}_\gamma)\)。
+            因此反向去噪本质上是在逐步获取 token 信息，采样和训练应该按信息增益 \(H'_\gamma\) 分配步数。
+            实验中 \(H'_\gamma\) 呈单峰右偏，Gumbel 分布拟合得很好。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>这个 schedule 不是“让曲线好看”，而是把有限 NFE 用在 entropy 变化最快的区间。
+            博客里提到只换 Gumbel proposal 就能把 Gen PPL 从约 1000 降到约 150，这说明 schedule 是连续文本扩散的主开关。
+          </p>
+          <p>
+            <strong>实现细节：</strong>官方 <code>GumbelProposal</code> 维护 learnable <code>loc</code>、<code>scale</code>、<code>entropy</code>，通过 inverse CDF 把均匀采样 \(q\) 转成 \(\gamma\)，并用 cutoff 得到 <code>gamma_min/gamma_max</code>。
+            config 中默认 <code>gumbel_loc=4.723</code>、<code>gumbel_scale=0.852</code>、<code>gumbel_cutoff=1e-5</code>。
+          </p>
+
+          <h3>创新点 3：self-conditioning 对连续扩散不是小 trick，而是评估协议的一部分</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>扩散采样每一步都依赖上一步的 clean estimate。
+            如果上一轮 \(\hat{\mathbf{z}}\) 有误差，下一个 noisy state 会被带偏，ODE 轨迹误差会逐步累积。
+            过去一些比较会在 PPL 评估中关闭 self-conditioning，理由是它主要影响采样路径，不该影响数据 likelihood。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>LangFlow 训练时以 0.25 概率随机使用模型自己的上一轮预测作为 self-conditioning；
+            推理时总是开启，第一步用零向量，之后用上一轮 \(\hat{\mathbf{z}}\)。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>模型</th>
+                <th>Self-conditioning</th>
+                <th>Gen PPL ↓</th>
+                <th>PPL ↓</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>MDLM</td>
+                <td>关</td>
+                <td>103.9</td>
+                <td>31.0</td>
+              </tr>
+              <tr>
+                <td>MDLM</td>
+                <td>开</td>
+                <td>94.9</td>
+                <td>32.7</td>
+              </tr>
+              <tr>
+                <td>LangFlow</td>
+                <td>关</td>
+                <td>154.2</td>
+                <td>49.0</td>
+              </tr>
+              <tr>
+                <td>LangFlow</td>
+                <td>开</td>
+                <td>81.5</td>
+                <td>30.0</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            <strong>为什么有效：</strong>对连续 ODE 来说，状态每步都是连续向量，上一轮 clean prediction 能提供强语义锚点；
+            对 masked/discrete diffusion 来说，self-conditioning 的收益更偏 sample trajectory，PPL 不一定改善。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>训练和评估都多一次预测路径，计算更贵；同时“开 self-conditioning 后的 PPL bound”需要和 baseline 的协议解释清楚。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>核心操作</th>
+                <th>输出</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>训练</td>
+                <td>token ids \((B,L)\)</td>
+                <td>embed 后按 Gumbel \(\gamma\) 加噪，DiT 预测 clean token logits，用 CE 监督</td>
+                <td>每个位置 vocabulary logits \((B,L,V)\)</td>
+              </tr>
+              <tr>
+                <td>self-cond 训练</td>
+                <td>noisy embedding + 可选上一轮预测</td>
+                <td>以概率 0.25 使用 detached \(\hat{\mathbf{z}}\) 作为辅助输入</td>
+                <td>更稳的 posterior predictor</td>
+              </tr>
+              <tr>
+                <td>采样</td>
+                <td>Gaussian noise \((B,L,D)\)</td>
+                <td>沿 Gumbel \(\gamma\) grid 运行 Euler-EDM；每步 logits -> softmax -> expected embedding</td>
+                <td>最终 token ids \((B,L)\)</td>
+              </tr>
+              <tr>
+                <td>PPL 评估</td>
+                <td>验证集 token ids</td>
+                <td>近 clean reconstruction CE + ODE divergence integral + Gaussian prior term</td>
+                <td>flow-based NLL / PPL upper bound</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            代码里 <code>inference.py</code> 很薄：加载 <code>LangFlowConfig</code>、safetensors checkpoint 和 GPT-2 tokenizer，然后调用 <code>model.generate_samples()</code>。
+            训练代码目前没有 release；可见部分主要是模型、推理、PPL evaluation。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式和实现逐项拆解</h2>
+
+          <h3>公式 1：embedding-space VP path</h3>
+          <div class="math-block">
+            \[
+            \mathbf{z}_\gamma
+            = \sqrt{\sigma(-\gamma)}\,\mathbf{z}
+            + \sqrt{\sigma(\gamma)}\,\epsilon,\quad
+            \epsilon\sim\mathcal{N}(0,I)
+            \]
+          </div>
+          <p>
+            \(\mathbf{z}\in\mathbb{R}^{B\times L\times D}\) 是 clean token embedding；
+            \(\epsilon\) 同形状；\(\gamma\in\mathbb{R}^{B}\) 是 logNSR。
+            代码对应 <code>_forward_diffusion()</code>：<code>alpha=sigmoid(-gamma).sqrt()</code>、<code>sigma=sigmoid(gamma).sqrt()</code>，
+            然后 <code>x_embed * alpha + noise * sigma</code>。
+          </p>
+
+          <h3>公式 2：CE posterior matching</h3>
+          <div class="math-block">
+            \[
+            \mathcal{L}_{CE}
+            = \int \lambda(\gamma)\,
+            \mathbb{E}\left[-\sum_{i=1}^{L}
+            \log \hat{x}_{\theta}^{(i,x^{(i)})}(\mathbf{z}_\gamma,\gamma)
+            \right] d\gamma
+            \]
+          </div>
+          <p>
+            对每个位置 \(i\)，模型输出 vocabulary distribution。
+            真实 token \(x^{(i)}\) 是 CE target；\(\lambda(\gamma)\) 是噪声级别权重。
+            这一步把连续扩散的 denoising 任务变成“从 noisy embedding 识别 clean token posterior”。
+          </p>
+
+          <h3>公式 3：expected embedding denoiser</h3>
+          <div class="math-block">
+            \[
+            \hat{\mathbf{z}}_\theta^{(i)}
+            = \mathcal{E}^{\top}\hat{\mathbf{x}}_\theta^{(i)}
+            \]
+          </div>
+          <p>
+            如果 \(\hat{\mathbf{x}}\in\mathbb{R}^{B\times L\times V}\)，embedding table \(\mathcal{E}\in\mathbb{R}^{V\times D}\)，
+            那么输出 \(\hat{\mathbf{z}}\in\mathbb{R}^{B\times L\times D}\)。
+            代码对应 <code>EmbeddingLayer.forward()</code> 对 probability input 执行 <code>einsum("blv,ve-&gt;ble", probs, embedding)</code>。
+          </p>
+
+          <h3>公式 4：Gumbel information schedule</h3>
+          <div class="math-block">
+            \[
+            H_\gamma \propto H(+\infty)
+            \exp\left(-\exp\left(-\frac{\gamma-P_\mu}{P_\beta}\right)\right)
+            \]
+          </div>
+          <p>
+            \(\gamma\) 是噪声坐标；\(P_\mu,P_\beta\) 分别是 Gumbel loc/scale；
+            \(H_\gamma\) 近似该噪声级别下 token posterior 的不可约熵。
+            直觉是：采样步数应按 \(H_\gamma\) 的斜率分布，而不是按线性时间均匀撒。
+          </p>
+
+          <h3>公式 5：ODE-based NLL bound</h3>
+          <div class="math-block">
+            \[
+            \log p(\mathbf{x}) \ge
+            \mathbb{E}_{\mathbf{z}}
+            \left[
+            \frac{LD}{2}
+            -\frac{\|\mathbf{z}_b\|^2}{2\sigma_b^2}
+            +\sum_{i=1}^{L}\log \hat{x}_{\theta}^{(i,x^{(i)})}(\mathbf{z}_a,a)
+            +\int_a^b \frac{\alpha_\gamma}{2}
+            \nabla\cdot \hat{\mathbf{z}}_\theta(\mathbf{z}_\gamma,\gamma)d\gamma
+            \right]
+            \]
+          </div>
+          <p>
+            第一组项对应高噪声 prior；第三项是近 clean endpoint 的 reconstruction likelihood；
+            积分项是 ODE flow 的体积变化，类似 normalizing flow 里的 change of variables。
+            代码 <code>eval_ppl.py</code> 里把它拆成 <code>reconst_nll</code>、<code>flow_nll</code>、<code>prior_nll</code>，
+            并用 <code>torchdiffeq.odeint</code> 和 Hutchinson 估计 divergence。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练-推理对齐检查</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>点</th>
+                <th>训练</th>
+                <th>推理/评估</th>
+                <th>风险</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>噪声坐标</td>
+                <td>按 Gumbel proposal 采 \(\gamma\)</td>
+                <td>采样 grid 也由同一 proposal 生成</td>
+                <td>proposal 拟合不好会直接浪费 NFE</td>
+              </tr>
+              <tr>
+                <td>目标</td>
+                <td>CE 预测 clean token</td>
+                <td>softmax logits 后变 expected embedding，再 ODE step</td>
+                <td>训练目标和连续速度场之间隔了一层 posterior-to-embedding 映射</td>
+              </tr>
+              <tr>
+                <td>self-conditioning</td>
+                <td>随机启用，预测结果 detach</td>
+                <td>总是启用，第一步 zero，后续用上一轮 \(\hat{\mathbf{z}}\)</td>
+                <td>训练/推理分布仍不完全一致，但显著缓解 trajectory drift</td>
+              </tr>
+              <tr>
+                <td>attention</td>
+                <td>bidirectional full-sequence denoising</td>
+                <td>每步全序列并行预测</td>
+                <td>没有 AR KV cache 的一 token 一步优势；长序列成本高</td>
+              </tr>
+              <tr>
+                <td>likelihood</td>
+                <td>CE + flow matching 训练</td>
+                <td>ODE bound 估计 PPL</td>
+                <td>不是 exact AR likelihood；divergence 估计有方差和实现细节</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <p>
+            实验规模是 130M DiT，训练 1M steps；LM1B 用长度 128，OpenWebText 用长度 1024。
+            Gen PPL 使用 GPT-2 Large 对 1024 个 samples 评分。论文报告扩散模型 PPL 是 upper bound，因此要和 AR exact likelihood 分开理解。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>模型</th>
+                <th>LM1B Gen PPL ↓</th>
+                <th>LM1B PPL ↓</th>
+                <th>OWT Gen PPL ↓</th>
+                <th>OWT PPL ↓</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>AR Transformer</td>
+                <td>66.7</td>
+                <td>22.8</td>
+                <td>35.9</td>
+                <td>17.5</td>
+              </tr>
+              <tr>
+                <td>MDLM</td>
+                <td>103.9</td>
+                <td>31.0</td>
+                <td>104.9</td>
+                <td>23.2</td>
+              </tr>
+              <tr>
+                <td>Duo</td>
+                <td>97.6</td>
+                <td>33.6</td>
+                <td>77.6</td>
+                <td>25.2</td>
+              </tr>
+              <tr>
+                <td>FLM</td>
+                <td>96.9</td>
+                <td>未报</td>
+                <td>62.2</td>
+                <td>未报</td>
+              </tr>
+              <tr>
+                <td>LangFlow</td>
+                <td>92.2 / 81.5*</td>
+                <td>30.0</td>
+                <td>36.5</td>
+                <td>24.6</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            *博客和论文不同表里会出现 self-conditioning ablation 与最终表述的数值差异；核心结论不变：LangFlow 在扩散模型内部已经接近或超过离散扩散，
+            但 AR Transformer 在 LM1B/OWT 的 raw PPL 上仍更强。
+          </p>
+          <p>
+            <strong>公平性：</strong>模型规模和训练 steps 基本对齐，这是优点。
+            但不同模型的 sampling NFE、self-conditioning 协议、likelihood bound 类型并不完全等价。
+            Gen PPL 由外部 GPT-2 Large 评分，也可能偏向 GPT-2 风格文本。
+          </p>
+          <p>
+            <strong>消融是否支撑结论：</strong>Gumbel schedule 和 self-conditioning 的消融很关键，分别解释“为什么之前 continuous diffusion 不行”和“为什么之前 PPL 比较可能低估 continuous diffusion”。
+            ODE NLL bound 则解决了评估协议问题。但由于训练代码未公开，外部还不能完全审计 optimizer、EMA、data pipeline 和 exact training recipe。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 代码实现笔记</h2>
+          <p>
+            官方仓库目前公开了模型、推理、PPL 评估和 checkpoint 下载说明；README 标注训练代码会在论文接收后公开。
+            所以代码级分析只能覆盖 inference/evaluation path，不能完整复现训练。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>文件</th>
+                <th>负责什么</th>
+                <th>观察</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>langflow/model.py</code></td>
+                <td>LangFlow 模型、DiT block、Gumbel proposal、sampling</td>
+                <td>双向 attention；AdaLN modulation；self-cond projection 零初始化；final layer 零初始化</td>
+              </tr>
+              <tr>
+                <td><code>langflow/config.json</code></td>
+                <td>默认结构超参</td>
+                <td>vocab 50257、hidden 768、12 blocks、12 heads、length 1024、self-conditioning 开启</td>
+              </tr>
+              <tr>
+                <td><code>inference.py</code></td>
+                <td>加载 safetensors checkpoint 并生成文本</td>
+                <td>默认 GPT-2 tokenizer；<code>num_steps</code> 默认 128，README 示例 OWT 用 1024</td>
+              </tr>
+              <tr>
+                <td><code>eval_ppl.py</code></td>
+                <td>flow-based PPL 评估</td>
+                <td><code>torchdiffeq.odeint</code> 做 ODE integration；Hutchinson 估计 divergence；支持 torchrun 多卡</td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="code-block">
+            <pre><code># generate_samples() 的核心逻辑，按代码语义概括
+z = randn(B, L, D)
+gamma_grid = GumbelProposal(linspace(1-eps, eps, num_steps))
+x_self_cond = None
+
+for gamma_t, gamma_s in adjacent(gamma_grid):
+    logits = model(noisy_embeds=z, timesteps=gamma_t, x_self_cond=x_self_cond)
+    probs = softmax(logits)
+    z_hat = probs @ embedding_table
+    x_self_cond = z_hat
+    z = euler_edm_step(z, z_hat, gamma_t, gamma_s)
+
+tokens = argmax(model(z, gamma_final, x_self_cond), dim=-1)</code></pre>
+          </div>
+          <p>
+            一个值得注意的工程点是 <code>use_bias</code>：模型会用 noisy embedding 与词表 embedding 的相似度加一个 skip logits。
+            这相当于在接近 clean 的区域给模型一个“最近 embedding token”的 shortcut，能减轻最后分类头负担。
+          </p>
+          <p>
+            代码级小坑：<code>eval_ppl.py</code> 最后的打印里有一处使用 <code>model.self_conditioning</code>，
+            但模型类里实际配置入口是 <code>model.config.self_conditioning</code>。如果直接跑到该分支报属性错误，可以先把这处改成 config 字段再继续验证。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 可复现清单和不确定点</h2>
+          <ul>
+            <li>模型：12-layer DiT、hidden 768、12 heads、dropout 0.1、sequence length 1024。</li>
+            <li>Embedding：GPT-2 vocab 50257；代码里默认 <code>use_normalized_embedding=true</code>，用 row-normalize 后乘 \(\sqrt{D}\)。</li>
+            <li>Schedule：Gumbel loc/scale/cutoff/entropy，需要和 checkpoint 一致；采样和训练应共用信息分配原则。</li>
+            <li>Self-conditioning：训练随机开，推理/评估默认开；比较 baseline 时必须说明是否启用。</li>
+            <li>Optimizer：论文写 AdamW、lr 3e-4、warmup 2500、EMA 0.9999、bf16；训练代码未公开，细节仍需核验。</li>
+            <li>数据：LM1B、OpenWebText 的 tokenizer、wrap、EOS 插入、validation split 都会影响 PPL。</li>
+            <li>评估：flow NLL 依赖 ODE solver、NFE、Hutchinson divergence estimator、attention mask 处理。</li>
+            <li>采样：NFE 对 Gen PPL 影响很大；OWT 的 1024 NFE 成本不能忽略。</li>
+          </ul>
+          <p>
+            【不确定】训练代码未公开，因此 self-conditioning 训练时的 exact detach 方式、Gumbel 参数如何更新、loss weight \(\lambda(\gamma)\) 的实现细节还不能完全验证。
+            合理猜测有三种：一是 schedule 参数随训练端到端更新；二是先拟合 entropy curve 后固定；三是用 checkpoint 中的 learnable 参数但对主模型训练影响有限。
+            验证方式：等训练代码公开后检查 optimizer parameter groups；或复现实验时分别固定/学习 Gumbel 参数做 ablation。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 对多模态和 world model 的启发</h2>
+          <p>
+            这篇对你之前关心的 WAM/多模态世界模型有一个很直接的启发：语言模型不一定只能在离散 token 空间里做生成。
+            如果任务本身要和图像、视频、动作、3D 状态接起来，连续 latent diffusion 的优势反而会变得更自然。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>可迁移设计</th>
+                <th>预期收益</th>
+                <th>风险</th>
+                <th>验证实验</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>把 action / observation 表征放在连续 latent，再用 token posterior 做语义约束</td>
+                <td>既保留连续控制空间，又避免 latent 坍塌</td>
+                <td>需要强 decoder 或 classifier 约束语义</td>
+                <td>比较 MSE latent loss、CE/posterior loss、混合 loss 的 rollout drift</td>
+              </tr>
+              <tr>
+                <td>用 information-uniform schedule 设计动作/状态噪声</td>
+                <td>训练步数集中在决策信息变化最大的区域</td>
+                <td>需要估计 conditional entropy curve</td>
+                <td>按噪声 level probe action intent / future state recoverability</td>
+              </tr>
+              <tr>
+                <td>把 self-conditioning 用作 latent rollout anchor</td>
+                <td>减少多步生成中的语义漂移</td>
+                <td>训练/推理 mismatch，需要 scheduled self-cond</td>
+                <td>one-step、multi-step、self-cond 三组对比 long-horizon consistency</td>
+              </tr>
+              <tr>
+                <td>用 ODE-style bound 或 flow diagnostics 评估 latent model</td>
+                <td>避免拿不匹配的 ELBO/CE 指标误判模型</td>
+                <td>实现复杂，divergence 估计成本高</td>
+                <td>比较 bound、rollout reward、downstream success 的相关性</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>11. 速读备忘卡</h2>
+          <ul>
+            <li>LangFlow 的核心不是“文本连续化”，而是“连续 ODE + 离散 token posterior”的折中。</li>
+            <li>直接回归 embedding/velocity 容易让 embedding table 学出坍塌捷径；CE 预测 clean token 可以避免这个问题。</li>
+            <li>文本 embedding 的有用 denoising 区间集中在高噪声段，图像扩散的直觉不能直接搬。</li>
+            <li>\(\gamma=\log(\sigma^2/\alpha^2)\) 是这篇的关键坐标；Gumbel proposal 是关键 schedule。</li>
+            <li>self-conditioning 对连续扩散同时改善 Gen PPL 和 PPL；对离散 diffusion 则更像 sample-quality trade-off。</li>
+            <li>ODE-based NLL bound 是为了匹配 deterministic flow 生成过程，不是拿 SDE NELBO 硬套。</li>
+            <li>LangFlow 已经能和 MDLM/Duo 这类离散扩散在标准 LM benchmark 上竞争。</li>
+            <li>但 AR Transformer 在 LM1B/OWT raw PPL 上仍明显强；不要把结论夸成“扩散取代 AR”。</li>
+            <li>官方代码有 inference 和 PPL eval，训练代码还没放出来。</li>
+            <li>真正值得带走的是：连续扩散如果保住 continuous latent trajectory，未来更适合做可控、多模态、world-model-style generation。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Sources</h2>
+          <ul class="source-list">
+            <li><a href="https://caradryanl.github.io/blog/2026/langflow/">Original blog: Continuous Diffusion Rivals Discrete in Language Modeling</a></li>
+            <li><a href="https://arxiv.org/abs/2604.11748">arXiv abstract: LangFlow: Continuous Diffusion Rivals Discrete in Language Modeling</a></li>
+            <li><a href="https://arxiv.org/pdf/2604.11748">Paper PDF</a></li>
+            <li><a href="https://github.com/nealchen2003/LangFlow">Official code: nealchen2003/LangFlow</a></li>
+            <li><a href="https://huggingface.co/Continuous-Rivals-Discrete/langflow-owt">OpenWebText checkpoint on Hugging Face</a></li>
+          </ul>
+          <p>
+            本文是中文解读和技术重构，不是原博客的全文翻译；原文图片和大段表述均未搬运。
+          </p>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="structural-latent-points-robotic-manipulation.html">上一篇：Structural Latent Points</a>
+        <a href="lance-unified-multimodal-model.html">相关：Lance 统一多模态</a>
+        <a href="context-unrolling-omni-models.html">相关：Context Unrolling</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <a href="../index.html#paper-reading">回到 Paper Reading</a>
+    </footer>
+  </body>
+</html>
