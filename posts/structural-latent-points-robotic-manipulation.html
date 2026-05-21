@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Structural Latent Points 论文精读：PL-VAE、PTv3、3DGS feature splatting、结构化潜点表征，以及 RLBench、ManiSkill2、真机实验复盘。"
+    >
+    <title>Structural Latent Points：把点云压成可泛化的结构潜点</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+    <script type="application/json" id="paper-metadata">
+{
+  "title": "Learning Structural Latent Points for Efficient Visual Representations in Robotic Manipulation",
+  "paper": "https://arxiv.org/pdf/2605.21258v1",
+  "authors": ["Yicheng Jiang", "Jiaxu Wang", "Junhao He", "Zesen Gan", "Junhao Li", "Qiang Zhang", "Jingkai Sun", "Jiahang Cao", "Mingyuan Sun", "Xiangyu Yue", "Qiming Shao"],
+  "date": "2026-05-21",
+  "category": "robotics-world-models",
+  "tags": ["structural-latent-points", "point-wise-vae", "ptv3", "3d-gaussian-splatting", "feature-splatting", "robot-manipulation", "act-policy", "rlbench", "maniskill2"],
+  "systems": ["Structural Latent Points", "PTv3", "PL-VAE", "3DGS", "ACT"],
+  "datasets": ["ScanNetV2", "RLBench", "ManiSkill2", "real-robot RGB-D demonstrations"],
+  "methods": ["Point-wise latent VAE", "Point-cloud autoencoder", "3DGS feature splatting", "post feature decoding", "geometry reasoning", "render/reconstruction/KL joint loss"],
+  "code": null,
+  "related_posts": ["posts/world-model-basics.html", "posts/latent-world-models.html", "posts/vla-policies.html", "posts/prowl-regret-driven-world-model-learning.html"],
+  "graph_nodes": ["Structural Latent Points", "PL-VAE", "PTv3", "3DGS feature splatting", "ACT", "RLBench", "ManiSkill2", "ScanNetV2", "FastWAM"],
+  "graph_edges": [
+    "Structural Latent Points -> inserts -> PL-VAE into PTv3 latent space",
+    "PL-VAE -> regularizes -> point features and coordinates toward Gaussian prior",
+    "Structural Latent Points -> uses -> lightweight 3DGS feature splatting",
+    "3DGS feature splatting -> supervises -> RGB / depth / semantic features",
+    "Structural Latent Points -> evaluated_on -> RLBench / ManiSkill2 / real robot",
+    "Structural Latent Points -> can_inspire -> FastWAM structural observation tokens"
+  ]
+}
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#paper-reading">Paper</a>
+        <a href="../index.html#posts">Robot</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading · Robotics World Models</p>
+          <h1>Structural Latent Points：把点云压成可泛化的结构潜点</h1>
+          <p class="article-dek">
+            这篇不是做一个新 policy，也不是直接把 3DGS splats 当机器人状态用。它真正想解决的是：
+            机器人视觉预训练里，纯 implicit 表征缺结构，纯 explicit 点/高斯又受分辨率和域偏移限制。
+            作者在 PTv3 的点云 autoencoder latent 中插入 point-wise VAE，把点的坐标和特征一起正则到高斯先验，
+            得到一种“还像点云、但不再执着于精确几何”的结构潜点。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.21</span>
+            <span>阅读约 35 分钟</span>
+            <span>arXiv:2605.21258v1</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            <strong>痛点：</strong>机器人操作需要 3D-aware visual representation，但 NeRF/volume latent 太隐式、太贵，
+            3DGS/point splat 太显式、受点数/分辨率限制，迁移到分布不同的下游场景会掉。
+            <strong>核心招：</strong>在 PTv3 点云 autoencoder 的 sparse latent points 上插入 point-wise latent VAE，
+            同时对每个点的 feature 和 coordinate 建高斯后验，再用轻量 3DGS feature splatting 做自监督预训练。
+            <strong>效果：</strong>RLBench 平均成功率 0.56、ManiSkill2 0.64，均为表内最好；真机三项任务总体也优于 scratch/pretrained baselines。
+            <strong>代价：</strong>它牺牲了精确几何，依赖 RGB-D/point-cloud 输入、ScanNetV2 预训练和未公开代码；在需要毫米级几何的操作上上限可能受限。
+          </p>
+          <dl class="term-list">
+            <dt>不是</dt>
+            <dd>不是一个新的 robot policy；下游 policy 仍用 ACT。也不是把完整 3DGS 场景当 policy state。</dd>
+            <dt>是</dt>
+            <dd>一个 3D 表征预训练框架：用结构潜点作为紧凑、平滑、可迁移的 observation representation。</dd>
+            <dt>核心 insight</dt>
+            <dd>操作策略不一定需要精确重建所有几何细节；更有用的是稳定携带粗结构、语义边界和可泛化几何趋势的 latent point set。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            任务范式是 <strong>3D-aware visual representation pretraining for robotic manipulation</strong>。
+            训练阶段用多视角/RGB-D/点云和可微渲染监督学一个视觉 encoder；下游阶段把 encoder 输出接到 ACT policy，
+            在 RLBench、ManiSkill2 和真机任务里看 success rate。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>表征形态</th>
+                <th>瓶颈</th>
+                <th>这篇的差异</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>2D pretrained encoder</td>
+                <td>image tokens / ViT features</td>
+                <td>语义强，但缺 3D 几何和可操作空间关系</td>
+                <td>直接从点云/RGB-D 学 3D latent points</td>
+              </tr>
+              <tr>
+                <td>NeRF / neural volume pretraining</td>
+                <td>implicit feature field</td>
+                <td>表达强，但结构不可解释，ray casting 慢</td>
+                <td>不用重型 volume renderer，而用轻量 3DGS feature splatting</td>
+              </tr>
+              <tr>
+                <td>3DGS / explicit point splats</td>
+                <td>explicit Gaussian primitives / feature points</td>
+                <td>几何清楚，但点数和分辨率限制表示容量</td>
+                <td>把 sparse feature points 变成概率正则的 structural latent points</td>
+              </tr>
+              <tr>
+                <td>直接点云 backbone</td>
+                <td>PTv3 / SpUNet features</td>
+                <td>能吃点云，但 latent manifold 对域偏移敏感</td>
+                <td>PL-VAE 让 feature+coordinate 同时靠近 Gaussian prior，提升平滑性和泛化</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            它和主流 baseline 的关键差异是：作者不把 3DGS 的显式几何本身作为最终 policy state，
+            而是把 3DGS 当预训练监督工具；真正送给 policy 的是 PL-VAE 采样后的 \(\mathbf{z}_{vae}\)。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            Pipeline 可以拆成两层。第一层是点云 autoencoder + PL-VAE，负责把 raw point cloud 压成结构潜点。
+            第二层是轻量 3DGS 渲染监督，负责把 latent 学成有 3D 意义的特征，而不是纯 autoencoding。
+          </p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/structural-latent-points/overview.png" alt="Structural latent points framework overview">
+            <figcaption>
+              论文 Figure 1：PTv3 encoder 先产生 sparse feature points，PL-VAE 对坐标和特征做 point-wise Gaussian regularization，
+              再经 PTv3 decoder、geometry reasoning、feature splatting、post feature decoding 和重建/渲染/KL loss 共同训练。
+            </figcaption>
+          </figure>
+          <div class="code-block">
+            <pre><code>P_raw: raw point cloud, N x (xyz + rgb)
+  -> PTv3_enc
+P_sparse: sparse feature points, M x (p_i, f_i)
+  -> PL-VAE encoder: local/global descriptors -> Gaussian params
+z_vae = {(z_i^p, z_i^f)}_{i=1..M}
+  -> PL-VAE decoder
+P_sparse_hat
+  -> PTv3_dec
+P_dense
+  -> G_theta predicts Gaussian properties
+  -> 3DGS feature splatting under each camera v
+F_hat_v, D_hat_v
+  -> H_c / H_s post decoders
+I_hat_v, F_hat_v^s
+  -> render + recon + VAE + KL losses
+
+Downstream:
+z_vae + robot proprioception O_agent -> ACT policy -> action chunk</code></pre>
+          </div>
+          <p>
+            关键符号：\(\mathbf{P}_{raw}\) 是原始点云；\(\mathbf{P}_{sparse}\) 是 PTv3 encoder 的稀疏 latent point cloud；
+            \(\mathbf{z}_{vae}\) 是真正给下游 policy 用的 structural latent points；
+            \(G_\theta\) 预测每个点对应的 3D Gaussian 属性；\(R_v\) 是第 \(v\) 个相机视角下的 feature/depth splatting renderer。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：Point-wise latent VAE，不是 global VAE</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>传统 point-cloud VAE 往往压出全局 latent，适合生成/重建形状，但对机器人操作来说，
+            下游 policy 需要知道“哪些局部结构在哪里”。单个全局向量会丢掉可操作的空间索引。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>PL-VAE 对每个 sparse point 同时建 feature posterior 和 coordinate posterior：
+            \((\mu_i^f,\sigma_i^f)\) 控制点特征，\((\mu_i^p,\sigma_i^p)\) 控制点位置。
+            这意味着 latent 仍然是一个 point set，但每个点不再是精确几何坐标，而是被 Gaussian prior 平滑后的结构代理。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>机器人策略不需要每个点都精确贴合表面，它更需要稳定的 affordance、边界、粗形状和相对空间关系。
+            Gaussian regularization 会降低噪声、缺失点、视角变化对 latent 的影响。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>采样和平滑会损失精确几何。论文 discussion 也指出，穿针、手术等极高精度操作可能受限。
+          </p>
+
+          <h3>创新点 2：把 3DGS 当监督桥，不把 renderer 做重</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>SPA 这类 neural rendering pretraining 可以学 3D-aware representation，
+            但如果 renderer 太强，它可能自己承担重建任务，前端表征未必学到最有用的信息；同时训练成本很高。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>这里只保留 geometry reasoning、feature splatting、post feature decoding 和点/颜色重建。
+            Renderer 只 splat features 和 depth，不把 color splatting 做成主要路径。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>这样强迫前端 structural latent module 学可迁移的 3D features，
+            而不是让后端渲染器靠复杂结构把图像“补出来”。Feature-only splatting 也让监督更聚焦 representation quality。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>它不是为 photo-realistic rendering 设计的；如果目标是高保真视觉合成，这个简化 renderer 不够。
+          </p>
+
+          <h3>创新点 3：feature + coordinate 双重 KL</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>只正则 feature，不正则 point coordinate，可能仍然让下游落在稀疏、尖锐、对分布变化敏感的几何 manifold 上。
+            只正则坐标，又会削弱语义特征。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>对 \((\mu_i^f,\sigma_i^f)\) 和 \((\mu_i^p,\sigma_i^p)\) 分别做 KL 到标准高斯，
+            再用 L1 重建 sparse point 的坐标和特征。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>坐标维保留粗结构趋势，feature 维保留语义/局部上下文；两个空间共同平滑，才像“结构潜点”而不是普通 point features。
+          </p>
+          <p>
+            <strong>实现细节：</strong>论文里 feature reconstruction 权重 \(\omega_2=0.1\)，coordinate 权重 \(\omega_1=1\)，因为两者统计尺度不同。
+          </p>
+
+          <h3>创新点 4：预训练目标从重建逐步转向渲染对齐</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>训练早期如果直接靠渲染 loss，splatted features 还没形成，梯度间接且不稳。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>总 loss 里有一个 annealing weight \(w(t)\)：开始更重视 reconstruction，
+            后面逐步降低到 0.1，让 rendering alignment 成为主监督。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>先让 latent 学会基本几何/颜色锚点，再让多视角渲染监督塑造 3D-aware feature。
+            这相当于给 latent manifold 一个 warm start。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <p>
+            这篇有两个阶段：表征预训练和下游 imitation learning。预训练不需要动作标签；下游策略训练才需要 demo action。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>输出</th>
+                <th>目标</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Pretraining</td>
+                <td>ScanNetV2 RGB-D / point cloud / multi-view camera</td>
+                <td>PTv3 + PL-VAE encoder</td>
+                <td>render loss + point/color recon + VAE recon + KL</td>
+              </tr>
+              <tr>
+                <td>Downstream policy training</td>
+                <td>RGB-D observation -> point cloud, proprioception, action demos</td>
+                <td>ACT policy</td>
+                <td>behavior cloning / action chunk prediction</td>
+              </tr>
+              <tr>
+                <td>Inference</td>
+                <td>当前 RGB-D/point cloud + robot state</td>
+                <td>action chunk</td>
+                <td>直接执行 policy，不需要渲染器参与</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            下游公式很直接：\(\hat{a}=\pi(\mathbf{z}_{vae}, O_{agent})\)。
+            也就是说，训练时 3DGS renderer 是 teacher；推理时 policy 只看 structural latent points 和机器人本体状态。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式逐行讲解</h2>
+
+          <h3>5.1 NeRF-style 与 3DGS-style 预训练抽象</h3>
+          <div class="math-block">
+            \[
+              \hat{I}_k = \Psi_d\Big(R_{\mathrm{ray}}(\Psi_e(I_{i=1}^{N}), T_k)\Big)
+            \]
+          </div>
+          <p>
+            \(\Psi_e\) 把多视角图像编码成隐式 3D feature volume；\(R_{\mathrm{ray}}\) 按相机 \(T_k\) ray casting；
+            \(\Psi_d\) 解码成第 \(k\) 个视角的图像。问题是 volume 结构隐式、ray casting 成本高。
+          </p>
+          <div class="math-block">
+            \[
+              \hat{I}_k = R_{\mathrm{rast}}\Big(\Phi_p(\pi_k * (\Phi_e(I_{i=1}^{N}), T_k))\Big)
+            \]
+          </div>
+          <p>
+            3DGS-style 先用 \(\Phi_e\) 提图像特征，再用 \(\pi_k\) 根据相机反投影到 3D，
+            \(\Phi_p\) 预测 splat 属性，\(R_{\mathrm{rast}}\) rasterize。它更快，但 explicit point-like representation 容易受 resolution 限制。
+          </p>
+
+          <h3>5.2 主干表征</h3>
+          <div class="math-block">
+            \[
+              \mathbf{P}_{sparse}=\mathrm{PTv3}_{enc}(\mathbf{P}_{raw}), \qquad
+              \mathbf{P}_{dense}=\mathrm{PTv3}_{dec}(\hat{\mathbf{P}}_{sparse})
+            \]
+          </div>
+          <p>
+            \(\mathbf{P}_{raw}\) 是原始点云；PTv3 encoder 降采样成 sparse feature points。
+            与普通 PTv3 autoencoder 不同，\(\mathbf{P}_{sparse}\) 不直接进 decoder，中间先过 PL-VAE。
+          </p>
+
+          <h3>5.3 PL-VAE encoder</h3>
+          <div class="math-block">
+            \[
+              f_{global}, f_i = \mathrm{Agg}(\Psi(\mathbf{P}_{sparse})),\ \mathrm{MLP}(\Psi(\mathbf{P}_{sparse}))
+            \]
+            \[
+              (\mu_i^f,\sigma_i^f),(\mu_i^p,\sigma_i^p)=\phi_f(h_i),\phi_p(h_i),\quad
+              h_i=\mathrm{cat}(f_{global}, f_i)
+            \]
+          </div>
+          <p>
+            \(\Psi\) 是 PointNet backbone；\(\mathrm{Agg}\) 是 attention pooling，用来拿全局上下文；
+            \(f_i\) 是局部点特征；\(h_i\) 把全局场景和局部点拼起来。两个 MLP head 分别预测 feature latent 和 coordinate latent 的高斯参数。
+          </p>
+
+          <h3>5.4 Feature splatting 与 post decoding</h3>
+          <div class="math-block">
+            \[
+              \mathbf{G}=G_\theta(\mathbf{P}_{dense}), \qquad
+              (\hat{\mathbf{F}}_v,\hat{\mathbf{D}}_v)=R_v(\mathbf{G},\mathbf{P}_{dense})
+            \]
+            \[
+              \hat{\mathbf{I}}_v,\hat{\mathbf{F}}_v^s=H_c(\hat{\mathbf{F}}_v), H_s(\hat{\mathbf{F}}_v)
+            \]
+          </div>
+          <p>
+            \(G_\theta\) 预测 Gaussian 的几何属性；\(R_v\) 对第 \(v\) 个视角渲染 feature map 和 depth。
+            \(H_c\) 把 splatted feature 解成 RGB，\(H_s\) 解成语义特征图。论文说语义 map ground truth 来自 E-RADIO。
+          </p>
+
+          <h3>5.5 总损失</h3>
+          <div class="math-block">
+            \[
+              L_{render}=\frac{1}{V}\sum_{v=1}^{V}
+              \beta_1\|\mathbf{I}_v-\hat{\mathbf{I}}_v\|_1+
+              \beta_2\|\mathbf{D}_v-\hat{\mathbf{D}}_v\|_1+
+              \beta_3\|\mathbf{F}_v^s-\hat{\mathbf{F}}_v^s\|_1
+            \]
+            \[
+              L_{total}=(1-w(t))L_{render}+w(t)L_{recon}+L_{vae}+L_{KL}
+            \]
+          </div>
+          <p>
+            论文给定 \(\beta_1=1,\beta_2=0.2,\beta_3=0.1\)，\(w(t)\) 从 1 衰减到 0.1。
+            \(L_{recon}\) 让 dense features 回归原始点坐标和颜色；\(L_{vae}\) 重建 sparse point 的坐标和特征；
+            \(L_{KL}\) 把 feature/coordinate posterior 拉向标准高斯。
+          </p>
+          <p>
+            【不确定】论文的 KL 公式在 PDF/TeX 里写法略简略，目标 prior 只写成 \(\mathcal{N}\)。
+            最合理解释是标准正态 \(\mathcal{N}(0,I)\)。验证方式：等代码公开后看 KL 实现；或者复现时按 VAE 标准 KL 写法检查数值稳定性。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练-推理对齐</h2>
+          <p>
+            这里最大的 mismatch 是：预训练阶段靠多视角 rendering loss 学 representation，
+            但下游推理阶段不再渲染，只用 \(\mathbf{z}_{vae}\) 进 ACT。这个设计本身合理，因为 renderer 是监督工具，
+            但也意味着如果 downstream observation 的点云质量、相机配置、深度噪声和 ScanNetV2 差距太大，\(\mathbf{z}_{vae}\) 可能仍会偏移。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>对齐点</th>
+                <th>论文处理</th>
+                <th>风险</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>预训练数据 vs 操作场景</td>
+                <td>ScanNetV2 预训练，RLBench/ManiSkill2/真机迁移</td>
+                <td>室内扫描数据和桌面操作对象仍有 domain gap</td>
+              </tr>
+              <tr>
+                <td>训练监督 vs 推理输入</td>
+                <td>训练用 RGB/depth/semantic/rendering，推理只用 latent</td>
+                <td>如果 latent 没学到动作相关 affordance，渲染好不等于操作好</td>
+              </tr>
+              <tr>
+                <td>PL-VAE sampling</td>
+                <td>高斯正则提升平滑性</td>
+                <td>随机采样可能引入不稳定；论文没细说 inference 是否用均值</td>
+              </tr>
+              <tr>
+                <td>Renderer capacity</td>
+                <td>刻意保持轻量，避免后端替前端学习</td>
+                <td>如果 renderer 太弱，可能监督不足；如果太强，又掩盖 encoder 问题</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            【不确定】推理时 \(\mathbf{z}_{vae}\) 是采样 \(z=\mu+\sigma\epsilon\) 还是直接用 \(\mu\)。
+            合理猜测：评测时为了稳定通常用均值；训练时用 reparameterization sampling。
+            验证方式：等代码公开，检查 encoder forward 的 eval mode 分支。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <p>
+            论文在 RLBench、ManiSkill2 和真机平台上评测，统一采用 ACT policy。作者声明所有 baselines 都在同一 ScanNetV2 数据上预训练后再下游评测。
+            对比方法包括 MultiViT、PTv3、SpUNet scratch，以及 VC-1、MultiMAE、PonderV2、GSRL、SPA、Lift3D 等 3D-aware/视觉预训练 baseline。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Benchmark</th>
+                <th>最好结果</th>
+                <th>关键对比</th>
+                <th>解读</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>RLBench, 9 tasks</td>
+                <td>Ours Mean S.R. 0.56, Mean Rank 1.50</td>
+                <td>Lift3D 0.50, No.VAE 0.49, PonderV2 0.42</td>
+                <td>PL-VAE 带来明显增益；点/3D-aware 方法整体强于纯 image pipeline</td>
+              </tr>
+              <tr>
+                <td>ManiSkill2, 6 tasks</td>
+                <td>Ours Mean S.R. 0.64, Mean Rank 1.33</td>
+                <td>Lift3D 0.63, No.VAE 0.59, PonderV2 0.53</td>
+                <td>提升更接近，但 mean rank 仍最好；Hang/Fill 上 Lift3D 接近或更强</td>
+              </tr>
+              <tr>
+                <td>Reasoned geometry ablation</td>
+                <td>CloseJar 0.48 vs 0.24; StackCube 0.36 vs 0.28</td>
+                <td>No Reasoned Geo. 固定 opacity/scale/rotation</td>
+                <td>几何属性预测对干净 depth/边界有用</td>
+              </tr>
+              <tr>
+                <td>Training complexity</td>
+                <td>Ours: 1 x A800, 400 epochs, ~166 GPU hours</td>
+                <td>SPA: 80 x A100, ~4000 GPU hours; PonderV2: 8 x A100, ~768 GPU hours</td>
+                <td>轻量 renderer 和 PTv3/PL-VAE 前端确实更可复现</td>
+              </tr>
+              <tr>
+                <td>Real robot</td>
+                <td>place mandarin 84; lift bottle 68; place starbucks 36</td>
+                <td>PointNet/PonderV2/Ours scratch</td>
+                <td>前两项优势明显；starbucks 与 PointNet 打平，不应过度解读为全面碾压</td>
+              </tr>
+            </tbody>
+          </table>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/structural-latent-points/depthcompare.png" alt="Depth comparison with and without geometry reasoning">
+            <figcaption>
+              Geometry reasoning ablation：固定 Gaussian 属性会让 depth 边界噪声更重；预测几何属性后 depth 更平滑完整。
+            </figcaption>
+          </figure>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/structural-latent-points/postfeaturedecoding.png" alt="Feature PCA visualization for post feature decoding">
+            <figcaption>
+              Post feature decoding 的 PCA 可视化：feature-only splatting 后的特征边界更清楚，说明它更像 representation learning 监督，而不是单纯图像重建。
+            </figcaption>
+          </figure>
+          <figure class="note-figure">
+            <img src="../assets/structural-latent-points/real_robot.png" alt="Real robot tasks">
+            <figcaption>
+              真机使用 Orbbec Femto Bolt RGB-D、AgileX Piper 机械臂和 ACT policy。每个任务 40 条训练 demo、10 条测试 demo；训练 10000 epochs，AdamW，学习率 \(5e{-5}\)。
+            </figcaption>
+          </figure>
+          <p>
+            批判地看，实验说服力主要来自一致的 simulation benchmark 和复杂度对比。弱点是代码未公开、ScanNetV2 预训练细节不够细、
+            真机任务数量和 rollout 数较少，而且 real-robot 第三项只与 PointNet 打平。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 可复现清单</h2>
+          <p>
+            论文没有给官方代码链接，arXiv 页面也没有项目页；我只找到了 TeX source 和图。复现时最需要补齐下面这些工程细节。
+          </p>
+          <ul>
+            <li>ScanNetV2 预处理：RGB-D 对齐、点云采样数量、坐标归一化、颜色归一化、multi-view 选择策略。</li>
+            <li>PTv3 encoder/decoder 配置：block 数、通道数、stride/downsample ratio、sparse point 数 \(M\)。</li>
+            <li>PL-VAE：PointNet \(\Psi\)、attention pooling、\(\phi_f/\phi_p\) hidden dims、latent dims、训练时 KL 权重是否额外缩放。</li>
+            <li>推理：用 posterior mean 还是 sampling；是否固定 random seed；是否对 latent 做 normalization。</li>
+            <li>3DGS geometry head：opacity/scale/rotation 参数化方式、scale clamp、quaternion normalization。</li>
+            <li>Feature splatting renderer：rasterizer 实现、相机模型、depth normalization、visibility/alpha compositing。</li>
+            <li>E-RADIO semantic feature：使用哪层 feature、是否 frozen、特征维度、是否 PCA/normalize。</li>
+            <li>Loss schedule：\(w(t)\) 从 1 到 0.1 的衰减曲线、optimizer、batch size、训练 steps。</li>
+            <li>OBSBench/ACT 下游：demo 数、action chunk length、policy hidden size、训练 epochs、evaluation seeds。</li>
+            <li>真机：RGB-D 外参标定、点云裁剪范围、桌面坐标系、动作频率、成功判定标准。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 对 FastWAM / 具身操作的启发</h2>
+          <p>
+            这篇对 FastWAM 的启发很直接：如果你要做 world/action model，不一定要把 observation 表征设计成完整 scene reconstruction。
+            一个更实用的做法是学习 <strong>structural observation tokens</strong>：它们保留对象粗结构、相对位置、可操作区域和语义边界，
+            但不追求每个表面点的精确几何。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>改动点</th>
+                <th>预期收益</th>
+                <th>风险</th>
+                <th>验证实验</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>把 RGB-D/point cloud 编成 structural latent points，再喂 FastWAM</td>
+                <td>降低 pixel prediction 负担，提高几何泛化</td>
+                <td>丢精细接触几何</td>
+                <td>比较 pixel latent、point latent、structural point latent 的 action prediction error</td>
+              </tr>
+              <tr>
+                <td>动作-conditioned dynamics 预测 \(\Delta z_{vae}\)</td>
+                <td>世界模型直接在结构空间 rollout</td>
+                <td>PL-VAE latent 未必 Markov</td>
+                <td>预测下一步 latent 后，用 probing head 测对象位姿/接触变化</td>
+              </tr>
+              <tr>
+                <td>把 PL-VAE 的 coordinate posterior 当 uncertainty</td>
+                <td>让 policy 知道哪些区域几何不确定</td>
+                <td>posterior variance 不一定校准</td>
+                <td>遮挡/视角扰动下测 variance 与 policy failure correlation</td>
+              </tr>
+              <tr>
+                <td>训练时保留 feature splatting auxiliary loss</td>
+                <td>让 latent 不退化成动作捷径</td>
+                <td>训练成本上升</td>
+                <td>去掉/保留 render auxiliary，对比 long-horizon generalization</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 速读备忘卡</h2>
+          <ul>
+            <li>核心不是 3DGS，而是 PL-VAE regularized structural latent points。</li>
+            <li>它要折中 implicit expressiveness 和 explicit structure。</li>
+            <li>输入是点云/RGB-D，主干是 PTv3 encoder/decoder。</li>
+            <li>PL-VAE 同时建模 point feature 和 coordinate 的 Gaussian posterior。</li>
+            <li>\(\mathbf{z}_{vae}\) 是下游 policy 真正使用的 representation。</li>
+            <li>3DGS renderer 只作为预训练监督桥，推理时不用。</li>
+            <li>Feature-only splatting 比把 color 直接 splat 更贴近 representation learning。</li>
+            <li>总 loss = render + recon + VAE recon + KL，且 reconstruction 权重从 1 衰减到 0.1。</li>
+            <li>RLBench mean S.R. 0.56，ManiSkill2 mean S.R. 0.64，均为表内最好。</li>
+            <li>最大复现风险：官方代码未公开、预处理和模型配置缺细节。</li>
+            <li>对 WAM 的可迁移点：用结构潜点做 observation token，而不是预测完整像素或精确 mesh。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Sources</h2>
+          <ul class="source-list">
+            <li><a href="https://arxiv.org/abs/2605.21258">arXiv abstract: Learning Structural Latent Points for Efficient Visual Representations in Robotic Manipulation</a></li>
+            <li><a href="https://arxiv.org/pdf/2605.21258v1">Paper PDF v1</a></li>
+            <li><a href="https://arxiv.org/e-print/2605.21258">arXiv TeX source and figures</a></li>
+          </ul>
+          <p>
+            【不确定】截至写作时，我没有找到官方 GitHub/project page。搜索结果只显示作者主页条目和 arXiv 入口，
+            因此本文没有代码级文件分析；若后续代码公开，应补一节 implementation notes。
+          </p>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="lance-unified-multimodal-model.html">上一篇：Lance 统一多模态</a>
+        <a href="latent-world-models.html">相关：潜空间世界模型</a>
+        <a href="vla-policies.html">相关：VLA 策略</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <a href="../index.html#paper-reading">回到 Paper Reading</a>
+    </footer>
+  </body>
+</html>
