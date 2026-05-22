@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="PhysX-Omni 论文精读：统一生成 simulation-ready 物理 3D asset，覆盖刚体、可变形物体和关节物体，重点拆解 template-based RLE、PhysXVerse、PhysX-Bench 和代码实现。"
+    >
+    <title>PhysX-Omni：从看起来像 3D，到真的能进模拟器</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+    <script type="application/json" id="paper-metadata">
+{
+  "title": "PhysX-Omni：从看起来像 3D，到真的能进模拟器",
+  "paper": "https://arxiv.org/abs/2605.21572",
+  "authors": ["Ziang Cao", "Yinghao Liu", "Haitian Li", "Runmao Yao", "Fangzhou Hong", "Zhaoxi Chen", "Liang Pan", "Ziwei Liu"],
+  "date": "2026-05-23",
+  "category": "robotics-world-models",
+  "tags": ["physx-omni", "simulation-ready-3d", "physical-asset-generation", "image-to-3d", "template-rle", "vlm-geometry-generation", "urdf", "mjcf", "articulated-objects", "deformable-objects", "physx-bench", "physxverse"],
+  "systems": ["PhysX-Omni", "PhysXVerse", "PhysX-Bench", "Qwen2.5-VL", "Qwen3.5-122B-A10B", "TRELLIS", "PhysX-Anything", "PhysXGen", "MonoArt", "Articulate-Anything"],
+  "datasets": ["PhysXVerse", "PhysX-Mobility", "PhysXNet", "PhysX-Bench", "PartVerse"],
+  "methods": ["VLM global-to-local physical asset generation", "template-based 2D RLE over 64^3 voxels", "part-level voxel generation", "TRELLIS voxel-to-mesh decoding", "URDF/MJCF conversion", "VLM-based simulation evidence benchmark"],
+  "code": "https://github.com/physx-omni/PhysX-Omni",
+  "related_posts": ["posts/world-model-robot-learning.html", "posts/structural-latent-points-robotic-manipulation.html", "posts/ai-game-world-models.html", "posts/innerscene-paper-review.html"],
+  "graph_nodes": ["PhysX-Omni", "PhysXVerse", "PhysX-Bench", "template-based RLE", "Qwen2.5-VL", "TRELLIS", "URDF/MJCF", "simulation-ready assets", "robot policy learning", "FastWAM"],
+  "graph_edges": [
+    "PhysX-Omni -> generates -> simulation-ready assets",
+    "PhysX-Omni -> uses -> Qwen2.5-VL as VLM backbone",
+    "PhysX-Omni -> represents_geometry_with -> template-based RLE",
+    "template-based RLE -> encodes -> part-level 64^3 voxels",
+    "part-level voxels -> decoded_by -> TRELLIS",
+    "generated parts and physical attributes -> converted_to -> URDF/MJCF",
+    "PhysXVerse -> trains -> PhysX-Omni",
+    "PhysX-Bench -> evaluates -> geometry / scale / material / affordance / kinematics / description",
+    "PhysX-Omni -> can_support -> robot policy learning in simulation",
+    "PhysX-Omni -> inspires -> FastWAM sim-ready object token design"
+  ]
+}
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#paper-reading">Paper</a>
+        <a href="../index.html#notes">AI Game</a>
+        <a href="../index.html#posts">Robot</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading · Simulation-Ready Assets</p>
+          <h1>PhysX-Omni：从看起来像 3D，到真的能进模拟器</h1>
+          <p class="article-dek">
+            这篇的核心不是“单图生成一个更好看的 mesh”，而是把 3D 生成的目标从 visual asset 往 sim-ready physical asset 推了一步：
+            一个资产必须有 part、尺度、材料、affordance、运动学关系，并且能被 URDF/MJCF/XML 管线接进物理模拟。
+            PhysX-Omni 用 VLM 直接生成层级物理描述和高分辨率 part-level voxel，再借 TRELLIS 解码成 mesh，最后转成可模拟资产。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.23</span>
+            <span>阅读约 35 分钟</span>
+            <span>arXiv:2605.21572</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            <strong>痛点：</strong>多数 image-to-3D / text-to-3D 方法只保证外观几何，缺真实尺度、材料参数、part 语义、运动关节和模拟器格式；
+            以前的 sim-ready 方法又常被限制在刚体、可变形或关节物体中的单一类型。
+            <strong>核心招：</strong>PhysX-Omni 把 Qwen2.5-VL 微调成一个物理资产生成器：先输出 object/part/group 的结构化物理描述，
+            再逐 part 生成 \(64^3\) voxel 的 template-based RLE 文本表示，随后用 TRELLIS decoder 还原 mesh，并用脚本写出 URDF/MJCF/XML。
+            <strong>效果：</strong>在 PhysXVerse/PhysX-Mobility 常规指标和 PhysX-Bench 上，物理属性、运动学和尺度明显优于 PhysX-Anything、PhysXGen、MonoArt、Articulate-Anything。
+            <strong>代价：</strong>训练重、依赖 VLM 和大量人工校验数据；benchmark 大量依赖 VLM judge 和渲染/仿真证据；复杂外观几何仍不是最强项。
+          </p>
+          <dl class="term-list">
+            <dt>不是</dt>
+            <dd>不是一个纯 3D reconstruction 模型，也不是一个纯机器人 policy 论文。</dd>
+            <dt>是</dt>
+            <dd>一个从单张图生成 simulation-ready object asset 的系统，目标是让生成物体能进入物理模拟和机器人训练。</dd>
+            <dt>核心 insight</dt>
+            <dd>sim-ready 资产的关键瓶颈不是 mesh 是否漂亮，而是对象是否被拆成可解释 part，并绑定了尺度、材料、affordance、运动学和模拟器 schema。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            任务设定是 <strong>simulation-ready physical 3D generation from a single image</strong>。
+            输入是一张完整或局部遮挡的物体图片，输出不是单个静态 mesh，而是一组 part-level geometry、物理属性和运动学关系，
+            最终可以落到 URDF/MJCF/XML 这类模拟器可读表示。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>通常输出</th>
+                <th>问题</th>
+                <th>PhysX-Omni 的差异</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>通用 image-to-3D</td>
+                <td>mesh / Gaussian / texture</td>
+                <td>外观看起来像，但缺质量、密度、关节、碰撞和尺度</td>
+                <td>直接生成物理属性和 part/group hierarchy</td>
+              </tr>
+              <tr>
+                <td>关节物体重建</td>
+                <td>articulated parts / joints</td>
+                <td>常只面向 articulated object，刚体/软体/室外大类覆盖弱</td>
+                <td>统一覆盖 rigid、deformable、articulated</td>
+              </tr>
+              <tr>
+                <td>PhysXGen / PhysX-Anything</td>
+                <td>物理属性 + 3D asset</td>
+                <td>几何表示受限，复杂 topology 和局部结构容易错</td>
+                <td>用 template-based RLE 直接建模高分辨率 voxel</td>
+              </tr>
+              <tr>
+                <td>MonoArt / Articulate-Anything</td>
+                <td>强几何或 articulation</td>
+                <td>物理属性维度不完整，材料/尺度/affordance 弱</td>
+                <td>在 PhysX-Bench 六维上统一评估并优化</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            因此它在论文谱系里的位置更接近“物理资产数据引擎”，而不是单个 generative model trick。
+            它把 VLM 当成结构化物理描述器和离散几何序列生成器，把 TRELLIS 当作后端 3D decoder，把 simulator 和 VLM judge 当成评估闭环。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            Pipeline 是 coarse-to-fine、global-to-local。VLM 先读图并输出全局物理描述，然后围绕每个 part 生成 voxel RLE，
+            decoder 把 voxel 转 mesh，最后脚本把 mesh、材料、尺度和运动学关系组织成模拟器资产。
+          </p>
+          <div class="code-block">
+            <pre><code>single RGB image
+  -> Qwen2.5-VL physical understanding
+  -> structured global description:
+       Name / Category / Dimension
+       Parts: l_i = material, density, Young's modulus, Poisson ratio, affordance rank, text description
+       Group_info: part hierarchy + joint type A/B/C/D/CB/E + joint parameters
+  -> for each part l_i:
+       Qwen2.5-VL generates 64 x 64 x 64 voxel as template-based RLE text
+  -> robust RLE parser:
+       text -> runs_by_z -> voxel coords (N_i, 3)
+  -> TRELLIS decoder:
+       part voxel coords + condition image -> GLB/OBJ mesh per part
+  -> asset converter:
+       part mesh + physical metadata + joints -> URDF / MJCF / XML
+  -> simulator / benchmark / robot policy learning</code></pre>
+          </div>
+          <p>
+            关键张量和对象：每个 part 的 voxel coordinate 是 \((N_i,3)\)，坐标落在 \(0 \ldots 63\) 的 grid 中；
+            RLE 文本以 z-slice 为单位编码二维 mask；物理属性包括 density、Young's modulus、Poisson ratio、affordance rank；
+            运动学 group 用 A/B/C/D/CB/E 表达自由移动、滑动、绕轴旋转、绕点旋转、旋转加滑动、世界固定。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：把 3D geometry 变成 VLM 友好的 template-based RLE</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>直接让 VLM 输出 mesh vertices/faces 或 voxel index 序列会很长，且容易出现局部拓扑断裂。
+            3D VQ-GAN / latent token 可以压缩，但需要额外 codebook 或 special tokens，和现有 VLM vocabulary 不完全自然。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>PhysX-Omni 先把 part voxel grid 沿 z 轴切成 64 张二值 mask。
+            每张 mask 先按二维 RLE 编码 occupied pixel runs；再引入 template layer，让相邻或相似 z-slice 共享模板，只记录增删差异。
+          </p>
+          <div class="math-block">
+            \[
+            \mathrm{idx}(x,y)=x+W\cdot y,\qquad
+            R_z=\{(s_k,\ell_k)\}_{k=1}^{K_z}
+            \]
+            \[
+            R_z = T_{a_z}\cup \Delta_z^+ - \Delta_z^-
+            \]
+          </div>
+          <p>
+            这里 \(R_z\) 是第 \(z\) 层的 run list，\(T_{a_z}\) 是复用的模板层，
+            \(\Delta_z^+\) 和 \(\Delta_z^-\) 分别是本层相对模板新增/删除的 runs。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>它保留了显式几何结构，又让文本长度可控。
+            对平滑或重复结构，连续 z-slices 往往很相似；模板复用比逐层重复写完整 RLE 更省 token。
+            对 VLM 来说，这比随机散列的 voxel index 更像可预测的文本格式。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>它仍是 \(64^3\) voxel，细节上限受 grid 限制；如果 VLM 输出格式错，后处理必须容错。
+            代码里确实写了 robust parser，说明生成文本会出现中文标点、括号错位、坏 run chunk 等噪声。
+          </p>
+
+          <h3>创新点 2：把“物理资产”作为结构化语言来生成</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>只生成 mesh 后再估计 physics metadata，容易出现语义与几何脱节：
+            轮子像轮子但不能转，门板和柜体没有 joint，材料参数无法解释仿真行为。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>输出格式把 part、material、density、Young's modulus、Poisson ratio、affordance rank、basic description 和 group/joint 放在同一个结构里。
+            这让物体的功能、几何和运动学成为同一段 autoregressive 生成过程的一部分。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>VLM 的强项是从图像和常识推断对象类别、part 功能和可动结构。
+            把这些信息先写进 structured description，再条件化 part voxel generation，可以减少“几何对了但功能错”的问题。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>这里很多物理属性来自视觉常识和数据标注，而不是真实测量。
+            对透明材料、复合材料、隐藏关节、尺度缺参照物的图片，VLM 先验可能自信但不准。
+          </p>
+
+          <h3>创新点 3：PhysXVerse 补数据，PhysX-Bench 补评价</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>sim-ready 3D 数据太少，且评价常偏几何。
+            一个模型可以在 CLIP / render quality 上高分，却完全没有合理尺度、运动、材料和 affordance。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>PhysXVerse 基于 PartVerse 等数据和 human-in-the-loop 流程扩展到 8.7K+ 高质量物理 3D assets，
+            覆盖 2.9K+ 语义类别，并带绝对尺度、材料、affordance、kinematics、function description。
+            PhysX-Bench 则用渲染图/视频作为证据，让开源 VLM judge 评估 geometry、absolute scale、material、affordance、kinematics、description 六维。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>物理属性很多不是静态文本能判的。
+            材料要看 free fall / water drop 行为；运动学要看 articulation video；description 要看 part mask 是否对应语义。
+            这些证据比只喂 JSON 给 judge 更接近实际模拟使用场景。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>benchmark 的可靠性依赖 VLM judge、渲染配置和仿真设置。
+            论文做人类一致性验证，但样本规模和 judge prompt 的敏感性仍是后续复现需要重点检查的地方。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>操作</th>
+                <th>输出</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>数据预处理</td>
+                <td>part meshes + physical annotations</td>
+                <td>归一化 mesh，采样点云，voxelize 到 16/32/64 grid，转换 JSON 到 structured text</td>
+                <td>part voxel npy + 结构化训练样本</td>
+              </tr>
+              <tr>
+                <td>VLM 微调</td>
+                <td>condition image + prompt + structured target</td>
+                <td>Qwen2.5-VL-7B，5 epochs，max length 16384，bf16，Deepspeed zero3</td>
+                <td>能生成 basic_info 和每个 part 的 RLE voxel</td>
+              </tr>
+              <tr>
+                <td>推理 step 1</td>
+                <td>单图</td>
+                <td><code>1vlm_demo.py</code> 先出 <code>basic_info.txt</code>，再逐 part 追问 voxel RLE</td>
+                <td><code>ind_i.npy</code>、<code>allind.npy</code>、可选 part PLY</td>
+              </tr>
+              <tr>
+                <td>推理 step 2</td>
+                <td>part voxel coords + condition image</td>
+                <td><code>decoder_each.py</code> 调 <code>TrellisImageTo3DPipeline.run_decoder</code></td>
+                <td>每个 part 的 GLB/OBJ</td>
+              </tr>
+              <tr>
+                <td>推理 step 3</td>
+                <td>part meshes + basic_info + adjacency</td>
+                <td><code>3jsongen_update.py</code> 推断连接区域、refine voxel、组织 XML/URDF/MJCF</td>
+                <td>simulation-ready object asset</td>
+              </tr>
+              <tr>
+                <td>Benchmark</td>
+                <td>生成资产</td>
+                <td>渲染多视角图、part mask、kinematic video、material video，再交给 Qwen judge</td>
+                <td>RQS/MCS/DCS/DQS/APS/KPS/MPS 等分数</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            训练细节：论文写使用 64 张 A100 约 14 天，peak learning rate \(2\times 10^{-5}\)，cosine decay，warmup ratio 0.03，有效 batch size 128。
+            代码中的 <code>train_physx.sh</code> 是 8 GPU 单节点模板，实际大规模训练需要多节点环境变量和数据路径配置。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式和算法拆解</h2>
+
+          <h3>算法 1：2D RLE over z-slices</h3>
+          <p>
+            每个 part 的 voxel 坐标是 \((x,y,z)\)。对固定 \(z\)，把二维 occupancy mask 展平：
+          </p>
+          <div class="math-block">
+            \[
+            \mathrm{idx}(x,y)=x + 64y,\quad 0\le x,y&lt;64
+            \]
+          </div>
+          <p>
+            连续占用区间被写成 \((start,length)\)。例如一层中 \([2013,2018]\) 连续占用，就写成 <code>2013 6</code>。
+            代码对应 <code>encode_voxel_2drle_by_z()</code> 和 <code>decode_voxel_2drle_by_z()</code>。
+          </p>
+
+          <h3>算法 2：template layer exact reconstruction</h3>
+          <p>
+            训练数据生成时，代码会找当前 slice 和已有模板的 run-set similarity。
+            如果相似度超过阈值，就复用模板并记录增删项；否则创建新模板。
+          </p>
+          <div class="code-block">
+            <pre><code>for z in 0..63:
+    r = runs_of_slice[z]
+    best_template = argmax similarity(r, template)
+    if best_similarity &lt; threshold:
+        create new template T_a = r
+        line: "z: layer a"
+    else:
+        adds = r - T_a
+        removals = T_a - r
+        line: "z: layer a +[adds] -[removals]"</code></pre>
+          </div>
+          <p>
+            这不是有损压缩。只要 parser 成功，\((T_a \cup adds) - removals\) 可以精确恢复每层 runs。
+            代码里还会 round-trip 检查 <code>coords</code> 与 <code>coords_rec</code> 的唯一 voxel index 是否相同。
+          </p>
+
+          <h3>公式 3：DQS 尺度评分</h3>
+          <p>
+            benchmark 里的 dimension score 是确定性后处理，不完全交给 VLM。
+            VLM 先从 condition image 估计真实物体最大尺度 \(v\)，算法输出生成物体最大尺度 \(g\)，代码计算 symmetric error：
+          </p>
+          <div class="math-block">
+            \[
+            e=\frac{2|g-v|}{g+v},\qquad
+            DQS =
+            \begin{cases}
+              100(1-e/0.8), & e&lt;0.8\\
+              0, & e\ge 0.8
+            \end{cases}
+            \]
+          </div>
+          <p>
+            这比简单绝对误差更适合不同尺度物体，但它仍依赖 VLM 对单图真实尺寸的先验估计。
+          </p>
+
+          <h3>算法 4：KPS/MPS 不是读参数，而是看模拟证据</h3>
+          <p>
+            KPS 让 judge 看 articulation video，判断可见 part 的先验运动一致性、隐藏后显露 part 的合理性、全局 articulation coherence。
+            MPS 让 judge 看 free-fall 和 water-drop video，结合 density、Young's modulus、Poisson ratio 判断材料行为。
+            这个设计避免了“数字看起来合理但仿真行为不合理”的假高分。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练-推理对齐</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>检查点</th>
+                <th>训练时</th>
+                <th>推理时</th>
+                <th>可能 mismatch</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>图片输入</td>
+                <td>每个 object 渲染 25 张 conditioning images</td>
+                <td>单张 in-the-wild image</td>
+                <td>真实图遮挡、背景、尺度参照弱，VLM 先验更重要</td>
+              </tr>
+              <tr>
+                <td>basic_info</td>
+                <td>human-verified annotation 转 text</td>
+                <td>VLM 自回归生成 text</td>
+                <td>part 数、名称、group 层级错会传播到后续 voxel 生成</td>
+              </tr>
+              <tr>
+                <td>voxel RLE</td>
+                <td>由 ground-truth part mesh voxelize 后编码</td>
+                <td>VLM 根据 part 描述生成 RLE</td>
+                <td>格式错误、run 越界、空 part 需要 parser 修复或跳过</td>
+              </tr>
+              <tr>
+                <td>mesh decoder</td>
+                <td>论文说用 TRELLIS 解码高质量 mesh</td>
+                <td>代码调用 <code>microsoft/TRELLIS-image-large</code></td>
+                <td>decoder 不是端到端随 VLM 一起训练，voxel 错误会被 decoder 放大</td>
+              </tr>
+              <tr>
+                <td>physics metadata</td>
+                <td>GPT 预标注 + 人工校验</td>
+                <td>模型从图像先验猜测</td>
+                <td>真实材料/密度/关节可能不可见，只能是 plausible，不是 measured</td>
+              </tr>
+              <tr>
+                <td>benchmark</td>
+                <td>用 VLM judge + 渲染/视频 evidence</td>
+                <td>真实 robotics 需要 simulator stability 和 policy transfer</td>
+                <td>高 benchmark 分不等于可直接 sim-to-real</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <p>
+            表 1 是 conventional metrics，覆盖 PhysXVerse 和 PhysX-Mobility。
+            PhysX-Omni 在 PhysXVerse 上 PSNR 21.52、Chamfer Distance 2.95、F-score 91.28；
+            物理属性里 absolute scale error 从 PhysX-Anything 的 298.19 降到 2.79，kinematic 从 0.4191 提到 0.9185。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>PhysXVerse 方法</th>
+                <th>PSNR ↑</th>
+                <th>CD ↓</th>
+                <th>F-score ↑</th>
+                <th>Scale err ↓</th>
+                <th>Material ↑</th>
+                <th>Affordance ↑</th>
+                <th>Kinematic ↑</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>PhysXGen</td>
+                <td>19.41</td>
+                <td>15.19</td>
+                <td>83.56</td>
+                <td>309.31</td>
+                <td>16.51</td>
+                <td>9.40</td>
+                <td>0.3494</td>
+              </tr>
+              <tr>
+                <td>PhysX-Anything</td>
+                <td>15.97</td>
+                <td>37.06</td>
+                <td>40.46</td>
+                <td>298.19</td>
+                <td>15.65</td>
+                <td>10.50</td>
+                <td>0.4191</td>
+              </tr>
+              <tr>
+                <td>PhysX-Omni</td>
+                <td>21.52</td>
+                <td>2.95</td>
+                <td>91.28</td>
+                <td>2.79</td>
+                <td>27.23</td>
+                <td>21.47</td>
+                <td>0.9185</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            表 2 是 PhysX-Bench，重点是 ground-truth-free 的真实图/复杂合成图评估。
+            PhysX-Omni 在 material、affordance、kinematic、description、absolute scale 上最好；
+            MonoArt 在 CLIP、3D consistency、visual quality 这些几何/外观指标上更强。
+            这说明 PhysX-Omni 的强项是 simulation-oriented physical reasoning，不是纯外观最优。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>方法</th>
+                <th>CLIP ↑</th>
+                <th>3D Consistency ↑</th>
+                <th>Visual Quality ↑</th>
+                <th>Scale ↑</th>
+                <th>Material ↑</th>
+                <th>Affordance ↑</th>
+                <th>Kinematic ↑</th>
+                <th>Description ↑</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>MonoArt</td>
+                <td>0.835</td>
+                <td>82.56</td>
+                <td>96.20</td>
+                <td>-</td>
+                <td>-</td>
+                <td>-</td>
+                <td>68.32</td>
+                <td>-</td>
+              </tr>
+              <tr>
+                <td>PhysXGen</td>
+                <td>0.803</td>
+                <td>73.50</td>
+                <td>85.93</td>
+                <td>24.21</td>
+                <td>-</td>
+                <td>66.07</td>
+                <td>69.17</td>
+                <td>22.24</td>
+              </tr>
+              <tr>
+                <td>PhysX-Anything</td>
+                <td>0.547</td>
+                <td>52.71</td>
+                <td>70.81</td>
+                <td>50.20</td>
+                <td>44.70</td>
+                <td>59.96</td>
+                <td>65.99</td>
+                <td>26.89</td>
+              </tr>
+              <tr>
+                <td>PhysX-Omni</td>
+                <td>0.767</td>
+                <td>64.48</td>
+                <td>90.00</td>
+                <td>64.26</td>
+                <td>59.89</td>
+                <td>70.57</td>
+                <td>80.72</td>
+                <td>39.02</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            <strong>批判点：</strong>PhysX-Bench 的人类一致性看起来很强，论文报告多个维度 Spearman \(\rho=1.0\)，geometry 为 \(\rho=0.8\)。
+            但这类相关性强依赖候选方法数量、样本选择和 prompt 稳定性。它能说明 benchmark 有用，但还不能说明 VLM judge 已经能替代真实 simulator regression test。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 代码实现笔记</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>文件/目录</th>
+                <th>作用</th>
+                <th>实现观察</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>1vlm_demo.py</code></td>
+                <td>VLM 推理</td>
+                <td>加载 Qwen2.5-VL checkpoint；先生成 <code>basic_info</code>，再逐 part 生成 RLE；解析失败会记录 error</td>
+              </tr>
+              <tr>
+                <td><code>dataset/example_64_finetune_rle.txt</code></td>
+                <td>生成 prompt 模板</td>
+                <td>要求输出 Name/Category/Dimension/Parts/Group_info，并枚举 A/B/C/D/CB/E movement types</td>
+              </tr>
+              <tr>
+                <td><code>dataset/3generate_data_new_64_finetune_rle.py</code></td>
+                <td>训练样本构造</td>
+                <td>把 voxel coords 编成 template RLE，并过滤 token 数超过 20000 的样本</td>
+              </tr>
+              <tr>
+                <td><code>decoder_each.py</code></td>
+                <td>TRELLIS 解码</td>
+                <td>调用 <code>run_decoder(coords, image, eachcoords)</code>，输出每个 part 的 GLB/OBJ</td>
+              </tr>
+              <tr>
+                <td><code>3jsongen_update.py</code></td>
+                <td>sim-ready 转换</td>
+                <td>用 KDTree / voxel adjacency 找 part 连接区域，refine 几何，并组织模拟资产文件</td>
+              </tr>
+              <tr>
+                <td><code>benchmark/</code></td>
+                <td>PhysX-Bench</td>
+                <td>有 manifest builders、render scripts、VLM prompts、aggregation 和 denominator validation</td>
+              </tr>
+              <tr>
+                <td><code>benchmark/code/scoring/score_dimension_results.py</code></td>
+                <td>DQS</td>
+                <td>从 algorithm dimension 和 VLM prior 计算 deterministic symmetric-error score</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            代码现实和论文叙述基本一致，但工程形态更像 research release：
+            数据路径需要手动改，训练脚本有集群环境变量假设，推理输出依赖多阶段文件约定。
+            好处是核心表示和 benchmark 都公开了，尤其 template RLE 的 encode/decode 可以直接复用。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 可复现清单</h2>
+          <ul>
+            <li>环境：Python 3.10；Qwen2.5-VL；TRELLIS；flash-attn/xformers；spconv；kaolin；nvdiffrast；MuJoCo/Genesis/Blender 用于 benchmark。</li>
+            <li>数据：下载 PhysXNet、PhysX-Mobility、PhysXVerse；按 repo 脚本生成 voxel、RLE text、25-view rendered condition images。</li>
+            <li>训练：Qwen2.5-VL-7B-Instruct；5 epochs；lr \(2\times10^{-5}\)；warmup 0.03；effective batch size 128；max length 16384；bf16。</li>
+            <li>表示：确认 template RLE round-trip 完全一致；检查空 part、run 越界、模板未定义、中文标点、坏括号。</li>
+            <li>推理：先跑 <code>1vlm_demo.py</code>，再跑 <code>2infer_geo.py</code>，最后跑 <code>3jsongen_update.py</code>；每一步检查中间文件是否齐全。</li>
+            <li>benchmark：先跑 tiny smoke test，再分别跑 RQS/MCS/DCS/DQS/APS/KPS/MPS；注意 GPU、EGL、Blender、MuJoCo、Genesis 环境。</li>
+            <li>人工校验：对尺度、材料、关节参数抽样做 simulator sanity check；不要只看 PhysX-Bench 总分。</li>
+          </ul>
+          <p>
+            【不确定】论文没有把 PhysXVerse 人工校验细则完全展开，也没有给出 VLM judge prompt sensitivity 的系统消融。
+            合理猜测：一是人类校验主要用于纠正 GPT 初标的明显物理错误；二是 PhysX-Bench 的 prompt 经过人工调优；三是 benchmark 样本可能偏向能渲染/能模拟的成功资产。
+            验证方式：抽样检查 dataset 原始 JSON、复跑 prompt 多 seed/多 judge、加入真实 simulator failure cases 看排名是否稳定。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 对 FastWAM / 具身操作的启发</h2>
+          <p>
+            如果你要做 WAM 或具身操作里的 one-shot task modeling，PhysX-Omni 的可迁移点不是整套 image-to-3D，而是它的 <strong>sim-ready object token schema</strong>。
+            一个任务执行样本里，action 不一定要先表示成低层关节轨迹；也可以先绑定到对象 part、affordance、joint 和可模拟物理属性。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>改动点</th>
+                <th>预期收益</th>
+                <th>风险</th>
+                <th>验证实验</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>把 object state 表成 part-level schema：part id、material、affordance、joint type、scale</td>
+                <td>one-shot demo 更容易抽出任务相关对象结构</td>
+                <td>VLM 先验错会污染 action abstraction</td>
+                <td>在开门/抽屉/按钮任务上比较 schema token vs raw image token 的 transfer</td>
+              </tr>
+              <tr>
+                <td>用 template RLE 或稀疏 voxel 表示可操作区域</td>
+                <td>比完整 mesh 轻，比纯语言 affordance 更可定位</td>
+                <td>64³ 分辨率可能不够精细接触</td>
+                <td>预测 grasp/contact heatmap，看分辨率和成功率关系</td>
+              </tr>
+              <tr>
+                <td>把 action 执行建模成 part joint parameter change</td>
+                <td>适合 one-shot 学“拉开”“旋转”“滑动”这类任务</td>
+                <td>非刚性接触和工具使用不易归纳为单 joint</td>
+                <td>比较 end-effector delta、latent action、joint-space intent 三种 action token</td>
+              </tr>
+              <tr>
+                <td>用 simulator evidence 评估生成的 action model</td>
+                <td>减少只看视觉预测的假进步</td>
+                <td>仿真资产本身误差会影响结论</td>
+                <td>同一 demo 在真实标注资产和生成资产上分别 rollout policy</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>11. 速读备忘卡</h2>
+          <ul>
+            <li>PhysX-Omni 的目标是 sim-ready physical 3D asset，不是只生成漂亮 mesh。</li>
+            <li>它覆盖 rigid、deformable、articulated 三类对象。</li>
+            <li>VLM 先生成全局结构化物理描述，再逐 part 生成 voxel geometry。</li>
+            <li>template-based RLE 是核心表示：z-slice 2D RLE + template layer + add/remove residual。</li>
+            <li>这个表示不引入 special tokens，能直接放进 Qwen2.5-VL 的文本生成空间。</li>
+            <li>PhysXVerse 是 8.7K+ sim-ready assets，覆盖 2.9K+ 类别和五类物理注释。</li>
+            <li>PhysX-Bench 评估六维：geometry、absolute scale、material、affordance、kinematics、description。</li>
+            <li>DQS 是确定性 symmetric error 分数；MPS/KPS 依赖仿真视频证据和 VLM judge。</li>
+            <li>实验显示 PhysX-Omni 的物理属性和运动学明显强，但纯几何外观不是所有指标最优。</li>
+            <li>代码公开了训练/推理/benchmark 主流程，但数据路径和集群训练需要较多手工配置。</li>
+            <li>对具身操作最有用的 insight：把任务相关对象建成 part + joint + affordance + physical metadata，而不是只用 RGB latent。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Sources</h2>
+          <ul class="source-list">
+            <li><a href="https://physx-omni.github.io/">Project page: PhysX-Omni</a></li>
+            <li><a href="https://arxiv.org/abs/2605.21572">arXiv abstract: PhysX-Omni</a></li>
+            <li><a href="https://arxiv.org/pdf/2605.21572">Paper PDF</a></li>
+            <li><a href="https://github.com/physx-omni/PhysX-Omni">Official code: physx-omni/PhysX-Omni</a></li>
+            <li><a href="https://huggingface.co/datasets/PhysX-Omni/PhysXVerse">Dataset: PhysXVerse</a></li>
+            <li><a href="https://huggingface.co/PhysX-Omni/PhysX-Omni">Model checkpoint: PhysX-Omni</a></li>
+          </ul>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="langflow-continuous-diffusion-language-modeling.html">上一篇：LangFlow 连续扩散语言模型</a>
+        <a href="structural-latent-points-robotic-manipulation.html">相关：Structural Latent Points</a>
+        <a href="ai-game-world-models.html">相关：AI Game World Models</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <a href="../index.html#paper-reading">回到 Paper Reading</a>
+    </footer>
+  </body>
+</html>
