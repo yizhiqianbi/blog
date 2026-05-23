@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="RAEv2 论文与官方代码精读：generalized RAE、multi-layer-sum encoder、RAE+REPA 互补机制、REPA self-guidance、ImageNet/T2I/NWM 实验与实现细节。"
+    >
+    <title>RAEv2：把 Representation Autoencoder 变成实用 baseline</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+    <script type="application/json" id="paper-metadata">
+{
+  "title": "RAEv2：把 Representation Autoencoder 变成实用 baseline",
+  "paper": "https://arxiv.org/abs/2605.18324",
+  "authors": ["Jaskirat Singh", "Boyang Zheng", "Zongze Wu", "Richard Zhang", "Eli Shechtman", "Saining Xie"],
+  "date": "2026-05-23",
+  "category": "diffusion-generation",
+  "tags": ["raev2", "representation-autoencoder", "rae", "repa", "multi-layer-sum", "internal-guidance", "self-guidance", "flow-matching", "dit", "ddt", "image-generation", "text-to-image", "navigation-world-model"],
+  "systems": ["RAEv2", "RAE", "REPA", "AutoGuidance", "CFG", "DINOv3", "DINOv2", "DDT", "Qwen3 text encoder", "DiT"],
+  "datasets": ["ImageNet-256", "JourneyDB", "BLIP3o", "BLIP3o-60K", "RECON", "RenderedText", "Scale-RAE"],
+  "methods": ["generalized RAE", "multi-layer-sum encoder", "RAE plus REPA", "x-prediction REPA guidance", "internal guidance", "flow matching", "DDT"],
+  "code": "https://github.com/nanovisionx/RAEv2",
+  "related_posts": ["posts/langflow-continuous-diffusion-language-modeling.html", "posts/lance-unified-multimodal-model.html", "posts/leworldmodel-stable-end-to-end-jepa.html", "posts/context-unrolling-omni-models.html"],
+  "graph_nodes": ["RAEv2", "RAE", "REPA", "DINOv3-L", "multi-layer-sum", "internal guidance", "ImageNet-256", "RECON", "FastWAM", "navigation world model"],
+  "graph_edges": [
+    "RAEv2 -> improves -> Representation Autoencoder",
+    "RAEv2 -> aggregates -> last K encoder layers",
+    "multi-layer-sum -> improves -> reconstruction without encoder finetuning",
+    "RAE -> uses -> pretrained vision representation as latent space",
+    "REPA -> aligns -> intermediate diffusion features",
+    "RAEv2 -> combines -> RAE and REPA",
+    "REPA head -> enables -> internal guidance",
+    "internal guidance -> replaces -> separate AutoGuidance model",
+    "RAEv2 -> evaluated_on -> ImageNet-256 / BLIP3o / RECON",
+    "RAEv2 -> informs -> FastWAM latent state design"
+  ]
+}
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#paper-reading">Paper</a>
+        <a href="../index.html#notes">AI Game</a>
+        <a href="../index.html#posts">Robot</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading · Diffusion Generation</p>
+          <h1>RAEv2：把 Representation Autoencoder 变成实用 baseline</h1>
+          <p class="article-dek">
+            这篇不是发明一个新 encoder，而是把 RAE 这条路线从“概念漂亮但训练贵、guidance 别扭、重建不够稳”
+            修成一个更像工程 baseline 的 recipe。核心是三步：聚合 frozen vision encoder 的多层特征，用 REPA 修 diffusion 中间层的空间结构，
+            再把 REPA head 当作免费的弱模型做 internal guidance。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.23</span>
+            <span>阅读约 35 分钟</span>
+            <span>arXiv:2605.18324</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            <strong>痛点：</strong>Representation Autoencoder 用 DINO/SigLIP 这类预训练视觉表征替代传统 VAE latent，很适合统一理解和生成，
+            但原始 RAE 重建仍不够好，ImageNet 训练要跑很久，CFG 又不好用，常要额外训练一个 AutoGuidance 弱模型。
+            <strong>核心招：</strong>RAEv2 直接把 frozen encoder 的最后 \(K\) 层特征聚合成 latent，并证明 RAE 和 REPA 不是互斥而是互补；
+            在 x-prediction 参数化下，REPA 的中间层预测头还能直接当 internal guidance。
+            <strong>效果：</strong>ImageNet-256 上 80 epochs 达到 gFID 1.06、FD\(_r^6\) 2.17，EPFID@2 为 35 epochs；
+            T2I 和 navigation world model 也有稳定收益。
+            <strong>代价：</strong>这仍是大规模 DiT/DDT recipe，依赖强 frozen encoder、预训练 decoder、latent 统计、EMA 和较重的 256-token latent diffusion。
+          </p>
+          <dl class="term-list">
+            <dt>不是</dt>
+            <dd>不是“换一个更强视觉 encoder 就赢了”的简单 story。</dd>
+            <dt>是</dt>
+            <dd>把 RAE 的 latent、REPA 的中间层 alignment、guidance 的弱模型角色统一到同一个表征空间里。</dd>
+            <dt>核心 insight</dt>
+            <dd>RAE 主要吃 encoder 的全局语义质量，REPA 主要修 diffusion hidden feature 的局部空间结构；两者叠起来才是 RAEv2 的有效部分。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            任务是 latent diffusion / flow matching 的 tokenizer 与训练 recipe 设计。
+            传统 latent diffusion 用 VAE 把图像压到低维 latent；RAE 改成 frozen pretrained vision encoder \(E\) 加一个 decoder \(D\)：
+            \(x=E(I)\)，decoder 学 \(D(x)\approx I\)。好处是 latent 本身已经有 DINO/SigLIP 的语义和空间结构，
+            理论上可以同时服务 generation、understanding、editing、world model。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>latent 来源</th>
+                <th>主要瓶颈</th>
+                <th>RAEv2 的差异</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>SD-style VAE</td>
+                <td>专门训练的压缩 autoencoder</td>
+                <td>适合重建和生成，但语义表征弱，和理解模型不统一</td>
+                <td>直接用 frozen representation encoder 做 latent</td>
+              </tr>
+              <tr>
+                <td>原始 RAE</td>
+                <td>vision encoder 最后一层 patch token</td>
+                <td>重建低层细节弱，训练收敛慢，CFG 不自然</td>
+                <td>多层聚合、RAE+REPA、REPA guidance</td>
+              </tr>
+              <tr>
+                <td>REPA / REPA-E</td>
+                <td>VAE latent + 中间层表征对齐</td>
+                <td>主要作为 diffusion training regularizer，不直接替代 tokenizer</td>
+                <td>同一个 representation 既做 RAE latent，也做 REPA target</td>
+              </tr>
+              <tr>
+                <td>AutoGuidance</td>
+                <td>额外训练弱 diffusion model</td>
+                <td>多一个模型，多一套训练和推理成本</td>
+                <td>用 REPA/early-head 作为内部弱预测</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            RAEv2 的 pipeline 分两阶段。Stage 1 训练 decoder，让 frozen representation latent 可重建图像；
+            Stage 2 在这个 latent 空间训练 diffusion/flow model，同时用 REPA regularization 对齐中间层。
+          </p>
+          <div class="code-block">
+            <pre><code>image I: (B, 3, 256, 256)
+  -> frozen vision encoder E, e.g. DINOv3-L/16
+  -> multi-layer representation z_l: each (B, 256, 1024)
+  -> generalized RAE latent x: (B, 256, 1024) -> reshape (B, 1024, 16, 16)
+  -> decoder D reconstructs image I_hat during Stage 1
+
+Stage 2:
+clean latent x_1: (B, C=1024, H=16, W=16)
+  -> sample noise x_0 and time t
+  -> x_t = (1-t) x_1 + t x_0
+  -> DDT/DiT predicts clean latent x_hat or velocity v_hat
+  -> REPA head predicts z_hat from early hidden features
+  -> loss = flow loss + lambda * REPA loss + optional base-head loss
+  -> ODE sampler, 50 steps, optional internal guidance</code></pre>
+          </div>
+          <p>
+            论文的默认 ImageNet-256 设置是 DINOv3-L，latent shape 为 \(1024\times16\times16\)，也就是 256 个 patch tokens。
+            官方 config 的 Stage 2 用 `DiTwDDTHeadIG`，encoder/decoder depth 为 `[28, 2]`，patch size 为 `[1, 1]`，
+            表示 diffusion 模型直接在每个 latent token 上预测，不再把 latent token 合并成更粗 patch。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：Generalized RAE，不只拿最后一层</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>预训练视觉 transformer 的最后层通常语义最强，但低层和中层保留更多局部纹理、边界和几何细节。
+            原始 RAE 只取最后层，decoder 要从过于抽象的 token 里还原像素，重建自然吃亏。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>论文定义 generalized representation encoder，把最后 \(K\) 层 patch tokens 聚合：
+          </p>
+          <div class="math-block">
+            \[
+            x_{\mathrm{MLS}}=\sum_{\ell=L-K+1}^{L} z_{\ell}\in\mathbb{R}^{N\times d}
+            \]
+            \[
+            x_{\mathrm{MLR}}=[z_{L-K+1}\Vert \cdots \Vert z_L]R,\quad R\in\mathbb{R}^{Kd\times d}
+            \]
+          </div>
+          <p>
+            \(N\) 是 patch 数，\(d\) 是 encoder hidden size。MLS 保持维度不变；MLR 先 concat 再随机投影回 \(d\) 维。
+            原始 RAE 是 \(K=1\) 的特例。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>多层 token 让 decoder 同时看到语义和局部结构。
+            论文 sweep 显示 \(K\) 增大时重建持续变好；DINOv3-L 上 \(K=23\) 的 rFID/PSNR 明显优于 \(K=1\)。
+            但 generation 不单调，带 guidance 的最佳点在 \(K=7\)，说明“重建最强”不等于“扩散最容易建模”。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>多层聚合会改变 latent 分布，必须重新训练 decoder、计算 latent mean/var；
+            \(K\) 太大时会带入更多低层细节，可能让 diffusion 的全局生成更难。
+          </p>
+          <p>
+            <strong>实现细节：</strong>官方 `src/encoders/vision_encoder.py` 的 `DINOv3MultiLayerSimpleAddEncoder`
+            对指定层调用 `get_intermediate_layers(..., norm=True)`，再执行 `torch.stack(outputs).mean(dim=0)`。
+            【不确定】论文写的是 sum，代码实际用 mean，并额外把最后一层 patch token 的均值加回每个 patch。
+            合理解释有三种：第一，mean 只是 sum 的尺度归一化版本，latent stats 会吸收常数；第二，公开代码做了工程稳定性调整；
+            第三，论文和 release config 存在轻微不同。复现时应以代码和 checkpoint 对应 config 为准。
+          </p>
+
+          <h3>创新点 2：RAE 和 REPA 是互补，不是互相替代</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>一个直觉是：RAE latent 已经是 DINO/SigLIP 表征，为什么还要 REPA 把 diffusion 中间层对齐到同一个表征？
+            这看起来像重复监督，甚至像 wasteful skip connection。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>论文跨 27 个 vision encoders 做相关性分析，把 encoder 性质拆成 global semantic quality
+            和 local distance similarity。结果是 RAE 单独更依赖 LP 这类全局语义；REPA 单独更依赖 LDS 这类局部空间结构；
+            RAE+REPA 时，二者平均相关性最强。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>RAE 决定 clean latent \(x_1\) 是什么空间，属于 tokenizer 选择；
+            REPA 约束 diffusion hidden state 如何组织 token 间空间关系，属于生成模型内部几何正则。
+            这两个作用点不同，所以不是重复。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>REPA 需要额外 target features 和 projector loss，训练时多一次 target encoder forward 或缓存；
+            如果 target encoder 与 RAE encoder 不一致，alignment 的空间语义可能引入新的 tuning 维度。
+          </p>
+          <p>
+            <strong>实现细节：</strong>`Transport.training_losses()` 在 `z_clean` 和 `repa_coeff` 存在时调用
+            `model(..., return_intermediate=True)`，模型返回主预测和 `zt_pred`，再加
+            `repa_coeff * mse(zt_pred, z_clean)`。`DiTwDDTHead` 在 `repa_layer_depth` 抓 encoder block hidden state，
+            通过 `nn.Linear(enc_hidden_size, z_dim)` 投到 target representation 维度。
+          </p>
+
+          <h3>创新点 3：REPA head 变成免费的 internal guidance</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>原始 RAE 对 CFG 不友好，论文中 CFG 提升有限；
+            AutoGuidance 要额外训练一个 weaker model，成本和维护复杂度都高。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>把 full diffusion head 和 REPA/early head 都写成 clean latent x-prediction。
+            full head 是强预测，REPA/early head 是弱预测，两者在同一个 RAE latent 空间里，可以直接相减做 guidance：
+          </p>
+          <div class="math-block">
+            \[
+            \hat{x}_{\mathrm{guided}}
+            =\hat{x}_{\mathrm{full}}+w(\hat{x}_{\mathrm{full}}-\hat{x}_{\mathrm{repa}})
+            \]
+          </div>
+          <p>
+            <strong>为什么有效：</strong>guidance 的本质是沿“强模型相对弱模型更确定的方向”推进。
+            如果弱预测来自同一次 forward 的中间层，那么不需要额外模型，也不需要 CFG 那种 cond/uncond 双分支额外计算。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>弱 head 不能太弱，否则差分方向噪声大；也不能太强，否则 guidance 信号小。
+            \(w\)、作用时间区间、base depth 都会影响采样质量。
+          </p>
+          <p>
+            <strong>实现细节：</strong>官方 `DiTwDDTHeadIG` 在 `base_model_depth=8` 抓 early hidden state，经过 `base_final_layer`
+            产生 `x_base`；`guidance_utils.forward_with_internalguidance()` 做的是
+            `base + ig_scale * (full - base)`。这里代码实现更像“early-depth base head guidance”，论文叙述则强调 REPA head 的 x-prediction 视角。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>训练目标</th>
+                <th>输出/用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Stage 1 RAE</td>
+                <td>图像 \(I\)</td>
+                <td>冻结 encoder，只训 decoder；重建损失 + perceptual/GAN recipe</td>
+                <td>decoder checkpoint、latent stats、可重建 latent space</td>
+              </tr>
+              <tr>
+                <td>Stage 2 ImageNet</td>
+                <td>RAE latent \(x_1\)、class condition</td>
+                <td>flow matching loss + REPA loss + base head loss</td>
+                <td>class-conditional image generator</td>
+              </tr>
+              <tr>
+                <td>Stage 2 T2I</td>
+                <td>RAE latent、text tokens</td>
+                <td>同样的 latent flow loss；text encoder 给 256 条件 token</td>
+                <td>text-to-image generator</td>
+              </tr>
+              <tr>
+                <td>Stage 2 NWM</td>
+                <td>4 帧历史 latent、egocentric action、relative time</td>
+                <td>预测未来帧 latent，再 decode 成 RGB</td>
+                <td>navigation world model rollout</td>
+              </tr>
+              <tr>
+                <td>Inference</td>
+                <td>Gaussian latent noise + condition</td>
+                <td>ODE sampling，默认 50 steps；可用 IG/CFG</td>
+                <td>latent sample，经 RAE decoder 还原图像</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            官方 ImageNet config 的关键数值：Stage 1 训练 16 epochs，batch 512，`noise_tau: 0.8`；
+            Stage 2 训练 80 epochs，batch 1024，EMA 0.9995，LR \(2\mathrm{e}{-4}\) 线性降到 \(2\mathrm{e}{-5}\)，warmup 25 epochs，
+            ODE 采样 50 steps。NWM config 使用 `context_size: 4`、`n_action_tokens: 4`、`len_traj_pred: 8`。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式和算法逐项解释</h2>
+
+          <h3>公式 1：多层表示聚合</h3>
+          <div class="math-block">
+            \[
+            x=\sum_{\ell=L-K+1}^{L}z_\ell,\quad z_\ell\in\mathbb{R}^{B\times N\times d}
+            \]
+          </div>
+          <p>
+            \(B\) 是 batch，\(N=16\times16=256\)，\(d=1024\) 对应 DINOv3-L。
+            实现中 encoder 返回 patch tokens，RAE 再 reshape 成 \((B,d,16,16)\)。
+            对 FastWAM 这类世界模型来说，这一步相当于定义“状态 token”到底包含什么层级的信息。
+          </p>
+
+          <h3>公式 2：flow path 与 velocity target</h3>
+          <div class="math-block">
+            \[
+            x_t=(1-t)x_1+t x_0,\quad x_0\sim\mathcal{N}(0,I)
+            \]
+            \[
+            v_t=\frac{x_t-x_1}{t}
+            \]
+          </div>
+          <p>
+            \(x_1\) 是 clean RAE latent，\(x_0\) 是 noise latent，\(t\) 从 logit-normal 分布采样。
+            代码里 `Transport.sample()` 采样 \(x_0,t\)，再在 `training_losses()` 里构造 \(x_t\) 和 \(v_t\)。
+            虽然 config 写 `prediction: x`，`Transport.convert_model_pred()` 会把模型输出的 \(\hat{x}_1\) 转成 velocity：
+            \((x_t-\hat{x}_1)/t\)，再和 \(v_t\) 做 MSE。
+          </p>
+
+          <h3>公式 3：REPA loss</h3>
+          <div class="math-block">
+            \[
+            \mathcal{L}_{\mathrm{REPA}}
+            =\lambda \left\|P_\phi(h_t^{(r)})-z_{\mathrm{clean}}\right\|_2^2
+            \]
+          </div>
+          <p>
+            \(h_t^{(r)}\) 是第 \(r\) 层 diffusion hidden state，\(P_\phi\) 是线性 projector，
+            \(z_{\mathrm{clean}}\) 是 target encoder 的 clean patch tokens。
+            它不直接改变 RAE latent，而是让 diffusion 中间表示更像预训练视觉表征的空间组织。
+          </p>
+
+          <h3>公式 4：internal guidance</h3>
+          <div class="math-block">
+            \[
+            \hat{x}_{\mathrm{IG}}=\hat{x}_{\mathrm{base}}+s(\hat{x}_{\mathrm{full}}-\hat{x}_{\mathrm{base}})
+            \]
+          </div>
+          <p>
+            代码中 `forward_with_internalguidance()` 用的是 base/full 差分。
+            当 \(s=1\) 时没有额外 guidance；当 \(s>1\) 时沿 full 相对 base 的方向外推。
+            与 CFG 相比，它不需要把 batch 扩成 cond/uncond 两路，也不需要训练单独弱模型。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练和推理细节对齐</h2>
+          <ul>
+            <li><strong>x-prediction 与 velocity loss：</strong>论文强调 REPA guidance 需要 full output 也在 RAE latent x-space；代码 config 用 `prediction: x`，但 loss 内部统一转换成 velocity MSE。</li>
+            <li><strong>latent normalization：</strong>Stage 1 后需要 `compute_encoder_stats.py` 计算 mean/var；Stage 2 加载 stats 后在 normalized latent 上训练，decode 前再反归一化。</li>
+            <li><strong>Stage 1 noise：</strong>训练 decoder 时 `noise_tau: 0.8`，即对 encoder latent 加随机高斯扰动；采样和 Stage 2 配置通常设为 0。</li>
+            <li><strong>teacher forcing：</strong>NWM 训练是从数据采样 context/target 预测目标帧；长 rollout 时会把自己生成的未来帧继续喂回，存在训练-推理误差累积。</li>
+            <li><strong>guidance 区间：</strong>代码支持 `ig_interval` 和 `cfg_interval`，不同 \(t\) 区间的 guidance 效果可能不同；论文主表主要报告最终 gFID，而不是完整 guidance sweep。</li>
+            <li><strong>T2I 细节：</strong>项目页写 T2I 用 Qwen3-0.6B 文本条件 token；官方 public config 中 `t2i-dinov3l-k7.yaml` 用 DINOv3-L RAE latent 和 256 text tokens。</li>
+          </ul>
+          <p>
+            【不确定】论文附录和公开 config 对 T2I encoder 的描述可能有版本差异：论文文本里有使用 SigLIP2-B 的表述，
+            但当前 repo 示例 config 使用 DINOv3-L K7。合理解释是：不同实验变体共存、公开 config 只覆盖其中一支，或 release 后统一到了 DINOv3。
+            验证方式：检查官方 checkpoint metadata、tagged release、训练日志里的 `encoder_name`。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <p>
+            ImageNet-256 是论文最强证据。RAEv2 K7 在 80 epochs 达到 gFID 1.06，FD\(_r^6\) 2.17；
+            原始 RAE-XL 需要 800 epochs，gFID 1.13、FD\(_r^6\) 3.26。论文还提出 EPFID@2，
+            即 unguided gFID 首次低于 2 所需 epochs：RAEv2 是 35，原始 RAE 是 177，REPA-E 是 480。
+            这个指标比只看最终 gFID 更能体现训练效率。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>实验问题</th>
+                <th>证据</th>
+                <th>我的判断</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>多层聚合是否有效</td>
+                <td>\(K\) sweep 显示重建随 \(K\) 提升，guided generation 在 \(K=7\) 最佳</td>
+                <td>有效，但也说明 reconstruction-generation 有 trade-off，不能只追 rFID</td>
+              </tr>
+              <tr>
+                <td>RAE 是否替代 REPA</td>
+                <td>27 个 encoder 上 RAE+REPA 一致优于 RAE；LP/LDS 相关性分工明确</td>
+                <td>这是论文最有价值的机制分析</td>
+              </tr>
+              <tr>
+                <td>REPA guidance 是否比 CFG/AG 好</td>
+                <td>K7 下 no guidance 1.65，CFG 1.49，AG 1.14，REPA guidance 1.06</td>
+                <td>强结果；但应继续看 guidance scale、compute、sample diversity</td>
+              </tr>
+              <tr>
+                <td>T2I 是否泛化</td>
+                <td>BLIP3o/JourneyDB 设置下 GenEval/DPG 均提升</td>
+                <td>方向可信，但不是大规模商业 T2I 的完整替代证明</td>
+              </tr>
+              <tr>
+                <td>NWM 是否泛化到世界模型</td>
+                <td>RECON 上 RAEv2 FVD 105.61，优于 DIAMOND/NWM/RAE</td>
+                <td>说明低层空间细节对时序一致性很关键，和 \(K\) sweep 逻辑吻合</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            批判点主要有三个。第一，RAEv2 是很强的 recipe，但许多收益来自 recipe 组合，单独归因要靠消融细读。
+            第二，80 epochs 和 800 epochs 的对比很亮眼，但硬件、优化器、模型结构、训练 recipe 是否完全公平，需要看复现。
+            第三，FD\(_r^6\) 比单一 Inception FID 更合理，但也意味着评价体系本身在变化，和旧论文横比时要谨慎。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 代码实现笔记</h2>
+          <ul>
+            <li><code>src/stage1/rae.py</code>：`RAE.encode()` 把输入归一到 0-255，送入 frozen encoder，返回 patch tokens，再 reshape 成 \((B,C,H,W)\)。训练 decoder 时会按 `noise_tau` 给 latent 加噪。</li>
+            <li><code>src/encoders/vision_encoder.py</code>：`DINOv3MultiLayerSimpleAddEncoder` 支持 `dinov3mls-vit-l16[layers=11.13.15.17.19.21.23]` 这种配置。K7 对应 7 个指定层。</li>
+            <li><code>src/stage2/transport/transport.py</code>：核心 flow matching 路径在这里。`prediction=x` 并不代表 loss 直接 MSE 到 x，而是先转 velocity 再算。</li>
+            <li><code>src/stage2/models/DDT.py</code>：`DiTwDDTHeadIG` 同时返回 full output 和 base output；base output 来自第 8 层 encoder hidden state。</li>
+            <li><code>src/utils/guidance_utils.py</code>：封装 CFG、IG、CFG+IG。IG 的数学就是 `base + scale * (full - base)`。</li>
+            <li><code>configs/stage2/training/nwm-dinov3l-k7.yaml</code>：NWM 条件由 4 帧 context latent、4 个 action tokens 和 relative time 构成，适合参考到 action-conditioned world model。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 可复现清单</h2>
+          <ul>
+            <li>下载官方数据：`imagenet-256`、`blip3o-256`、`recon-256` 等，repo README 给出 Hugging Face 数据路径。</li>
+            <li>先训 Stage 1 decoder，再 extract EMA decoder，并计算 encoder latent stats；不要跳过 stats。</li>
+            <li>确认 `encoder_name` 与 checkpoint 匹配，K7 的 DINOv3-L 配置是 `dinov3mls-vit-l16[layers=11.13.15.17.19.21.23]`。</li>
+            <li>Stage 2 用 bf16、EMA 0.9995、global batch 1024、gradient clip 1.0、logit-normal time sampling。</li>
+            <li>ImageNet 默认 ODE 50 steps；若比较 CFG/IG/AG，需要固定 NFE 和 batch doubling 策略。</li>
+            <li>NWM 复现要检查 action normalization：代码把 egocentric \(dx,dy\) 归一化到 \([-1,1]\)，yaw 保持 radian。</li>
+            <li>论文没有把所有训练环境细节写满；通常还要记录 torch/cuda 版本、compile 是否开启、数据缓存策略、EMA eval 还是 raw model eval。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 对 FastWAM 的启发</h2>
+          <p>
+            对 world/action model 来说，RAEv2 最值得搬的不是“DINOv3-L K7 这个具体配置”，而是三条设计原则。
+          </p>
+          <dl class="term-list">
+            <dt>状态 token 不该只追语义</dt>
+            <dd>如果状态要支持未来预测和控制，低层空间结构很重要。单一最后层 token 可能适合理解，但不一定适合 rollout。</dd>
+            <dt>alignment 和 tokenizer 是两件事</dt>
+            <dd>即使 action-conditioned world model 的 latent 已经来自好 encoder，也可以再对中间 hidden state 做 representation alignment，目的不是重复，而是稳定动态模型内部结构。</dd>
+            <dt>weak head 可以做内部 guidance</dt>
+            <dd>如果 FastWAM 有 full dynamics head 和 early/base dynamics head，可以参考 RAEv2 的 internal guidance：用同一次 forward 里的弱预测提供外推方向，而不是另训弱模型。</dd>
+          </dl>
+          <p>
+            但要注意：RAEv2 的 action 只出现在 NWM 条件里，不是机器人操作 action tokenizer 论文。
+            如果迁移到具身操作，action token 需要显式承载末端位姿、接触、夹爪状态或 skill phase；
+            RAEv2 提供的是“状态表征和生成模型训练 recipe”，不是完整 action abstraction。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>11. 改进方向</h2>
+          <ul>
+            <li><strong>自适应 \(K\) 层聚合 -></strong> 不同 spatial region 或任务选择不同层；收益是更好 trade-off；风险是训练不稳；验证做 K gating ablation。</li>
+            <li><strong>learned layer mixing -></strong> 用轻量 per-channel/per-token 权重替代固定 sum/mean；收益是更灵活；风险是破坏 frozen representation 几何；验证 LP/LDS/rFID/gFID 同测。</li>
+            <li><strong>temporal REPA -></strong> NWM 中不仅对齐单帧 token，还对齐跨帧 token distance；收益是少 flicker；风险是 target 定义复杂；验证 FVD、LPIPS temporal consistency。</li>
+            <li><strong>action-aware internal guidance -></strong> base/full 差分只在 action-sensitive tokens 上放大；收益是 rollout 更听 action；风险是 over-guidance；验证 action adherence 和 long-horizon drift。</li>
+            <li><strong>更低成本 latent -></strong> 对 256 token 做 token pruning 或 low-rank state；收益是推理快；风险是重建和控制丢细节；验证 EPFID@2、FVD 和下游 policy。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>12. 速读备忘卡</h2>
+          <ul>
+            <li>RAEv2 的核心不是新 encoder，而是修 RAE recipe。</li>
+            <li>Generalized RAE 聚合最后 \(K\) 层，\(K=1\) 退化为原始 RAE。</li>
+            <li>重建最好不等于生成最好；ImageNet guided generation 最佳在 K7。</li>
+            <li>RAE 主要吃 global semantics；REPA 主要修 local spatial structure。</li>
+            <li>RAE+REPA 不是重复监督，而是 tokenizer 和 hidden-state geometry 的两层约束。</li>
+            <li>REPA/x-prediction 让 internal guidance 不需要单独弱模型。</li>
+            <li>代码里 DINOv3 MLS 用 mean，不是字面 sum；复现以 config 和代码为准。</li>
+            <li>Stage 2 config 用 `prediction: x`，loss 里再转 velocity。</li>
+            <li>NWM 结果说明多层低层细节对时序一致性很重要。</li>
+            <li>对 FastWAM，最可复用的是多层状态 token、REPA-style alignment、early/base head guidance。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Sources</h2>
+          <ul class="source-list">
+            <li><a href="https://arxiv.org/abs/2605.18324">arXiv: Improved Baselines with Representation Autoencoders</a></li>
+            <li><a href="https://raev2.github.io/">RAEv2 project page</a></li>
+            <li><a href="https://github.com/nanovisionx/RAEv2">Official RAEv2 GitHub repository</a></li>
+          </ul>
+        </section>
+
+        <nav class="next-links" aria-label="相关文章">
+          <span>相关：</span>
+          <a href="langflow-continuous-diffusion-language-modeling.html">LangFlow</a>
+          <a href="lance-unified-multimodal-model.html">Lance</a>
+          <a href="leworldmodel-stable-end-to-end-jepa.html">LeWorldModel</a>
+          <a href="context-unrolling-omni-models.html">Context Unrolling</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="site-footer">
+      <p>© 一支铅笔</p>
+      <a href="../index.html#top">回到顶部</a>
+    </footer>
+  </body>
+</html>
