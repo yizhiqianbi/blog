@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="REPA 论文与官方代码精读：如何把 diffusion transformer 的 noisy hidden state 对齐到 clean pretrained visual representations，从而加速 DiT/SiT 训练。"
+    >
+    <title>REPA：把扩散模型的中间层对齐到视觉表征</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+    <script type="application/json" id="paper-metadata">
+{
+  "title": "REPA：把扩散模型的中间层对齐到视觉表征",
+  "paper": "https://arxiv.org/abs/2410.06940",
+  "authors": ["Sihyun Yu", "Sangkyung Kwak", "Huiwon Jang", "Jongheon Jeong", "Jonathan Huang", "Jinwoo Shin", "Saining Xie"],
+  "date": "2026-05-23",
+  "category": "diffusion-generation",
+  "tags": ["repa", "representation-alignment", "diffusion-transformer", "sit", "dit", "dinov2", "hidden-state-alignment", "cosine-similarity", "nt-xent", "flow-matching", "cknna", "linear-probing"],
+  "systems": ["REPA", "SiT", "DiT", "DINOv2", "CLIP", "SigLIP", "MoCov3", "I-JEPA", "MAE", "MMDiT", "RAEv2"],
+  "datasets": ["ImageNet-256", "ImageNet-512", "MS-COCO"],
+  "methods": ["patch-wise representation alignment", "projection head", "negative cosine similarity", "NT-Xent", "CKNNA", "linear probing", "SDE Euler-Maruyama"],
+  "code": "https://github.com/sihyun-yu/REPA",
+  "related_posts": ["posts/rae-diffusion-transformers-representation-autoencoders.html", "posts/raev2-improved-representation-autoencoders.html", "posts/langflow-continuous-diffusion-language-modeling.html", "posts/lance-unified-multimodal-model.html"],
+  "graph_nodes": ["REPA", "SiT", "DiT", "DINOv2", "projection head", "hidden state alignment", "CKNNA", "RAE", "RAEv2", "FastWAM"],
+  "graph_edges": [
+    "REPA -> regularizes -> diffusion transformer hidden states",
+    "REPA -> aligns_to -> clean pretrained visual representations",
+    "DINOv2 -> provides -> target patch tokens",
+    "projection head -> maps -> noisy hidden state to target representation space",
+    "REPA -> accelerates -> SiT training",
+    "REPA -> improves -> ImageNet FID",
+    "REPA -> complements -> RAE",
+    "REPA -> enables -> RAEv2 hidden geometry improvement",
+    "REPA -> can_transfer_to -> FastWAM dynamics hidden-state alignment"
+  ]
+}
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#paper-reading">Paper</a>
+        <a href="../index.html#notes">AI Game</a>
+        <a href="../index.html#posts">Robot</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading · Representation Alignment</p>
+          <h1>REPA：把扩散模型的中间层对齐到视觉表征</h1>
+          <p class="article-dek">
+            REPA 的核心不是换 tokenizer，而是在 diffusion transformer 训练时加一个很直接的中间层正则：
+            noisy latent 进模型后，第 8 层左右的 hidden state 要能预测 clean image 的 DINO/CLIP/SigLIP patch representation。
+            它把“扩散模型自己慢慢学视觉表征”改成“直接借一个已经学好的视觉表征当路标”。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.23</span>
+            <span>阅读约 26 分钟</span>
+            <span>arXiv:2410.06940 · ICLR 2025</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            <strong>痛点：</strong>DiT/SiT 训练慢，不只是因为 denoising 难，也因为模型要从 noisy latent 中自己学出语义/空间表征；
+            这些表征质量明显落后于 DINOv2 等自监督视觉 encoder。
+            <strong>核心招：</strong>REPA 在 diffusion loss 外加一个 patch-wise representation alignment loss，
+            把第 \(r\) 层 hidden state 通过 MLP projector 映射到 clean image representation，并最大化相似度。
+            <strong>效果：</strong>SiT-XL/2 + REPA 在 ImageNet-256 上 400K steps 达到无 CFG FID 7.9，超过 vanilla SiT-XL/2 7M steps 的 FID 8.3；
+            4M steps + CFG interval 达到 FID 1.42。
+            <strong>代价：</strong>训练时要跑/缓存外部视觉 encoder，增加 projector 和 loss 权重；它提升 hidden representation，但仍没有改变 VAE latent tokenizer。
+          </p>
+          <dl class="term-list">
+            <dt>不是</dt>
+            <dd>不是一个新的 diffusion sampler，也不是一个新的 VAE/RAE tokenizer。</dd>
+            <dt>是</dt>
+            <dd>一个训练正则，把 diffusion transformer 的中间层表征对齐到 pretrained visual encoder。</dd>
+            <dt>核心 insight</dt>
+            <dd>生成质量和中间表征质量强相关；不要让 diffusion 模型从零摸索视觉表征，直接用 DINOv2 这类 clean representation 给它定方向。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            REPA 属于 diffusion transformer training recipe。它默认仍使用 Stable Diffusion VAE latent：
+            \(256\times256\) 图像先被 VAE 压到 \(32\times32\times4\)，SiT/DiT 在这个 latent 上做 velocity prediction。
+            REPA 只改变训练 loss：额外要求模型中间层能恢复 clean image 的视觉 representation。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>改动位置</th>
+                <th>它解决什么</th>
+                <th>没解决什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>原始 DiT/SiT</td>
+                <td>只做 denoising / velocity loss</td>
+                <td>学 latent 生成</td>
+                <td>中间层表征慢慢自发形成，训练慢</td>
+              </tr>
+              <tr>
+                <td>REPA</td>
+                <td>中间 hidden state 加 alignment loss</td>
+                <td>让模型更快获得语义和空间结构</td>
+                <td>仍受 VAE latent 表达能力限制</td>
+              </tr>
+              <tr>
+                <td>RAE</td>
+                <td>替换 autoencoder/tokenizer</td>
+                <td>让生成 latent 本身语义化</td>
+                <td>不直接约束 diffusion hidden state</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            REPA 的 pipeline 很短：同一张图走两条路，一条变成 noisy VAE latent 给 diffusion 模型训练，
+            另一条保持 clean RGB 输入给 pretrained vision encoder 产出 target representation。
+          </p>
+          <div class="code-block">
+            <pre><code>raw image x*: (B, 3, 256, 256)
+  -> SD-VAE encoder
+  -> clean latent z_1: (B, 4, 32, 32)
+  -> sample eps, t
+  -> z_t = alpha_t z_1 + sigma_t eps
+  -> SiT/DiT blocks
+  -> hidden state h_t^r: (B, N, D_model)
+  -> MLP projector h_phi
+  -> projected tokens: (B, N, D_target)
+
+raw image x*
+  -> pretrained vision encoder f, e.g. DINOv2-B
+  -> clean target y*: (B, N, D_target)
+
+loss = denoising/velocity loss + lambda * alignment loss</code></pre>
+          </div>
+          <p>
+            官方代码 `models/sit.py` 在第 `encoder_depth` 层抓 hidden state，执行
+            `projector(x.reshape(-1, D)).reshape(N, T, -1)`；`loss.py` 则对 projector 输出和 clean target token 做 normalize 后负余弦相似度。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：把 diffusion training 看成 representation learning 瓶颈</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>扩散模型的中间层确实会出现 discriminative representation，但论文用 linear probing 和 CKNNA 发现，
+            即使 SiT-XL/2 训练 7M steps，它和 DINOv2-g 仍有明显 semantic gap。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>不等模型自己慢慢学表征，而是在训练早期就用 external pretrained encoder 提供 clean target。
+            这不是为了分类，而是为了让 denoising backbone 的中间层更快形成可用的语义/空间组织。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>denoising loss 要求模型恢复所有细节，包括高频纹理；representation target 则压掉无关细节，保留对象/部件/空间结构。
+            这个方向能给后续 layers 更稳定的生成条件。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>如果 target encoder 的 representation 和生成任务不匹配，alignment 可能把模型拉向错误结构。
+            REPA 的实验主要在图像域，视频和机器人状态的 target representation 还要重新验证。
+          </p>
+
+          <h3>创新点 2：patch-wise hidden-state alignment</h3>
+          <p>
+            <strong>它怎么改：</strong>给 clean image \(x^\*\) 一个 pretrained encoder \(f\)，得到：
+          </p>
+          <div class="math-block">
+            \[
+            y^\*=f(x^\*)\in\mathbb{R}^{N\times D}
+            \]
+            \[
+            h_t=f_\theta(z_t),\qquad \tilde{y}=h_\phi(h_t)\in\mathbb{R}^{N\times D}
+            \]
+            \[
+            \mathcal{L}_{REPA}
+            =
+            -\mathbb{E}_{x^\*,\epsilon,t}
+            \left[
+            \frac{1}{N}\sum_{n=1}^{N}
+            \mathrm{sim}\left(y^\*_{n},h_\phi(h_{t,n})\right)
+            \right]
+            \]
+          </div>
+          <p>
+            \(N\) 是 patch 数，\(D\) 是 target encoder 维度。`h_phi` 是三层 MLP projector。
+            代码默认的实际 loss 是 normalize 后的负余弦相似度；论文也比较了 NT-Xent，早期略强但长期差距变小。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>patch-wise 对齐保留空间结构，而不是只对齐全局 CLS embedding。
+            这对 image generation 很关键：模型不仅要知道“这是狗”，还要知道“头、身体、背景在什么位置”。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>patch grid 需要对齐。如果 diffusion latent token 和 target encoder token 数不同，需要插值或调整 positional embedding。
+          </p>
+
+          <h3>创新点 3：只对齐前几层，不管后面细节层</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>如果强行把所有层都拉向 DINOv2，后层可能没法专心生成高频细节。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>论文在不同 depth 加 REPA，发现第 6 或第 8 层效果最好；后续实验主要用 depth 8。
+            官方训练命令默认 `--encoder-depth=8`，B 模型有时用第 4 层。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>前中层负责建立语义和空间 scaffold，后层再把 scaffold 翻译成 denoising target。
+            这和 RAEv2 里“REPA 修 hidden geometry，RAE 修 latent space”的解释是统一的。
+          </p>
+
+          <h3>创新点 4：强 target encoder 带来更好生成</h3>
+          <p>
+            <strong>证据：</strong>Table 2 中 SiT-L/2 400K steps，vanilla FID 18.8；
+            REPA with MAE-L 是 12.5，CLIP-L 是 11.0，SigLIP-L 是 10.2，DINOv2-B 是 9.7。
+            整体上 target encoder 的 linear probing 越强，生成 FID 越好。
+          </p>
+          <p>
+            <strong>限制：</strong>这种相关性不是严格单调，DINOv2-g 和 DINOv2-B 差距很小。
+            论文解释为 DINOv2 系列共享 distillation source，representation 很接近。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>流程</th>
+                <th>训练时</th>
+                <th>推理时</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>VAE latent</td>
+                <td>raw image 先编码成 \(32\times32\times4\)</td>
+                <td>从 Gaussian latent 开始采样</td>
+              </tr>
+              <tr>
+                <td>target representation</td>
+                <td>raw image 送 DINOv2/CLIP/SigLIP 得到 \(y^\*\)</td>
+                <td>不需要 target encoder</td>
+              </tr>
+              <tr>
+                <td>diffusion loss</td>
+                <td>velocity prediction，linear interpolant</td>
+                <td>Euler-Maruyama SDE 或 ODE sampler</td>
+              </tr>
+              <tr>
+                <td>REPA loss</td>
+                <td>第 8 层 hidden state -> projector -> similarity loss</td>
+                <td>projector 可保留但不影响主 sampling 输出</td>
+              </tr>
+              <tr>
+                <td>guidance</td>
+                <td>可训练 CFG dropout</td>
+                <td>CFG scale 和 guidance interval 可调</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            官方 README 的基础训练命令：`SiT-XL/2`、`dinov2-vit-b`、`proj-coeff=0.5`、`encoder-depth=8`、
+            `path-type=linear`、`prediction=v`、batch 256、AdamW \(1e{-4}\)。
+            生成 50K FID 样本时默认 `mode=sde`、`num-steps=250`、`cfg-scale=1.8`、`guidance-high=0.7`。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式和代码逐项解释</h2>
+
+          <h3>公式 1：velocity training</h3>
+          <div class="math-block">
+            \[
+            z_t=\alpha_t z_1+\sigma_t\epsilon,\qquad
+            \mathcal{L}_{velocity}
+            =
+            \left\|v_\theta(z_t,t)-\dot{\alpha}_t z_1-\dot{\sigma}_t\epsilon\right\|^2
+            \]
+          </div>
+          <p>
+            代码 `loss.py` 中 `alpha_t=1-t`、`sigma_t=t`，target 是 `d_alpha_t * images + d_sigma_t * noises`。
+            这里的 `images` 变量实际是 VAE latent，不是 RGB。
+          </p>
+
+          <h3>公式 2：REPA 总 loss</h3>
+          <div class="math-block">
+            \[
+            \mathcal{L}=\mathcal{L}_{velocity}+\lambda\mathcal{L}_{REPA}
+            \]
+          </div>
+          <p>
+            官方代码训练 loop 里是 `loss = loss_mean + proj_loss_mean * args.proj_coeff`。
+            默认 `proj_coeff=0.5`，论文 Table 5 显示 \(\lambda=0.5\) 后基本饱和。
+          </p>
+
+          <h3>公式 3：代码里的负余弦相似度</h3>
+          <div class="math-block">
+            \[
+            \mathcal{L}_{proj}
+            =
+            -\frac{1}{BN}\sum_{b,n}
+            \left\langle
+            \mathrm{norm}(y_{b,n}),
+            \mathrm{norm}(\tilde{y}_{b,n})
+            \right\rangle
+            \]
+          </div>
+          <p>
+            `loss.py` 里对 `z_j` 和 `z_tilde_j` 都做 `F.normalize(..., dim=-1)`，然后累加 `-(z_j * z_tilde_j).sum(dim=-1)`。
+            这和论文里的 general `sim()` 对齐。
+          </p>
+
+          <h3>公式 4：hidden-state projector</h3>
+          <div class="code-block">
+            <pre><code>if (i + 1) == encoder_depth:
+    zs = [
+      projector(x.reshape(-1, D)).reshape(N, T, -1)
+      for projector in self.projectors
+    ]</code></pre>
+          </div>
+          <p>
+            一个 model 可以有多个 projector，对应多个 target encoder 维度。README 里的 `projector-embed-dims=768,1024`
+            就是为多个 representation target 预留的接口。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练-推理对齐</h2>
+          <ul>
+            <li><strong>训练多 target encoder，推理不用：</strong>REPA 是训练正则，推理阶段不需要 DINOv2 forward，因此不会增加 sampling NFE。</li>
+            <li><strong>noisy vs clean：</strong>模型输入是 noisy latent \(z_t\)，target representation 来自 clean image \(x^\*\)。这迫使 hidden state 学 noise-invariant semantic structure。</li>
+            <li><strong>层选择 mismatch：</strong>只对齐第 8 层，后层不受 REPA 直接约束；这是设计，不是遗漏。</li>
+            <li><strong>CFG interval：</strong>最佳 FID 1.42 来自额外 guidance interval，不只是 REPA 本身；比较时要区分无 CFG、普通 CFG、interval CFG。</li>
+            <li><strong>代码注意：</strong>README 明确说 release code 可能无法完全复现实验数字；这是复现时必须记录的风险。</li>
+          </ul>
+          <p>
+            【不确定】REPA 的收益到底来自“语义变好”还是“优化条件变好”仍未完全分开。
+            可能解释：第一，DINO target 给了更好的中间监督；第二，projector loss 提供额外梯度，缓解深层 transformer 训练；
+            第三，patch-wise alignment 让 token 空间结构更平滑。验证方式是对比 random frozen encoder、低语义高局部 target、以及只加同等规模 auxiliary loss 的控制组。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <p>
+            REPA 的主证据很清楚：训练加速很大，而且不仅在 SiT 上有效，在 DiT、ImageNet-512 和 MS-COCO T2I 上也有效。
+            但要把结论拆开看：REPA 本身让无 CFG FID 从 17.2 降到 7.9；最终 SOTA 1.42 还叠加了 CFG 和 guidance interval。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>实验</th>
+                <th>数字</th>
+                <th>判断</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>SiT-XL/2 convergence</td>
+                <td>vanilla 7M FID 8.3；REPA 400K FID 7.9</td>
+                <td>最强证据，说明 representation alignment 极大缩短冷启动</td>
+              </tr>
+              <tr>
+                <td>DiT/SiT 泛化</td>
+                <td>DiT-XL 400K 19.5 -> 12.3；SiT-L 18.8 -> 9.7</td>
+                <td>不是只对 SiT-XL 特化</td>
+              </tr>
+              <tr>
+                <td>target encoder</td>
+                <td>SigLIP-L 10.2，DINOv2-B 9.7，MAE-L 12.5</td>
+                <td>强 representation 通常更好，但不是严格单调</td>
+              </tr>
+              <tr>
+                <td>ImageNet-512</td>
+                <td>REPA 200 epochs FID 2.08，vanilla SiT 600 epochs FID 2.62</td>
+                <td>分辨率提升后仍有效</td>
+              </tr>
+              <tr>
+                <td>MS-COCO T2I</td>
+                <td>MMDiT ODE 6.05 -> 4.73；SDE 5.30 -> 4.14</td>
+                <td>说明 text conditioning 存在时 visual alignment 仍有价值</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            批判点：第一，最佳数值混合了 REPA 和 guidance interval；第二，DINOv2 这类 target encoder 本身用大规模数据训练，compute/data 公平性要单独算；
+            第三，alignment depth 的解释仍偏经验，论文也把更系统的理论分析留给未来工作。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 可复现清单</h2>
+          <ul>
+            <li>预处理 ImageNet，先用 SD-VAE 编码成 latent；不要在训练 loop 里实时跑 VAE。</li>
+            <li>使用 pretrained visual encoder 产 target patch tokens：DINOv2 默认可从 torch.hub 下载，其他 encoder 需要手动放 ckpt。</li>
+            <li>默认 batch size 256，AdamW lr \(1e{-4}\)，\((\beta_1,\beta_2)=(0.9,0.999)\)，fp16，gradient clipping。</li>
+            <li>SiT-XL/2：28 layers，hidden 1152，16 heads，patch size 2，latent input \(32\times32\times4\)。</li>
+            <li>REPA：\(\lambda=0.5\)，alignment depth 8，projection MLP 是 3 层 SiLU MLP。</li>
+            <li>采样：论文默认 SDE Euler-Maruyama，NFE=250；最终表的 1.42 使用 CFG interval。</li>
+            <li>复现时记录 `legacy` label dropout 选项；代码注释提到早期实验曾发生 label dropping twice。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 改进方向</h2>
+          <ul>
+            <li><strong>time-varying REPA -></strong> 不同 \(t\) 用不同 \(\lambda(t)\)；收益是低噪/高噪阶段各取所需；风险是 schedule 更难调；验证 timestep-wise CKNNA/FID。</li>
+            <li><strong>multi-target alignment -></strong> 同时对齐 DINO 的局部结构和 SigLIP/CLIP 的语义；收益是更强 multimodal grounding；风险是 target 冲突；验证 T2I 和 class generation。</li>
+            <li><strong>temporal REPA -></strong> 视频/世界模型里对齐跨帧 representation；收益是 temporal consistency；风险是 encoder target 不稳定；验证 FVD 和 action controllability。</li>
+            <li><strong>RAE+REPA -></strong> tokenizer 和 hidden-state alignment 叠加；收益是 RAEv2 已证明的方向；风险是训练成本更高；验证 EPFID@2。</li>
+            <li><strong>FastWAM hidden alignment -></strong> 对 world model dynamics hidden state 加 clean observation encoder target；收益是 one-shot task 状态更稳；风险是过度依赖视觉先验；验证少样本任务迁移。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 速读备忘卡</h2>
+          <ul>
+            <li>REPA 不换 VAE latent，只加训练正则。</li>
+            <li>它对齐的是 noisy latent 输入后的 hidden state，不是最终图像。</li>
+            <li>target 是 clean image 的 pretrained visual representation。</li>
+            <li>核心 loss 是 patch-wise similarity，代码默认负余弦。</li>
+            <li>默认第 8 层对齐，后层留给高频细节生成。</li>
+            <li>SiT-XL/2 400K + REPA 已超过 vanilla 7M。</li>
+            <li>FID 1.42 还用了 CFG interval，不能只归功于 alignment loss。</li>
+            <li>target encoder 越强，通常生成越好，但 DINOv2 系列差异不大。</li>
+            <li>推理阶段不需要跑 DINO，额外成本主要在训练。</li>
+            <li>对 RAE/FastWAM，REPA 的可复用点是“动态模型中间层也要有好表征”。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Sources</h2>
+          <ul class="source-list">
+            <li><a href="https://arxiv.org/abs/2410.06940">arXiv: Representation Alignment for Generation</a></li>
+            <li><a href="https://sihyun.me/REPA/">REPA project page</a></li>
+            <li><a href="https://github.com/sihyun-yu/REPA">Official REPA GitHub repository</a></li>
+            <li><a href="https://openreview.net/forum?id=DJSZGGZYVi">ICLR 2025 OpenReview page</a></li>
+          </ul>
+        </section>
+
+        <nav class="next-links" aria-label="相关文章">
+          <span>相关：</span>
+          <a href="rae-diffusion-transformers-representation-autoencoders.html">RAE</a>
+          <a href="raev2-improved-representation-autoencoders.html">RAEv2</a>
+          <a href="langflow-continuous-diffusion-language-modeling.html">LangFlow</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="site-footer">
+      <p>© 一支铅笔</p>
+      <a href="../index.html#top">回到顶部</a>
+    </footer>
+  </body>
+</html>

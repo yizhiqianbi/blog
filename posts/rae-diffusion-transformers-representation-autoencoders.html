@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="RAE 论文与官方代码精读：为什么 Diffusion Transformer 要把旧 SD-VAE 换成 frozen representation encoder + ViT decoder，如何处理高维 latent、noise schedule、decoder robustness 和 wide DDT head。"
+    >
+    <title>RAE：为什么 Diffusion Transformer 该换掉旧 VAE</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+    <script type="application/json" id="paper-metadata">
+{
+  "title": "RAE：为什么 Diffusion Transformer 该换掉旧 VAE",
+  "paper": "https://arxiv.org/abs/2510.11690",
+  "authors": ["Boyang Zheng", "Nanye Ma", "Shengbang Tong", "Saining Xie"],
+  "date": "2026-05-23",
+  "category": "diffusion-generation",
+  "tags": ["rae", "representation-autoencoder", "diffusion-transformer", "latent-diffusion", "frozen-vision-encoder", "vit-decoder", "dinov2", "siglip2", "mae", "ddt-head", "flow-matching", "autoguidance"],
+  "systems": ["RAE", "DiTDH", "LightningDiT", "SD-VAE", "AutoGuidance", "DINOv2", "SigLIP2", "MAE", "RAEv2"],
+  "datasets": ["ImageNet-1K", "ImageNet-256", "ImageNet-512"],
+  "methods": ["frozen representation encoder", "ViT-MAE decoder", "noise-augmented decoding", "dimension-dependent noise schedule shift", "wide DDT head", "flow matching"],
+  "code": "https://github.com/bytetriper/RAE",
+  "related_posts": ["posts/raev2-improved-representation-autoencoders.html", "posts/repa-representation-alignment-diffusion-transformers.html", "posts/langflow-continuous-diffusion-language-modeling.html", "posts/lance-unified-multimodal-model.html"],
+  "graph_nodes": ["RAE", "Representation Autoencoder", "SD-VAE", "DINOv2", "SigLIP2", "MAE", "DiTDH", "wide DDT head", "noise-augmented decoding", "RAEv2", "FastWAM"],
+  "graph_edges": [
+    "RAE -> replaces -> SD-VAE tokenizer",
+    "RAE -> uses -> frozen representation encoder",
+    "RAE -> trains -> ViT decoder",
+    "DINOv2 -> provides -> semantic patch tokens",
+    "wide DDT head -> handles -> high-dimensional RAE latent",
+    "dimension-dependent schedule shift -> adapts_to -> effective latent dimension",
+    "noise-augmented decoding -> improves -> decoder robustness",
+    "RAE -> enables -> DiTDH latent diffusion",
+    "RAE -> extended_by -> RAEv2",
+    "RAE -> informs -> FastWAM state-token design"
+  ]
+}
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#paper-reading">Paper</a>
+        <a href="../index.html#notes">AI Game</a>
+        <a href="../index.html#posts">Robot</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading · Representation Autoencoder</p>
+          <h1>RAE：为什么 Diffusion Transformer 该换掉旧 VAE</h1>
+          <p class="article-dek">
+            RAE 的核心不是“autoencoder 又换了一个名字”，而是把 latent diffusion 的 tokenizer 从 reconstruction-only VAE
+            换成 frozen representation encoder。这样 latent 同时有重建能力和视觉语义，但也带来高维 token、噪声日程和 decoder robustness 三个工程问题。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.23</span>
+            <span>阅读约 28 分钟</span>
+            <span>arXiv:2510.11690</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            <strong>痛点：</strong>DiT/SiT 等 latent diffusion 长期沿用 SD-VAE latent：维度低、语义弱、卷积结构旧，适合压缩重建但不是好的视觉状态空间。
+            <strong>核心招：</strong>RAE 用 DINOv2/SigLIP2/MAE 这类 frozen ViT encoder 直接产出 patch tokens，只训练一个 ViT decoder 重建图像；
+            然后用宽而浅的 DDT head、维度相关的 time shift、noise-augmented decoder training 让 diffusion 能在高维 representation latent 上工作。
+            <strong>效果：</strong>ImageNet-256 上 DiT<sup>DH</sup>-XL + RAE 无 guidance gFID 1.51，有 AutoGuidance gFID 1.13；ImageNet-512 也达到 gFID 1.13。
+            <strong>代价：</strong>标准 DiT 不能直接吃 RAE latent，高维 token 迫使模型宽度、head 设计、schedule 和 decoder training 都要重调。
+          </p>
+          <dl class="term-list">
+            <dt>不是</dt>
+            <dd>不是把 VAE 的 encoder 换成 DINO 后就完事。</dd>
+            <dt>是</dt>
+            <dd>重新定义 latent diffusion 的状态空间，并解释为什么高维 representation latent 需要新的 diffusion backbone recipe。</dd>
+            <dt>核心 insight</dt>
+            <dd>生成模型的 latent 不应该只服务“压缩”，还应该继承可迁移的视觉表征；但 diffusion 会给 latent 加高斯噪声，所以模型容量要覆盖完整 token 维度。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            RAE 在 latent diffusion 的“autoencoder/tokenizer”层动刀。传统 SD-VAE 把 \(256^2\) 图像压成
+            \(32\times32\times4\) latent，容量很小，表征主要来自重建目标。RAE 反过来：先相信现代 representation learning，
+            把 frozen ViT encoder 的 patch token 当作 latent，再训练 decoder 把这些 token 还原回像素。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>方案</th>
+                <th>latent</th>
+                <th>优点</th>
+                <th>问题</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>SD-VAE</td>
+                <td>\(4\times32\times32\)</td>
+                <td>压缩强，diffusion recipe 成熟</td>
+                <td>语义弱，representation quality 很低</td>
+              </tr>
+              <tr>
+                <td>REPA</td>
+                <td>仍用 VAE latent，额外对齐 hidden state</td>
+                <td>训练加速，改动小</td>
+                <td>没有替换 tokenizer，生成空间仍是 VAE</td>
+              </tr>
+              <tr>
+                <td>RAE</td>
+                <td>\(768\times16\times16\) 等 representation token</td>
+                <td>语义强，重建也好，天然连到理解模型</td>
+                <td>高维 latent 难扩散，需要宽 head 和 schedule shift</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            RAE 是两阶段系统：Stage 1 只训练 decoder，Stage 2 在 RAE latent 上训练 diffusion transformer。
+          </p>
+          <div class="code-block">
+            <pre><code>Stage 1: train representation autoencoder
+image x: (B, 3, 256, 256)
+  -> frozen encoder E, e.g. DINOv2-B with registers
+  -> patch tokens z: (B, 256, 768)
+  -> optional latent noise during decoder training
+  -> ViT-MAE-style decoder D
+  -> reconstruction x_hat: (B, 3, 256, 256)
+  -> L1 + LPIPS + GAN loss
+
+Stage 2: train latent diffusion
+clean latent z_1: (B, 768, 16, 16)
+  -> sample eps and t
+  -> z_t = (1 - t) z_1 + t eps
+  -> DiT_DH predicts velocity v_t
+  -> ODE Euler sampling, 50 steps
+  -> RAE decoder maps sampled latent back to image</code></pre>
+          </div>
+          <p>
+            论文默认 DINOv2-B 的 token 维度是 768，256 resolution 下 patch token 数是 256。
+            官方代码 `src/stage1/rae.py` 中 `RAE.encode()` 会 resize/normalize 输入，调用 frozen encoder，
+            reshape 到 \((B,C,H,W)\)，可选加载 latent mean/var 做 normalization；`decode()` 再反归一化并送入 ViT decoder。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：frozen representation encoder 也能高保真重建</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>大家默认 DINO/SigLIP/MAE 更偏语义，低层像素细节会丢，所以不适合做 autoencoder encoder。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>RAE 不训练 encoder，只在 encoder patch tokens 上训练一个 ViT-MAE-style decoder。
+            Stage 1 loss 是 L1、LPIPS 和 GAN adversarial loss 的组合：
+          </p>
+          <div class="math-block">
+            \[
+            z=E(x),\qquad \hat{x}=D(z)
+            \]
+            \[
+            \mathcal{L}_{rec}=\|x-\hat{x}\|_1+\omega_L\mathrm{LPIPS}(x,\hat{x})+\omega_G\lambda_{GAN}\mathcal{L}_{GAN}
+            \]
+          </div>
+          <p>
+            <strong>为什么有效：</strong>ViT representation token 并没有完全丢掉空间细节；decoder 足够强时可以把 patch-level semantic feature 还原成像素。
+            论文 Table 1 中 DINOv2-B rFID 0.49、SigLIP2-B 0.53、MAE-B 0.16，均优于 SD-VAE 的 0.62。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>低 rFID 不等于好生成 tokenizer。MAE-B 重建最好，但后续生成 gFID 明显差于 DINOv2。
+            这说明 tokenizer 要同时看 reconstruction fidelity 和 latent geometry。
+          </p>
+          <p>
+            <strong>实现细节：</strong>官方 Stage 1 config `configs/stage1/training/DINOv2-B_decXL.yaml`
+            用 DINOv2 with registers base，ViT-XL decoder，16 epochs，batch 512，`noise_tau: 0.8`；
+            GAN discriminator 从第 6/8 epoch 左右开始介入，decoder 只训练自身参数。
+          </p>
+
+          <h3>创新点 2：高维 RAE latent 需要模型宽度覆盖 token 维度</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>标准 DiT 是为低维 VAE token 调的。RAE token 维度可能是 768/1024，
+            如果 transformer hidden width 小于 token 维度，输入/输出投影形成低秩瓶颈。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>论文构造单图 overfit 实验，发现只有当模型 width \(d\ge n\) 时，才能把 RAE latent 的 diffusion target 拟合好。
+            理论上，对函数族 \(g(x_t,t)=Bf(Ax_t,t)\)，若 \(A\in\mathbb{R}^{d\times n}\)、\(B\in\mathbb{R}^{n\times d}\) 且 \(d<n\)，存在不可消掉的下界：
+          </p>
+          <div class="math-block">
+            \[
+            \mathcal{L}(g,\theta)
+            =
+            \int_0^1\mathbb{E}_{x,\epsilon}
+            \left[\|g(x_t,t)-(\epsilon-x)\|^2\right]dt
+            \ge \sum_{i=d+1}^{n}\lambda_i
+            \]
+          </div>
+          <p>
+            这里 \(n\) 是 RAE token channel 维度，\(\lambda_i\) 是 \(W=\epsilon-x\) 的 covariance eigenvalues。
+            直觉是：diffusion 加噪后，数据 manifold 被扩成 full-rank 支撑，模型必须能表达所有 channel 方向。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>直接把整个 DiT backbone 加宽很贵；这也是论文引入 DiT<sup>DH</sup> 的原因。
+          </p>
+
+          <h3>创新点 3：dimension-dependent schedule shift</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>VAE latent channel 少，RAE latent channel 多。相同 \(t\) 下，噪声对高维 token 的信息破坏程度不同；
+            照搬 VAE/pixel 的 schedule 会让训练区间不匹配。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>论文采用维度相关 timestep shift：
+          </p>
+          <div class="math-block">
+            \[
+            t_m=\frac{\alpha t_n}{1+(\alpha-1)t_n},\qquad \alpha=\sqrt{m/n}
+            \]
+          </div>
+          <p>
+            \(n=4096\) 是 base dimension，\(m\) 是 RAE 的 effective data dimension。
+            Table 4 中无 shift gFID 23.08，加 shift 后到 4.81，说明 schedule 不是小调参。
+          </p>
+
+          <h3>创新点 4：noise-augmented decoding</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>VAE decoder 训练时 latent 来自分布 \(N(\mu,\sigma^2I)\)，天然见过 noisy latent；
+            RAE decoder 只见过 frozen encoder 产生的离散训练点。diffusion 采样出来的 latent 有误差，decoder 会 OOD。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>decoder 训练时对 \(z\) 加噪，等价于把离散 latent 分布 \(p(z)\) 平滑成
+            \(p_n(z)=\int p(z-n)\mathcal{N}(0,\sigma^2I)(n)dn\)。官方代码里对应 `RAE.noising()` 和 `noise_tau`。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>牺牲一点纯重建 rFID，换 decoder 对 diffusion 输出误差更鲁棒。
+            论文 Table 5：加噪前 gFID/rFID 为 4.81/0.49，加噪后为 4.28/0.57。
+          </p>
+
+          <h3>创新点 5：wide DDT head，不把整个 backbone 都加宽</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>如果按照“width 必须覆盖 token dimension”直接扩大整条 DiT，attention/MLP 成本都会膨胀。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>DiT<sup>DH</sup> 把模型分成 base DiT \(M\) 和浅而宽的 head \(H\)：
+          </p>
+          <div class="math-block">
+            \[
+            z_t=M(x_t\mid t,y),\qquad v_t=H(x_t\mid z_t,t)
+            \]
+          </div>
+          <p>
+            代码 `src/stage2/models/DDT.py` 的 `DiTwDDTHead` 用 `[28, 2]` 的 encoder/decoder depth，
+            也就是主干 28 层，DDT head 2 层，head hidden size 2048。这个 head 专门处理高维 latent 的 denoising 输出。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>关键操作</th>
+                <th>输出</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Stage 1 decoder</td>
+                <td>ImageNet 图像</td>
+                <td>冻结 DINOv2/SigLIP2/MAE，只训 ViT decoder；L1+LPIPS+GAN</td>
+                <td>RAE decoder checkpoint</td>
+              </tr>
+              <tr>
+                <td>latent stats</td>
+                <td>训练集 latent</td>
+                <td>计算 mean/var，用于 Stage 2 normalization</td>
+                <td>stats.pt</td>
+              </tr>
+              <tr>
+                <td>Stage 2 diffusion</td>
+                <td>RAE latent + class label</td>
+                <td>flow matching velocity prediction，dimension-shifted time</td>
+                <td>DiT<sup>DH</sup> generator</td>
+              </tr>
+              <tr>
+                <td>sampling</td>
+                <td>Gaussian noise + label</td>
+                <td>Euler ODE 50 steps，可用 CFG/AutoGuidance</td>
+                <td>sample latent -> RAE decoder -> image</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式和实现对齐</h2>
+          <ul>
+            <li><strong>RAE latent：</strong>\(z=E(x)\)，实现中 `RAE.encode()` 返回 \((B,C,H,W)\)。DINOv2-B 是 \((B,768,16,16)\)。</li>
+            <li><strong>flow path：</strong>\(x_t=(1-t)x+t\epsilon\)，target velocity 是 \(\epsilon-x\)。代码 `ICPlan.compute_ut()` 正是 \(d\alpha_t x + d\sigma_t\epsilon\)。</li>
+            <li><strong>decoder noise：</strong>`noise_sigma = noise_tau * rand(...)`，训练时 \(z\leftarrow z+\sigma\epsilon\)，采样/推理时通常 `noise_tau=0`。</li>
+            <li><strong>DDT head：</strong>`s_embedder` 处理 state tokens，encoder blocks 得到 condition state；`x_embedder` 和 decoder blocks 负责输出 velocity。</li>
+            <li><strong>guidance：</strong>官方 sampling config 支持 `cfg` 和 `autoguidance`；AutoGuidance 另加载一个较弱 DiT<sup>DH</sup>-S model。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练-推理对齐</h2>
+          <p>
+            RAE 的主要 mismatch 是 decoder：训练看到的是 encoder 产生的 clean latent，推理看到的是 diffusion 采样的 approximate latent。
+            这就是 noise-augmented decoding 的作用。第二个 mismatch 是 schedule：如果训练时噪声强度没有按 effective dimension shift，
+            模型会在错误的信息破坏区间学习。第三个 mismatch 是 FID 采样协议：论文指出 class-balanced sampling 和 random label sampling 会让 FID 有细微差异。
+          </p>
+          <p>
+            【不确定】论文声称 RAE 不需要辅助 representation alignment loss，但后续 RAEv2 又证明 RAE+REPA 互补。
+            合理解释：第一，RAE 原文的重点是证明 tokenizer 可替换，避免额外 REPA 才能成立；第二，RAEv2 用更强 recipe 发现 REPA 仍能进一步改善 hidden geometry；
+            第三，两篇论文的默认 encoder/模型/训练 budget 不同。验证方式是同一代码库里做 RAE vs RAE+REPA 的严格 ablation。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <p>
+            RAE 最强的证据有三层。第一，重建：frozen representation encoder 并不妨碍高保真重建，MAE-B rFID 0.16、DINOv2-B 0.49 都优于 SD-VAE 0.62。
+            第二，机制：标准 DiT 直接吃 RAE latent 会失败，width/token-dim bottleneck 和 schedule shift 的消融解释了为什么。
+            第三，系统：DiT<sup>DH</sup>-XL + DINOv2-B 在 ImageNet-256 上 800 epochs 无 guidance gFID 1.51，有 guidance 1.13。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>结论</th>
+                <th>证据</th>
+                <th>批判</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>RAE 是更好的 tokenizer</td>
+                <td>重建 rFID 与 linear probing accuracy 都高于 SD-VAE</td>
+                <td>MAE 重建强但生成弱，说明 tokenizer 评价不能只看 rFID</td>
+              </tr>
+              <tr>
+                <td>高维 latent 不是坏事</td>
+                <td>加宽/加 DDT head 后训练可稳定，FID 很强</td>
+                <td>recipe 成本高，不能直接套到小模型</td>
+              </tr>
+              <tr>
+                <td>DiT<sup>DH</sup> 是关键工程件</td>
+                <td>DINOv2-L 上 DiT-XL gFID 6.09，DiT<sup>DH</sup>-XL 2.73</td>
+                <td>head 架构和 tokenizer 贡献耦合，归因需更多跨架构实验</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 可复现清单</h2>
+          <ul>
+            <li>Stage 1：DINOv2 with registers base，ViT-XL decoder，16 epochs，batch 512，LR \(2\times10^{-4}\) cosine decay。</li>
+            <li>Loss：L1 + LPIPS + GAN，论文附录给出 \(\omega_L=1\)、\(\omega_G=0.75\)，disc start/adv start 需要按 config 对齐。</li>
+            <li>Stage 2：latent normalization stats 必须和 encoder/分辨率一致。</li>
+            <li>DiT<sup>DH</sup>：patch size 1，latent size \([768,16,16]\)，hidden `[1152,2048]`，depth `[28,2]`。</li>
+            <li>Optimization：batch 1024，EMA 0.9995，gradient clip 1.0，LR 线性从 \(2e{-4}\) 到 \(2e{-5}\)，warmup 40 epochs。</li>
+            <li>Sampling：Euler ODE 50 steps；ImageNet FID 要说明 random labels 还是 class-balanced labels。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 改进方向</h2>
+          <ul>
+            <li><strong>RAE + REPA 统一训练 -></strong> 让 tokenizer 和 hidden alignment 同时优化；收益是更快收敛；风险是 loss 权重难调；验证 RAEv2-style ablation。</li>
+            <li><strong>multi-layer encoder token -></strong> 不只取最后层；收益是重建更好；风险是 diffusion 难度上升；验证 K sweep。</li>
+            <li><strong>task-aware decoder noise -></strong> 对容易 OOD 的通道/空间位置加更多 noise；收益是 sampling robustness；风险是 rFID 下降；验证 gFID/rFID trade-off。</li>
+            <li><strong>FastWAM state tokenizer -></strong> 把 DINO/3D/触觉特征作为 frozen state token；收益是世界模型状态更语义化；风险是 action dynamics 难学；验证短 rollout FVD/控制成功率。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 速读备忘卡</h2>
+          <ul>
+            <li>RAE = frozen representation encoder + trainable ViT decoder。</li>
+            <li>它替换的是 latent diffusion 的 tokenizer，不是 diffusion objective。</li>
+            <li>DINOv2/SigLIP2/MAE 都能重建，MAE rFID 最好但生成不最好。</li>
+            <li>RAE latent 高维，标准 DiT 直接训练会失败。</li>
+            <li>关键理论点：diffusion 加噪让 manifold 变 full-rank，width 要覆盖 token dimension。</li>
+            <li>dimension-dependent schedule shift 很关键，无 shift gFID 会明显变差。</li>
+            <li>noise-augmented decoder training 解决采样 latent OOD。</li>
+            <li>DiT<sup>DH</sup> 用浅而宽的 DDT head 承担高维 denoising。</li>
+            <li>RAE 原文不靠 REPA；RAEv2 进一步说明 REPA 仍然互补。</li>
+            <li>对 FastWAM，RAE 的价值是状态 tokenizer 设计，而不是直接动作建模。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Sources</h2>
+          <ul class="source-list">
+            <li><a href="https://arxiv.org/abs/2510.11690">arXiv: Diffusion Transformers with Representation Autoencoders</a></li>
+            <li><a href="https://rae-dit.github.io/">RAE project page</a></li>
+            <li><a href="https://github.com/bytetriper/RAE">Official RAE GitHub repository</a></li>
+            <li><a href="https://huggingface.co/docs/diffusers/api/models/autoencoder_rae">Diffusers AutoencoderRAE documentation</a></li>
+          </ul>
+        </section>
+
+        <nav class="next-links" aria-label="相关文章">
+          <span>相关：</span>
+          <a href="repa-representation-alignment-diffusion-transformers.html">REPA</a>
+          <a href="raev2-improved-representation-autoencoders.html">RAEv2</a>
+          <a href="langflow-continuous-diffusion-language-modeling.html">LangFlow</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="site-footer">
+      <p>© 一支铅笔</p>
+      <a href="../index.html#top">回到顶部</a>
+    </footer>
+  </body>
+</html>
