@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Demo-JEPA 论文与代码精读：one-shot cross-embodiment imitation、Dreamer Predictor、latent goal planning、V-JEPA 2.1 action-conditioned world model、CEM planning 与 FastWAM 启发。"
+    >
+    <title>Demo-JEPA：把跨具身模仿从动作复制改成 latent goal planning</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+    <script type="application/json" id="paper-metadata">
+{
+  "title": "Demo-JEPA：把跨具身模仿从动作复制改成 latent goal planning",
+  "paper": "https://arxiv.org/abs/2605.20811",
+  "authors": ["Jingyang He", "Guangrun Li", "Jieyu Zhang", "Chengkai Hou", "Zhengping Che", "Shanghang Zhang"],
+  "date": "2026-05-24",
+  "category": "robotics-world-models",
+  "tags": ["demo-jepa", "cross-embodiment-imitation", "one-shot-imitation", "latent-goal-planning", "jepa", "v-jepa-2.1", "world-model", "cem-planning", "dreamer-predictor", "adaptive-goal-updating", "rlbench", "real-robot", "fastwam"],
+  "systems": ["Demo-JEPA", "V-JEPA 2.1", "VPP", "XSkill", "Demo-DP", "Diffusion Policy", "RLBench", "Franka", "UR5e", "Sawyer", "FastWAM"],
+  "datasets": ["RLBench", "Sawyer-Franka paired visual trajectories", "UR5e-Franka real-world trajectories", "Aloha HDF5 format"],
+  "methods": ["latent goal-conditioned planning", "Dreamer Predictor", "embodiment cross-attention", "motion cross-attention", "Conv3D feature fusion", "action-conditioned JEPA world model", "CEM planning", "adaptive goal updating", "temporal perturbation", "action co-training"],
+  "code": "https://github.com/banban3forever/Demo-JEPA",
+  "related_posts": ["posts/leworldmodel-stable-end-to-end-jepa.html", "posts/world-model-robot-learning.html", "posts/latent-world-models.html", "posts/motus-lingbot-va.html", "posts/structural-latent-points-robotic-manipulation.html"],
+  "graph_nodes": ["Demo-JEPA", "Dreamer Predictor", "V-JEPA 2.1", "latent goal", "CEM planner", "Franka", "UR5e", "Sawyer", "RLBench", "FastWAM", "one-shot demonstration", "action-conditioned world model"],
+  "graph_edges": [
+    "Demo-JEPA -> reframes -> cross-embodiment imitation as latent goal planning",
+    "Demo-JEPA -> uses -> V-JEPA 2.1 action-conditioned world model",
+    "Dreamer Predictor -> translates -> source demo into target-compatible latent goal",
+    "Dreamer Predictor -> uses -> embodiment cross-attention",
+    "Dreamer Predictor -> uses -> motion cross-attention",
+    "Dreamer Predictor -> fuses -> current target / embodiment / motion features via Conv3D",
+    "CEM planner -> optimizes -> target robot actions toward latent goal",
+    "adaptive goal updating -> prevents -> premature source-demo progress advancement",
+    "Demo-JEPA -> evaluated_on -> RLBench and real-world UR5e-to-Franka tasks",
+    "Demo-JEPA -> informs -> FastWAM action execution representation"
+  ]
+}
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#paper-reading">Paper</a>
+        <a href="../index.html#notes">AI Game</a>
+        <a href="../index.html#posts">Robot</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading · Robotics World Models</p>
+          <h1>Demo-JEPA：把跨具身模仿从动作复制改成 latent goal planning</h1>
+          <p class="article-dek">
+            这篇论文的核心不是“看一段视频然后直接输出动作”，而是把 source robot 的演示解释成
+            <strong>target robot 可执行的未来 latent goal</strong>。Dreamer Predictor 负责把异构演示翻译到目标具身的 JEPA latent，
+            V-JEPA 2.1 action-conditioned world model 再用 CEM 做在线规划。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.24</span>
+            <span>阅读约 35 分钟</span>
+            <span>arXiv:2605.20811</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            <strong>痛点：</strong>跨具身 imitation 里，source robot 的动作不能直接给 target robot 用，像素未来又包含大量外观和机器人形态差异。
+            <strong>核心招：</strong>Demo-JEPA 把 demonstration 当作“未来意图”的视觉规格，训练 Dreamer Predictor 把
+            \((o^s_i,o^s_{i+\Delta},o^t_k)\) 翻译成 target-compatible latent goal \(\hat z^t_{goal}\)，再由目标机器人自己的 action-conditioned world model
+            用 CEM 搜动作去达到它。
+            <strong>效果：</strong>在 RLBench 和真机 UR5e-to-Franka 上，Demo-JEPA 在 cross-embodiment bridging 和 zero-shot generalization 明显优于 VPP/XSkill；
+            但在最接近训练分布的 behavior grounding 上，VPP 或 Demo-DP 仍可能更强。
+            <strong>代价：</strong>它不是零数据 one-shot：训练阶段仍需要大量 source-target paired visual trajectories、目标机器人交互轨迹、V-JEPA 2.1 初始化和在线 CEM 规划。
+          </p>
+          <dl class="term-list">
+            <dt>核心 insight</dt>
+            <dd>跨具身模仿的 transferable object 不是 action，也不一定是 pixel video，而是 target embodiment 能规划到的 latent future state。</dd>
+            <dt>最值得搬走的设计</dt>
+            <dd>把“执行某个任务”建模为一串可更新的 latent subgoals；动作只是目标机器人在自己的动力学模型里求解出来的局部控制变量。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            任务是 <strong>one-shot cross-embodiment imitation</strong>：测试时给 target robot 一段 source robot 的视觉演示，
+            target robot 要完成同语义任务。source 和 target 可以有不同机械臂、不同运动学、不同动作空间，论文仿真里是 Sawyer-to-Franka，
+            真机是 UR5e-to-Franka。
+          </p>
+          <p>
+            这和普通 behavior cloning 的区别在于：演示视频里的 action 不属于 target robot；这和单纯 video prediction 的区别在于：
+            目标不是预测 source robot 会怎么动，而是把 source 的意图变成 target robot 可达到的状态。Demo-JEPA 的范式更接近
+            <mark>latent goal-conditioned planning</mark>。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>把演示当作什么</th>
+                <th>主要瓶颈</th>
+                <th>Demo-JEPA 的差异</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Action cloning / retargeting</td>
+                <td>source action 或 end-effector trajectory</td>
+                <td>依赖动作对应、机器人标定、运动学 retargeting</td>
+                <td>不直接预测 source action，只预测 target latent goal</td>
+              </tr>
+              <tr>
+                <td>VPP</td>
+                <td>future-aware visual representation</td>
+                <td>in-domain 强，但跨具身和 zero-shot shift 下容易过拟合轨迹规律</td>
+                <td>把 future representation 显式转成 target-compatible goal，再规划执行</td>
+              </tr>
+              <tr>
+                <td>XSkill</td>
+                <td>skill prototype / skill sequence</td>
+                <td>需要抽 skill，复杂接触动作和新配置下匹配不稳</td>
+                <td>不做离散 skill matching，而做连续 JEPA latent goal translation</td>
+              </tr>
+              <tr>
+                <td>Naive V-JEPA latent goal</td>
+                <td>source future latent 直接当 goal</td>
+                <td>V-JEPA latent 本身不保证跨具身可执行</td>
+                <td>Dreamer Predictor 学 source-to-target latent translation</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            Demo-JEPA 分三段：先有目标机器人的 action-conditioned JEPA world model；再训练 Dreamer Predictor 从 source demo 推断 target latent future；
+            最后把 Dreamer 的 latent goal 接到 world model + CEM planner 上执行。
+          </p>
+          <figure class="wide-figure">
+            <img src="../assets/demo-jepa/pipeline.png" alt="Demo-JEPA pipeline">
+            <figcaption>官方 pipeline 图：source demonstration 先被翻译成 target-compatible latent goal，再通过 action-conditioned world model 执行动作规划。</figcaption>
+          </figure>
+          <div class="code-block">
+            <pre><code>source demo segment: (o_s_i, o_s_{i+Delta})
+current target observation/state: (o_t_k, s_t_k)
+  -&gt; shared JEPA encoder E
+       z_t_k, z_s_i, z_s_{i+Delta}: roughly (B, N=16*16, D)
+  -&gt; Dreamer Predictor
+       embodiment cross-attn: target/current asks source/current
+       motion cross-attn: source/future asks source/current
+       Conv3D fusion + self-attention
+       output: z_goal_hat, target-compatible latent future
+  -&gt; action-conditioned world model F_wm
+       rollout candidate actions a_{k:k+H-1}
+  -&gt; CEM planner
+       choose action sequence minimizing latent distance to z_goal_hat
+  -&gt; execute first action, observe new target state
+  -&gt; adaptive goal update: reached goal then advance demo reference; otherwise keep trying</code></pre>
+          </div>
+          <p>
+            关键张量可以按 \(z\in\mathbb{R}^{B\times N\times D}\) 理解。公开配置用 256 crop、patch size 16，所以单帧视觉 token 数 \(N=16\times16=256\)；
+            V-JEPA 2.1 giant encoder 的 hidden dimension 在代码里默认是 1408，action-conditioned predictor 的 predictor dimension 是 1024。
+          </p>
+          <p>
+            这里有一个容易误读的点：Dreamer Predictor 输出的不是语言级“intent token”，也不是 policy hidden state，而是一张保留空间布局的 JEPA latent feature map。
+            它既要表达“source 想把杯子拿起来”，又必须落在 target robot world model 能滚动和比较的 latent manifold 上。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：把 demonstration 从 action 监督改成 latent future specification</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>source robot 的关节、夹爪、速度限制、工作空间和 target robot 不一样。即使两者都能完成“按按钮”，source 的轨迹也不等价于 target 的动作。
+            直接从视频回归 target action 会把“任务语义”和“source embodiment 的运动方式”缠在一起。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>Demo-JEPA 不学 \(a^s\rightarrow a^t\)，而学
+            \((z^t_k,z^s_i,z^s_{i+\Delta})\rightarrow \hat z^t_{goal}\)。source demo 只负责指出语义上应该发生的变化；target current observation 负责告诉模型“这个变化在目标机器人当前状态下应该长什么样”。
+          </p>
+          <p>
+            <strong>为什么会有效：</strong>latent goal 把任务意图和执行机制解耦。目标机器人动作由自己的 world model 和 planner 求解，所以只要 Dreamer 给出的未来 latent 在 target dynamics 下可达，就不需要 source-target action correspondence。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>这个解耦依赖两个前提：JEPA latent 能保留任务相关物体状态，且 action-conditioned world model 足够准确。论文结论里也承认，复杂高精度任务会受 world model 瓶颈限制。
+          </p>
+
+          <h3>创新点 2：Dreamer Predictor 做 source-to-target latent translation</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>直接拿 source future latent 当 planning goal 会失败。论文的 V-JEPA 2.1 naive reference 在仿真和真机表里都是失败项，说明共享 JEPA encoder 并不自动提供跨具身可执行性。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>Dreamer Predictor 有两条 cross-attention：一条学 embodiment correspondence，一条学 source motion。论文公式是：
+          </p>
+          <div class="math-block">
+            \[
+            f_{emb}=\mathrm{Attn}(Q=z^t_k,K=z^s_i,V=z^s_i),\qquad
+            f_{mot}=\mathrm{Attn}(Q=z^s_{i+\Delta},K=z^s_i,V=z^s_i)
+            \]
+            \[
+            f_{fused}=\phi([z^t_k\oplus f_{emb}\oplus f_{mot}]),\qquad
+            \hat z^t_{goal}=T(f_{fused})
+            \]
+          </div>
+          <p>
+            <strong>为什么会有效：</strong>\(f_{emb}\) 让 target 当前状态去对齐 source 当前状态，处理“我现在和演示里的起点怎么对应”；
+            \(f_{mot}\) 从 source current 到 source future 抽运动意图，处理“演示接下来想改变什么”。Conv3D fusion 保留 patch grid 的空间结构，避免简单平均把动作方向和局部接触信息抹掉。
+          </p>
+          <p>
+            <strong>实现细节：</strong>代码在 <code>src/models/dreamer_predictor.py</code> 里实现。<code>DreamerPredictor.forward(xt, yt, yt_plus_1)</code>
+            输入三个 \([B,N,D]\) token map；先得到 <code>x_embodiment</code> 和 <code>y_motion</code>，再 <code>torch.stack([xt, x_embodiment, y_motion], dim=-1)</code> 成
+            \([B,N,D,3]\)，reshape 到 \([B,H,W,D,3]\)。<code>Conv3dFusionNetwork</code> 把 3 个 feature source 先升到 <code>up_dim=64</code>，过多层 kernel \((1,3,3)\) 的 Conv3D，再降回 1 个 fused map。
+          </p>
+
+          <h3>创新点 3：CEM 在 target world model 里执行，而不是把 Dreamer 变成 policy</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>如果 Dreamer 直接输出动作，它又会学到 target 动作分布，跨任务和跨配置的泛化压力很大。尤其 one-shot prompt 的时间进度和 target 当前状态未必严格同步。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>Dreamer 只输出目标 latent；动作由 \(F_{wm}\) roll out 候选序列，CEM 选择让最终 latent 最接近 goal 的动作。
+          </p>
+          <div class="math-block">
+            \[
+            z_k=E(o^t_k),\qquad
+            \hat z_{k+H}=F_{wm}(z_k,s^t_k,a_{k:k+H-1})
+            \]
+            \[
+            a^*_{k:k+H-1}=\arg\min_a d(\hat z_{k+H},\hat z^t_{goal})
+            \]
+          </div>
+          <p>
+            <strong>代价/限制：</strong>CEM 是在线采样优化，算力和延迟比单 forward policy 高；动作维度、action bound、gripper 离散化和 horizon 选择都会影响稳定性。
+            公开部署配置里 CEM 默认 <code>samples=200</code>、<code>topk=10</code>、<code>cem_steps=50</code>、<code>rollout=1</code>、<code>maxnorm=0.1</code>。
+          </p>
+
+          <h3>创新点 4：adaptive goal updating 解决跨具身进度不同步</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>source demo 每过一帧就推进 reference，会假设 target robot 也按同样速度完成子目标。跨具身时 target 可能更慢、路径更绕，固定推进会导致 planner 追逐过早的未来状态。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>执行后计算当前 target latent 和上一个 goal 的距离 \(D_k=d(z^t_{k+1},\hat z^t_{goal})\)。只有 \(D_k&lt;\epsilon\) 时才推进 source reference；否则 bypass Dreamer，继续向旧 goal 规划。
+          </p>
+          <p>
+            <strong>实现细节：</strong><code>app/vjepa_2_1_dreamer_ac/deploy.py</code> 的 <code>select_reference_pair</code> 会把最近观测 latent 放进长度为 <code>queue_horizon=4</code> 的 buffer，
+            取 buffer 到 <code>prev_goal</code> 的最小 L1 距离；小于 <code>l1_threshold</code> 才 <code>pop_and_update()</code>。默认部署配置里阈值是 <code>1.0</code>。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <h3>Stage 0：目标机器人 action-conditioned world model</h3>
+          <p>
+            先训练或加载 V-JEPA 2.1 action-conditioned world model。输入是 target robot 视觉 observation、机器人 state 和 action，输出未来 JEPA latent。
+            代码的 <code>VisionTransformerPredictorAC</code> 会把每一帧的 action token 和 state token 插入视觉 tokens 前面，再用 frame-causal transformer 预测下一段 latent。
+          </p>
+          <h3>Stage 1：Dreamer Predictor</h3>
+          <p>
+            输入是 paired visual trajectories：target 当前帧、target future frame、source current reference、source future reference。
+            训练目标是让 Dreamer 输出接近 target future latent。论文写成 L2：
+          </p>
+          <div class="math-block">
+            \[
+            \mathcal{L}_{pred}=\|\hat z^t_{goal}-z^t_{k+n}\|_2^2
+            \]
+          </div>
+          <p>
+            但公开代码里 <code>app/vjepa_2_1_dreamer_predictor/train.py</code> 实际用的是
+            <code>F.l1_loss(dreamer_output, target_feature, reduction='mean')</code>，MSE 和 cosine loss 都是注释掉的备选项。
+            这属于论文公式和 release code 的轻微差异。
+          </p>
+          <p>
+            论文还加了 temporal perturbation：训练时把 source current reference 从 \(i\) 随机扰动成 \(i+\delta\)，让模型不要过度依赖精确时间对齐。
+          </p>
+          <h3>Stage 2：action co-training</h3>
+          <p>
+            冻结 Dreamer Predictor，微调 \(F_{wm}\)，让 world model rollout 更贴近 Dreamer 生成的 goal distribution。代码里同时算 teacher-forcing 预测
+            <code>z_tf</code> 和 autoregressive rollout <code>z_ar</code>，loss 是二者对 Dreamer target 的误差之和：
+          </p>
+          <div class="math-block">
+            \[
+            \mathcal{L}_{plan}=\|F_{wm}(z^t_k,s^t_k,a_{k:k+n-1})-\hat z^t_{goal}\|^p/p
+            \]
+          </div>
+          <p>
+            公开 config 里 <code>loss_exp=1.0</code>，所以实现更接近 L1；论文正文为 L2 形式。这个阶段的作用不是让 Dreamer 学动作，而是让目标机器人 world model 更适配 Dreamer 的 latent goal 分布。
+          </p>
+          <h3>Inference：one-shot source demo 到动作执行</h3>
+          <ol>
+            <li>加载 source demonstration HDF5，按 <code>ref_data_fps=30</code> 到 <code>ref_target_fps=5</code> 下采样成 reference pool。</li>
+            <li>每个控制 step 读取当前 target image 和 pose，编码成 \(z^t_k\)。</li>
+            <li>选取当前 source reference pair，Dreamer 预测 \(\hat z^t_{goal}\)。如果上一 goal 未达成，则继续复用旧 goal。</li>
+            <li>CEM 在 action space 中采样 delta xyz、rpy、gripper，world model rollout 后用 latent L1/L2 选 top-k 更新分布。</li>
+            <li>执行第一步 action，进入下一轮。</li>
+          </ol>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式和算法逐项讲解</h2>
+          <h3>公式 1：JEPA latent state</h3>
+          <div class="math-block">
+            \[
+            z_k=E(o^t_k),\qquad z_k\in\mathbb{R}^{B\times N\times D}
+            \]
+          </div>
+          <p>
+            \(E\) 是共享视觉 encoder。\(N\) 是 patch token 数，256 crop + patch 16 时 \(N=256\)。\(D\) 是 encoder hidden size。
+            代码里训练和部署常会对 latent 做 <code>F.layer_norm(...)</code>，这会影响距离阈值和 CEM objective 的尺度。
+          </p>
+          <h3>公式 2：Dreamer 的两条 cross-attention</h3>
+          <div class="math-block">
+            \[
+            f_{emb}=\mathrm{Attn}(Q=z^t_k,K=z^s_i,V=z^s_i)
+            \]
+            \[
+            f_{mot}=\mathrm{Attn}(Q=z^s_{i+\Delta},K=z^s_i,V=z^s_i)
+            \]
+          </div>
+          <p>
+            第一条是 target-current query source-current，用于建立跨具身对应；第二条是 source-future query source-current，用于抽 source transition。
+            【不确定】论文公式里第二条 query/key/value 的方向和代码注释略有命名差异；公开代码实际调用是
+            <code>motion_cross_attn(yt, yt_plus_1)</code>，具体 Q/K/V 取决于 <code>CrossAttentionBlock</code> 内部实现。验证方式是继续追 <code>src/models/utils/modules.py</code> 的 forward 签名，并用 hook 打印 attention 输入。
+          </p>
+          <h3>公式 3：Dreamer supervised loss</h3>
+          <div class="math-block">
+            \[
+            \mathcal{L}_{pred}=\|\hat z^t_{goal}-E(o^t_{k+n})\|_2^2
+            \]
+          </div>
+          <p>
+            这是把 source demo 的未来意图监督成 target future latent。实现上公开代码用 L1；这会让训练对局部 outlier 更稳，但也意味着论文表述的 L2 不是 release 默认。
+          </p>
+          <h3>公式 4：CEM planning objective</h3>
+          <div class="math-block">
+            \[
+            a^*=\arg\min_a d(F_{wm}(z^t_k,s^t_k,a),\hat z^t_{goal})
+            \]
+          </div>
+          <p>
+            CEM 维护 action sequence 的均值和方差，采样 \(N\) 条候选，world model rollout，按 final latent 到 goal 的距离取 top-k，再用 momentum 更新均值/方差。
+            代码里的 objective 默认是 patch-token 维度上的平均 L1，gripper channel 会被 clip 或 round。
+          </p>
+          <h3>公式 5：adaptive reference advancement</h3>
+          <div class="math-block">
+            \[
+            D_k=d(z^t_{k+1},\hat z^t_{goal}),\qquad
+            i\leftarrow i+1\ \mathrm{if}\ D_k&lt;\epsilon
+            \]
+          </div>
+          <p>
+            这个规则把 source demo 的时间推进从固定时钟变成“目标是否达到”的反馈。它很简单，但对长任务很关键：没有它，source reference 会在 target 还没完成子目标时继续前滚。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练与推理细节对齐</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>检查点</th>
+                <th>训练时</th>
+                <th>推理时</th>
+                <th>风险</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Source-target 对齐</td>
+                <td>仿真可用 retargeted replay 做时序匹配；真机用 GTCC progress-aware feature alignment</td>
+                <td>只有一段 source prompt，靠 adaptive update 保持进度</td>
+                <td>训练仍需要 paired visual trajectories，不是完全 unaligned imitation</td>
+              </tr>
+              <tr>
+                <td>Dreamer 输入</td>
+                <td>target current、target future、source current、source future 都可见</td>
+                <td>target future 不可见，只输出 latent goal</td>
+                <td>如果 current target 离训练分布太远，goal 可能不可达</td>
+              </tr>
+              <tr>
+                <td>World model rollout</td>
+                <td>Stage 2 同时训练 teacher-forcing 和 autoregressive 预测贴近 Dreamer goal</td>
+                <td>CEM 反复调用 \(F_{wm}\) 评估候选动作</td>
+                <td>短 horizon 稳，长 horizon 累积误差大</td>
+              </tr>
+              <tr>
+                <td>Distance threshold</td>
+                <td>由 latent normalization、任务和 reference fps 间接决定</td>
+                <td><code>l1_threshold</code> 控制是否推进 reference</td>
+                <td>阈值太小会卡住，太大会过早推进</td>
+              </tr>
+              <tr>
+                <td>Action representation</td>
+                <td>README 说不直接用原始 HDF5 action，而是基于下采样 qpos 重新计算 action</td>
+                <td>CEM 采样 delta xyz/rpy/gripper 并发给 server</td>
+                <td>action scale、姿态表示、gripper 语义要和 robot server 严格一致</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            这篇方法的关键 mismatch 不是 teacher forcing，而是 <strong>goal distribution mismatch</strong>：
+            Dreamer 产生的 latent goal 未必像真实 target future latent。Stage 2 的 action co-training 就是在修这个问题，让 \(F_{wm}\) 的 rollout distribution 更贴近 Dreamer goal distribution。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <p>
+            实验分仿真和真机。仿真用 RLBench，source demonstration 来自 Sawyer，target policy 是 Franka；真机用 UR5e 视觉 prompt 指导 Franka。
+            评测按分布偏移强度分三组：Behavior Grounding、Cross-Embodiment Bridging、Zero-Shot Generalization。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Setting</th>
+                <th>Method</th>
+                <th>Behavior</th>
+                <th>Bridging</th>
+                <th>Zero-shot</th>
+                <th>解读</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Simulation</td>
+                <td>VPP</td>
+                <td>0.47</td>
+                <td>0.28</td>
+                <td>0.04</td>
+                <td>in-domain 行为 grounding 最强，但 shift 下掉得很快</td>
+              </tr>
+              <tr>
+                <td>Simulation</td>
+                <td>XSkill</td>
+                <td>0.39</td>
+                <td>0.17</td>
+                <td>0.03</td>
+                <td>skill prototype 对复杂跨具身泛化不足</td>
+              </tr>
+              <tr>
+                <td>Simulation</td>
+                <td>Demo-JEPA</td>
+                <td>0.31</td>
+                <td>0.45</td>
+                <td>0.36</td>
+                <td>不是 behavior suite 最强，但 shift 越大优势越明显</td>
+              </tr>
+              <tr>
+                <td>Real-world</td>
+                <td>VPP</td>
+                <td>0.65</td>
+                <td>0.53</td>
+                <td>0.00</td>
+                <td>熟悉场景强，zero-shot 几乎失效</td>
+              </tr>
+              <tr>
+                <td>Real-world</td>
+                <td>XSkill</td>
+                <td>0.45</td>
+                <td>0.40</td>
+                <td>0.05</td>
+                <td>略有泛化但不稳定</td>
+              </tr>
+              <tr>
+                <td>Real-world</td>
+                <td>Demo-JEPA</td>
+                <td>0.43</td>
+                <td>0.55</td>
+                <td>0.25</td>
+                <td>跨具身和 zero-shot 最强，但绝对成功率仍不高</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            消融最有信息量的是 V-JEPA reference comparison。Naive V-JEPA 2.1 直接拿 source future latent 当 goal 基本失败；
+            Oracle V-JEPA 2.1 用 target ground-truth future latent 当 goal，很强但部署不可用。Demo-JEPA 介于二者之间，说明 Dreamer 的实际作用就是补上
+            “source latent 到 target-compatible latent”的 translation。
+          </p>
+          <p>
+            Conv3D ablation 也支撑方法假设：去掉 Conv3D 改成 mean pooling 后，仿真 zero-shot 从 0.36 降到 0.29，真机 bridging 从 0.55 降到 0.40。
+            这说明 structured spatial-temporal fusion 对跨具身动作尤其重要。
+          </p>
+          <p>
+            需要批判地看三点。第一，训练数据规模不小：仿真 Stage 1 是 86 tasks / 13444 trajectories，Stage 2 是 39 tasks / 8324 trajectories；
+            真机 Stage 1 是 22 tasks / 4508 trajectories，Stage 2 是 19 tasks / 3903 trajectories。第二，zero-shot 是在作者定义的 held-out configuration 上，不等于开放世界泛化。
+            第三，VPP/XSkill 和 Demo-JEPA 的 inductive bias 不同，比较公平性取决于每个 baseline 的 tuning 和数据管线是否同等成熟。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 代码实现笔记</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>文件</th>
+                <th>作用</th>
+                <th>值得注意的点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>src/models/dreamer_predictor.py</code></td>
+                <td>Dreamer Predictor</td>
+                <td>cross-attention + Conv3D fusion + self-attention；fusion 可切换 <code>conv3d</code> 或 <code>mean pooling</code></td>
+              </tr>
+              <tr>
+                <td><code>src/models/ac_predictor.py</code></td>
+                <td>Action-conditioned JEPA predictor</td>
+                <td>每帧插入 action/state tokens；frame-causal attention mask；输出回 encoder embed dim</td>
+              </tr>
+              <tr>
+                <td><code>app/vjepa_2_1_dreamer_predictor/train.py</code></td>
+                <td>Stage 1 训练</td>
+                <td>release code 用 L1 loss；可选 target encoder；对 Dreamer 参数做 max grad norm 1.0</td>
+              </tr>
+              <tr>
+                <td><code>app/vjepa_2_1_dreamer_ac/train.py</code></td>
+                <td>Stage 2 co-training</td>
+                <td>Dreamer no-grad 生成目标；predictor 同时做 teacher-forcing 和 autoregressive rollout loss</td>
+              </tr>
+              <tr>
+                <td><code>app/vjepa_2_1_dreamer_ac/cem_utils.py</code></td>
+                <td>CEM planner</td>
+                <td>默认 action 是 xyz/rpy/gripper；top-k elite 更新 mean/std；可固定 gripper 或只采样 xyz</td>
+              </tr>
+              <tr>
+                <td><code>app/vjepa_2_1_dreamer_ac/deploy.py</code></td>
+                <td>部署闭环</td>
+                <td>socket 连接 robot server；reference pool；adaptive reference advancement；bfloat16 autocast</td>
+              </tr>
+              <tr>
+                <td><code>scripts/rlbench_tools</code></td>
+                <td>仿真数据采集</td>
+                <td>支持多机器人 embodiment 数据采集；README 强调 action 由下采样 qpos 重新计算</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            【不确定】公开仓库里的 config 路径和 README 示例有轻微不一致：README 写 <code>configs/train/vjepa_2_1/...</code>，
+            实际仓库是 <code>configs/train/vjepa_2_1_dreamer_predictor.yaml</code> 这类扁平路径；script 里也有 <code>dremer</code> 拼写问题。
+            合理解释是 README 从内部目录迁移后未完全同步。复现时应以实际仓库路径和 <code>app/main.py --fname configs/train/...</code> 为准。
+          </p>
+          <p>
+            【不确定】论文正文说 Stage 1/Stage 2 使用 L2，代码 release 使用 L1 或 <code>loss_exp=1.0</code>。合理猜测：作者内部实验可能用过 L2，release 改成 L1 以稳定训练；
+            或论文把 latent distance 统一写成平方误差。验证方式是查 checkpoint training logs 或向作者确认最终表格对应的 loss。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 可复现清单</h2>
+          <ul>
+            <li><strong>环境：</strong>Python 3.12、PyTorch、V-JEPA2 代码基、RLBench/PyRep/CoppeliaSim；README 还要求 <code>diffusers==0.11.1</code> 并提示可能要手动删 <code>cached_download</code> import。</li>
+            <li><strong>视觉输入：</strong>crop size 256、patch size 16、tubelet size 2、FPS 5、context frames 8；augmentation 论文表里是 disabled。</li>
+            <li><strong>优化：</strong>AdamW、base lr \(4.25\times10^{-4}\)、warmup 15 epochs、total 315 epochs、weight decay 0.04。</li>
+            <li><strong>Stage 0：</strong>predictor depth 24、embed dim 1024、heads 16、frame-causal true、modality embedding true。</li>
+            <li><strong>Stage 1：</strong>batch size 16、Conv3D fusion、4 self-attn blocks、MLP ratio 4.0、up dim 64、LayerNorm、init std 0.02。</li>
+            <li><strong>Stage 2：</strong>batch size 16，重点检查 Dreamer 是否 freeze、world model predictor 是否 unfreeze、teacher-forcing 与 autoregressive loss 是否都开。</li>
+            <li><strong>数据格式：</strong>Aloha HDF5，至少要有 <code>observations/images/&lt;camera_key&gt;</code>、<code>observations/qpos</code>、重新计算的 <code>action</code>。</li>
+            <li><strong>真机对齐：</strong>UR5e 和 Franka 独立演示要做 progress-aware alignment；论文用 GTCC feature alignment，仓库没有把这部分写成开箱即用 pipeline。</li>
+            <li><strong>部署：</strong>调 <code>l1_threshold</code>、<code>queue_horizon</code>、CEM <code>samples/topk/steps/maxnorm</code>；这些比论文正文更影响真机稳定性。</li>
+            <li><strong>安全：</strong>CEM 输出是 delta pose 和 gripper 指令，真机必须有 workspace clamp、速度限制、碰撞检查和 emergency stop。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 对 FastWAM / 具身操作的启发</h2>
+          <p>
+            对我们之前讨论的 WAM/FastWAM，这篇最有用的不是 JEPA 这个名字，而是 action execution 的建模边界：
+            <strong>不要把 one-shot 样本直接建成 action sequence；把它建成目标系统可执行的 latent progress specification。</strong>
+          </p>
+          <dl class="term-list">
+            <dt>改动点 1：从 action token 转成 goal/progress token</dt>
+            <dd>如果你没有标准化 action，就让一次任务执行产生 \(g_1,g_2,\ldots,g_m\) 这样的 latent subgoal/progress tokens。动作由后端 controller 或 planner 解。</dd>
+            <dt>改动点 2：intent token 不必是离散类别</dt>
+            <dd>MINT 那种 intent token 可以借鉴，但在这里更适合做 continuous latent intent：它应该能被世界模型比较、rollout、更新，而不是只给 policy 做 conditioning。</dd>
+            <dt>改动点 3：execution module 要和 representation 解耦</dt>
+            <dd>FastWAM 可以让 high-level module 预测“下一步世界应该变成什么”，low-level module 用自己的动作空间实现。这样新 embodiment 只需要重训/适配 low-level dynamics。</dd>
+            <dt>改动点 4：进度判断比动作预测更重要</dt>
+            <dd>adaptive goal updating 是一个很实用的闭环机制。FastWAM 里也应该有 reachability/progress score，而不是按固定时间推进 subgoal。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <h2>11. 可能的改进方向</h2>
+          <ol>
+            <li>
+              <strong>Uncertainty-aware latent goal。</strong>
+              改动点：Dreamer 输出 goal distribution 或 ensemble uncertainty；预期收益：planner 避免追不可达 goal；风险：CEM objective 更复杂；验证：按 uncertainty 分桶看成功率和回退次数。
+            </li>
+            <li>
+              <strong>Learned progress model 替代固定阈值。</strong>
+              改动点：训练一个 \(p(\mathrm{reached}\mid z_t,\hat z_{goal},history)\)；预期收益：不同任务不用手调 L1 threshold；风险：需要 reached 标签或自动标注；验证：与固定阈值比较 long-horizon completion。
+            </li>
+            <li>
+              <strong>多视角/3D latent goal。</strong>
+              改动点：把 Dreamer goal 从单视角 JEPA patch map 扩展到多视角或 3D latent points；预期收益：减少遮挡和接触歧义；风险：数据采集和配准成本上升；验证：遮挡、多物体、需要绕障抓取的任务。
+            </li>
+            <li>
+              <strong>CEM + diffusion policy hybrid。</strong>
+              改动点：用 diffusion policy 提供 action proposal，CEM/world model 做 rerank 或修正；预期收益：保留 DP 的局部动作先验，同时保留 world model zero-shot 能力；风险：两个模块误差耦合；验证：behavior grounding 和 zero-shot 同时测。
+            </li>
+            <li>
+              <strong>不成对 demonstration training。</strong>
+              改动点：把 paired trajectory alignment 改成 cycle consistency、optimal transport 或 contrastive progress matching；预期收益：降低跨机器人数据采集门槛；风险：语义错配更难排查；验证：逐步减少 paired data，比较 Dreamer goal accuracy。
+            </li>
+            <li>
+              <strong>Contact-aware latent distance。</strong>
+              改动点：planner objective 不只比较平均 token L1，而加 object/contact/keypoint 权重；预期收益：高精度接触动作更稳；风险：需要分割、关键点或触觉监督；验证：按按钮、开合盖、插入类任务。
+            </li>
+          </ol>
+        </section>
+
+        <section class="article-section">
+          <h2>12. 速读备忘卡</h2>
+          <ul>
+            <li>Demo-JEPA 解决的是 cross-embodiment imitation，不是普通 BC。</li>
+            <li>它的核心不是预测动作，而是把 source demo 翻译成 target-compatible latent goal。</li>
+            <li>Dreamer Predictor 输入 target current、source current、source future，输出 target future latent。</li>
+            <li>两条 cross-attention 分别处理 embodiment correspondence 和 source motion。</li>
+            <li>Conv3D fusion 保留空间结构，消融显示对真实跨具身和复杂动作有帮助。</li>
+            <li>动作由 V-JEPA 2.1 action-conditioned world model + CEM 规划出来。</li>
+            <li>adaptive goal updating 用 latent distance 判断是否推进 source reference。</li>
+            <li>论文说 L2，公开代码 Stage 1/Stage 2 更像 L1，需要复现时确认。</li>
+            <li>Demo-JEPA 在 behavior grounding 不一定赢；它赢在 distribution shift 变大时。</li>
+            <li>训练不是零数据：需要 paired visual trajectories 和 target action trajectories。</li>
+            <li>对 FastWAM 的启发：one-shot task execution 应该建成 latent progress/subgoal，而不是硬编码 action。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Sources</h2>
+          <ul class="source-list">
+            <li><a href="https://arxiv.org/abs/2605.20811">Demo-JEPA arXiv abstract</a> / <a href="https://arxiv.org/pdf/2605.20811">PDF</a></li>
+            <li><a href="https://log2r.github.io/Demo-JEPA/">Demo-JEPA project page</a></li>
+            <li><a href="https://github.com/banban3forever/Demo-JEPA">Official code: banban3forever/Demo-JEPA</a></li>
+            <li><a href="https://github.com/facebookresearch/vjepa2">V-JEPA2 codebase referenced by Demo-JEPA</a></li>
+            <li><a href="https://github.com/stepjam/RLBench">RLBench benchmark and simulation environment</a></li>
+          </ul>
+        </section>
+
+        <nav class="next-links" aria-label="相关文章">
+          <a href="leworldmodel-stable-end-to-end-jepa.html">LeWorldModel / JEPA</a>
+          <a href="latent-world-models.html">潜空间世界模型</a>
+          <a href="world-model-robot-learning.html">机器人世界模型综述</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="site-footer">
+      <a href="../index.html">首页</a>
+      <a href="#">回到顶部</a>
+    </footer>
+  </body>
+</html>
