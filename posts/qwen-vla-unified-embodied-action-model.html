@@ -1,0 +1,584 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Qwen-VLA 论文精读：Qwen3.5-4B VLM、DiT flow-matching action decoder、T2A text-to-action pretraining、embodiment-aware prompt、统一 manipulation / navigation / egocentric trajectory。"
+    >
+    <title>Qwen-VLA：把 manipulation、navigation 和轨迹预测塞进同一个动作接口</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+    <script type="application/json" id="paper-metadata">
+{
+  "title": "Qwen-VLA：把 manipulation、navigation 和轨迹预测塞进同一个动作接口",
+  "paper": "https://arxiv.org/abs/2605.30280",
+  "pdf": "https://arxiv.org/pdf/2605.30280",
+  "project": "https://qwen.ai/blog?id=qwenvla",
+  "authors": ["Qwen Team", "Qiuyue Wang", "Mingsheng Li", "Jian Guan", "Jinhui Ye", "Sicheng Xie", "Yitao Liu", "Junhao Chen", "Zhixuan Liang", "Jie Zhang", "Xintong Hu", "Xuhong Huang", "Pei Lin", "Junyang Lin", "Dayiheng Liu", "Shuai Bai", "Jingren Zhou"],
+  "date": "2026-05-29",
+  "category": "robotics-world-models",
+  "tags": ["qwen-vla", "vision-language-action", "multi-embodiment", "flow-matching", "diffusion-transformer", "text-to-action", "t2a-pretraining", "embodiment-aware-prompt", "trajectory-prediction", "vln", "robot-manipulation", "egocentric-human-data", "qwen3.5", "fastwam"],
+  "systems": ["Qwen-VLA", "Qwen-VLA-Base", "Qwen-VLA-Instruct", "Qwen3.5-4B", "DiT action decoder", "ROBOINF", "SimplerEnv", "ALOHA", "DOMINO", "LIBERO", "RoboCasa-GR1", "RoboTwin 2.0", "VLN-CE", "R2R", "RxR", "FastWAM"],
+  "datasets": ["RobotSet", "Galaxea", "AgiBot World", "RoboCOIN", "RoboMIND V1/V2", "RDT-1B", "DROID", "BridgeData V2", "RH20T", "RT-1", "BC-Z", "Ego4D", "EPIC-KITCHENS", "EgoDex", "EgoVerse", "Xperience", "ROBOINF synthetic data", "VLN-CE", "R2R", "RxR", "autonomous driving VQA", "spatial grounding data"],
+  "methods": ["unified action-and-trajectory prediction", "embodiment-aware prompt conditioning", "zero-padding action projection", "per-dataset quantile normalization", "DiT flow matching", "Text-to-Action DiT pretraining", "continued pretraining", "multi-task SFT", "PPO over flow-matching action chunks", "SDE log-prob estimation", "view-specific camera tags"],
+  "code": "https://github.com/QwenLM/Qwen-VLA",
+  "related_posts": ["posts/procvlm-procedure-grounded-progress-rewards.html", "posts/demo-jepa-cross-embodiment-imitation.html", "posts/motus-lingbot-va.html", "posts/world-model-robot-learning.html", "posts/vla-policies.html"],
+  "graph_nodes": ["Qwen-VLA", "Qwen3.5-4B", "DiT action decoder", "T2A", "embodiment-aware prompt", "unified action tensor", "flow matching", "ROBOINF", "PPO for flow policies", "ALOHA", "DOMINO", "FastWAM"],
+  "graph_edges": [
+    "Qwen-VLA -> extends -> Qwen3.5-4B from VLM to VLA",
+    "Qwen-VLA -> uses -> DiT flow-matching action decoder",
+    "T2A -> pretrains -> action decoder as language-conditioned decompressor",
+    "embodiment-aware prompt -> specifies -> robot platform / control convention / horizon",
+    "unified action tensor -> masks -> heterogeneous action dimensions",
+    "ROBOINF -> generates -> synthetic VLA and language-action trajectories",
+    "Qwen-VLA-Instruct -> applies -> PPO after multi-task SFT",
+    "PPO for flow policies -> estimates -> log-prob through noisy Euler transitions",
+    "Qwen-VLA -> evaluates_on -> LIBERO / Simpler / RoboCasa / RoboTwin / VLN-CE / DOMINO",
+    "Qwen-VLA -> informs -> FastWAM multi-embodiment action interface"
+  ]
+}
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#paper-reading">Paper</a>
+        <a href="../index.html#notes">AI Game</a>
+        <a href="../index.html#posts">Robot</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading · Robotics World Models</p>
+          <h1>Qwen-VLA：把 manipulation、navigation 和轨迹预测塞进同一个动作接口</h1>
+          <p class="article-dek">
+            这篇论文的核心不是“又做了一个机器人 policy”，而是把具身任务统一成
+            <strong>conditioned action-and-trajectory prediction</strong>：同一个 Qwen3.5 VLM backbone，
+            同一个 DiT flow-matching action decoder，通过 embodiment prompt 和 mask 处理不同机器人、不同控制频率、不同动作维度。
+            最值得注意的是 T2A：先让 DiT 在没有图像的情况下学会“语言到动作的解压”，再把视觉 grounding 接上去。
+          </p>
+          <div class="article-meta">
+            <span>2026.05.29</span>
+            <span>阅读约 40 分钟</span>
+            <span>arXiv:2605.30280</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            <strong>痛点：</strong>现有 embodied models 往往按 manipulation、navigation、dexterous hand、egocentric human trajectory 分裂成不同模型和接口，很难像 VLM 一样统一扩数据。
+            <strong>核心招：</strong>Qwen-VLA 用 Qwen3.5-4B 做视觉语言 backbone，再接一个约 1.15B 参数的 DiT flow-matching action decoder；
+            所有任务都写成“图像/视频 + 指令 + 具身描述 -> 连续动作或轨迹 chunk”，并用 T2A、CPT、SFT、RL 四阶段训练。
+            <strong>效果：</strong>Qwen-VLA-Instruct 在 LIBERO 97.9、Simpler-WidowX 73.7、RoboTwin Easy/Hard 86.1/87.2、R2R OSR 69.0、RxR SR 59.6，真实 ALOHA OOD 平均 76.9，DOMINO zero-shot SR 26.6。
+            <strong>代价：</strong>它靠巨大混合数据和复杂训练 recipe；统一接口并不等于统一物理语义，很多泛化仍来自 prompt、mask、normalization 和数据覆盖。
+          </p>
+          <dl class="term-list">
+            <dt>这篇到底在解决什么</dt>
+            <dd>把“机器人控制任务长得很不一样”改写成“都在预测未来动作/轨迹张量”。统一的不是每个维度的物理含义，而是模型接口、训练目标和条件上下文。</dd>
+            <dt>核心 insight</dt>
+            <dd>T2A 很关键：先把 DiT 训练成语言条件下的动作分布解压器，后续视觉训练才不需要同时学动作先验、视觉 grounding、denoising 动力学和机器人 convention。</dd>
+            <dt>代码状态</dt>
+            <dd>论文首页给出 <code>https://github.com/QwenLM/Qwen-VLA</code>，但我在 2026-05-29 查询 GitHub API 和 README 都是 404。因此下面的实现解读以论文报告为准，不把未公开代码当作事实。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            Qwen-VLA 是一个 <strong>generalist VLA / VLN / trajectory prediction foundation model</strong>，目标不是只刷某个 manipulation benchmark，
+            而是证明 manipulation、navigation、人类第一视角手部运动、自动驾驶轨迹/VQA、空间 grounding 可以在同一个 VLM+action-decoder 框架里共同训练。
+          </p>
+          <p>
+            和 π0/π0.5、OpenVLA、RDT-1B、GR00T 这类路线相比，它的关键差异有三点：
+            第一，它把 navigation waypoint 和 robot action 都看成连续轨迹 chunk；
+            第二，它不用每个 embodiment 一个专门架构，而用文字 prompt 描述平台和控制 convention；
+            第三，它把动作 decoder 的预训练拆出一个纯 text-to-action 阶段，避免刚接视觉时 decoder 还不会“动作语言”。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>动作接口</th>
+                <th>主要问题</th>
+                <th>Qwen-VLA 的差异</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Specialist policy</td>
+                <td>每个 benchmark / robot 单独训</td>
+                <td>强但碎片化，跨平台迁移弱</td>
+                <td>一个 generalist 模型横跨 LIBERO、Simpler、RoboCasa、RoboTwin、VLN</td>
+              </tr>
+              <tr>
+                <td>VLM + action head</td>
+                <td>通常只针对一种 action space</td>
+                <td>不同维度、频率、控制语义很难拼</td>
+                <td>统一成 \(Y\in\mathbb{R}^{H\times K}\)，用 mask 和 prompt 区分语义</td>
+              </tr>
+              <tr>
+                <td>纯 VLA imitation</td>
+                <td>demo likelihood</td>
+                <td>SFT 不直接优化闭环成功</td>
+                <td>SFT 后再用 SimplerEnv sparse success reward 做 PPO</td>
+              </tr>
+              <tr>
+                <td>视觉预测式 world model</td>
+                <td>预测 future image / latent</td>
+                <td>可解释但动作落地仍要规划</td>
+                <td>强调直接输出 executable action chunk</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            论文的宏观 pipeline 可以压成下面这条链：
+          </p>
+          <figure class="wide-figure">
+            <img src="../assets/qwen-vla/overview.png" alt="Qwen-VLA architecture overview">
+            <figcaption>Qwen-VLA 的整体定位：同一个 Qwen3.5 VLM backbone 加 DiT action decoder，同时服务 VLA、VLN 和普通 VL 理解任务。</figcaption>
+          </figure>
+          <div class="code-block">
+            <pre><code>visual context o_t: images / video / history window
+instruction x: natural language task
+embodiment prompt e: robot tag, arm count, control convention, FPS, chunk size
+optional task id z
+  -&gt; Qwen3.5-4B VLM backbone
+       early-fused visual/text tokens
+       multi-view images are wrapped by view tags
+  -&gt; hidden states condition the action expert
+  -&gt; DiT flow-matching action decoder
+       input: noisy action/trajectory chunk Y_tau, timestep tau
+       output: velocity field v_theta
+  -&gt; Euler denoising
+       output: clean action / waypoint trajectory Y_{t:t+H-1}</code></pre>
+          </div>
+          <figure class="wide-figure">
+            <img src="../assets/qwen-vla/training-recipe.png" alt="Qwen-VLA training recipe">
+            <figcaption>四阶段训练：T2A 只训练 DiT 动作解码器；CPT 接视觉并解冻；SFT 做多任务和真机分支；RL 用环境成功奖励做闭环优化。</figcaption>
+          </figure>
+          <p>
+            关键张量是 \(Y\in\mathbb{R}^{H\times K}\)。\(H\) 是预测 horizon，\(K\) 是最大通道数。
+            某个 embodiment 实际只用前 \(c\le K\) 个通道，剩下 zero-pad；有效位置由 mask \(M\in\{0,1\}^{H\times K}\) 标记。
+            这样 DiT 参数共享，但每个数据源保留自己的控制 convention。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新点 1：统一的是张量接口，不是强行统一物理语义</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>不同机器人数据的 action semantics 差异太大：WidowX 是 delta EEF + gripper，ALOHA 可有 dual arm joint，dexterous hand 有 hand joints，VLN 是 \((\Delta x,\Delta y,\Delta\theta)\) waypoint。
+            如果硬转成一个物理动作空间，会丢语义或引入大量 retargeting 假设。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>每个样本都放进同一个 \(H\times K\) 张量，实际有效通道前置，剩余 padding；同时 prompt 明确告诉模型当前平台、控制频率、horizon 和 control convention。
+          </p>
+          <div class="math-block">
+            \[
+            Y \in \mathbb{R}^{H\times K},\qquad
+            M_{h,k}=1 \Leftrightarrow k<c\ \text{and}\ h\le H_{task}
+            \]
+          </div>
+          <p>
+            <strong>为什么会有效：</strong>它把“多 embodiment”从架构问题变成条件建模问题：DiT 只需要学“在当前 prompt 规定的坐标系里输出有效通道”。
+            对大模型来说，文字 prompt 是强条件；对优化来说，mask 能阻止 padding 维度污染梯度。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>这不是物理层面的真统一。两个 dataset 的第 1 维都放在 \(Y_{:,0}\)，但可能一个是 EEF x delta，一个是 joint angle。
+            模型必须靠 prompt 和数据分布区分它们；如果 prompt 不清楚或数据冲突，泛化会变脆。
+          </p>
+
+          <h3>创新点 2：embodiment-aware prompt conditioning</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>多机器人训练常见做法是给每个机器人一个 adapter/head，或者靠 hidden robot id。这样能跑，但可扩展性差，也不自然支持新平台。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>每条数据前都加一段自然语言描述：
+          </p>
+          <div class="code-block">
+            <pre><code>The robot is {robot_tag} with {single arm / dual arms}[, waist][, and mobile base].
+The control frequency is {FPS} Hz.
+Please predict the next {chunk_size} control actions to execute the following task:
+{ori_instruction}.</code></pre>
+          </div>
+          <p>
+            <strong>为什么会有效：</strong>它利用 VLM 已有的 instruction following 能力，把 embodiment choice 变成可读条件。
+            更重要的是，FPS 和 chunk size 明确规定了 action token 的时间语义，否则同一个 \(H=16\) 在不同控制频率下代表完全不同的物理时间。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>prompt conditioning 的边界是：它只能表达“已知 convention”，不能凭空解决 kinematics retargeting。
+            新 robot 如果动作维度、控制 delay、夹爪语义和训练分布差很多，仍需要数据或校准。
+          </p>
+
+          <h3>创新点 3：DiT flow-matching action expert</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>VLM 本体适合离散 token prediction，但机器人动作是高频连续信号。直接让 LM head 产数字或离散动作 token，会在精度和稳定性上吃亏。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>Qwen-VLA 在 VLM 后接单流 DiT action expert。它把 VLM hidden states 和 noisy action chunk 拼到一个序列里，经过 self-attention、AdaLN timestep conditioning、多段 RoPE，最后预测 flow velocity。
+            论文报告 action expert 约 1.15B 参数，其中 16 个 DiT blocks 占 1.13B。
+          </p>
+          <div class="math-block">
+            \[
+            Y_\tau=(1-\tau)Y_0+\tau Y_1,\qquad Y_1\sim\mathcal{N}(0,I)
+            \]
+            \[
+            v_\theta(Y_\tau,\tau\mid o_{1:t},x,e,z)\approx Y_1-Y_0
+            \]
+          </div>
+          <p>
+            <strong>为什么会有效：</strong>VLM 负责“看懂任务、物体、空间关系、机器人 convention”，DiT 负责“把连续轨迹采样出来”。
+            这类似把认知和小脑式运动生成分开：backbone 不必承受连续动作细节，decoder 也不必从零学视觉语义。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>DiT 很重，推理要几步 Euler integration；如果实时控制频率很高，latency、batching、action chunk overlap 都会成为工程问题。
+          </p>
+
+          <h3>创新点 4：T2A，把动作 decoder 先训成语言条件解压器</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>如果一开始就联合图像、语言、动作训练，随机初始化的 DiT 既要学 action distribution，又要学 flow denoising，又要学视觉 grounding。
+            同时每一步还要跑图像编码，成本高，且噪声梯度可能扰动已经很强的 VLM backbone。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>Stage I 冻结 VLM，只训练 DiT；输入只有 task instruction 和 embodiment prompt，不给图像。
+            作者把这看成 compression/decompression：语言里的“pick up the red cup”很短，但动作轨迹是几百上千维连续数值；T2A 让 decoder 先学会从压缩语义解压出动作分布。
+          </p>
+          <figure class="wide-figure">
+            <img src="../assets/qwen-vla/t2a-ablations.png" alt="Qwen-VLA T2A ablations">
+            <figcaption>T2A 消融：约 20% synthetic + 80% real、full-sequence prediction、T2A 用 Sigmoid-Normal timestep、训练 2k steps 最好。</figcaption>
+          </figure>
+          <p>
+            <strong>为什么会有效：</strong>T2A 先建立“语言意图 -> 动作分布区域”的先验，后续 CPT 才能把视觉变量接入这个先验，而不是边学运动语法边学视觉。
+            消融里，纯 real T2A 是 51.04，纯 synthetic 是 64.06，约 20% synthetic + 80% real 达 71.09；full sequence 比 chunk 更强；T2A 加图像反而降 2.87 pp。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>T2A 学到的是“语言平均动作 prior”，没有视觉时不能处理具体物体位置。它必须被后续 CPT/SFT grounding，否则会产生语义合理但场景不对的动作。
+          </p>
+
+          <h3>创新点 5：PPO 接到 flow-matching policy 上</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>SFT 只优化 demo likelihood，闭环 rollout 时一旦偏离 demonstration support，policy 可能连锁出错。
+            但 flow-matching policy 没有 autoregressive softmax 那种直接 log-prob，PPO 的 importance ratio 不好算。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>论文把确定性的 probability-flow ODE 转成带噪 Euler step 的 SDE：每个 denoising transition 都变成显式 Gaussian，log-prob 可以解析计算。
+            rollout 时保存中间 denoising states，PPO 更新时用当前参数重算 velocity field。默认每个 rollout 随机选一个 denoising step 来估 log-prob，只多一次 DiT forward。
+          </p>
+          <div class="math-block">
+            \[
+            L_{actor}(\theta)=-\mathbb{E}_t\left[
+              \min(r_t(\theta)\hat A_t,\ \mathrm{clip}(r_t(\theta),1-\epsilon,1+\epsilon)\hat A_t)
+            \right]
+            \]
+            \[
+            L(\theta)=L_{actor}(\theta)+c_vL_{value}(\theta),\qquad \epsilon=0.2,\ c_v=1
+            \]
+          </div>
+          <p>
+            <strong>为什么会有效：</strong>RL 直接优化 task success，不再只模仿 demonstration。论文的 RL rollout 只来自 SimplerEnv，但在 RoboCasa、RoboTwin、LIBERO、DOMINO 上基本保持或小幅提升，说明没有明显 catastrophic forgetting。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>RL 只用 sparse binary reward，仍依赖 simulator 的 ground-truth success；真实世界 RL、contact-rich recovery、long-horizon failure handling 还没有解决。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <p>
+            训练分四段。T2A：冻结 VLM，只训 DiT，输入文本和 embodiment prompt，目标是完整动作序列。CPT：解冻 VLM 和 DiT，在机器人轨迹、人类 egocentric、synthetic simulation、navigation、VL 数据上联合训练。SFT：从 CPT 分出多任务和真机分支，使用高质量 demo、VQA、spatial grounding、VLN。RL：从 multi-task SFT checkpoint 出发，用 SimplerEnv sparse success reward 做 PPO，得到 Qwen-VLA-Instruct。
+          </p>
+          <p>
+            推理时，用户给图像/视频、任务指令和 embodiment prompt。VLM 编码上下文，DiT 从 Gaussian noise 开始，通过少量 Euler steps 从 \(\tau=1\) 积分到 \(\tau=0\)，输出一个 action chunk。
+            对 manipulation 是未来机器人动作；对 VLN 是 waypoint trajectory；对 egocentric human data 是 wrist + hand articulation trajectory。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>训练模块</th>
+                <th>目标</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>T2A</td>
+                <td>text + embodiment prompt，无图像</td>
+                <td>DiT action decoder</td>
+                <td>语言条件 action prior</td>
+              </tr>
+              <tr>
+                <td>CPT</td>
+                <td>图像/视频 + text + action/trajectory</td>
+                <td>VLM + DiT</td>
+                <td>视觉 grounding + 多数据源预训练</td>
+              </tr>
+              <tr>
+                <td>SFT</td>
+                <td>高质量 demo + VL/VLN 数据</td>
+                <td>VLM + DiT</td>
+                <td>任务精度和 instruction following</td>
+              </tr>
+              <tr>
+                <td>RL</td>
+                <td>on-policy rollout</td>
+                <td>policy + value head</td>
+                <td>闭环 task success</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式/算法逐项讲解</h2>
+          <h3>公式 1：masked flow matching loss</h3>
+          <p>
+            对 clean target \(Y_0\in\mathbb{R}^{H\times K}\) 和 noise \(Y_1\)，线性插值得到 \(Y_\tau\)。模型预测 velocity \(v_\theta\)，目标 velocity 是 \(Y_1-Y_0\)。
+            关键是每个 active channel 先单独平均，再对 active channels 均匀平均：
+          </p>
+          <div class="math-block">
+            \[
+            \ell_k=
+            \frac{\sum_{h=1}^{H} M_{h,k}
+            \left(v_\theta(Y_\tau,\tau\mid o_{1:t},x,e,z)-(Y_1-Y_0)\right)^2_{h,k}}
+            {\sum_{h=1}^{H}M_{h,k}}
+            \]
+            \[
+            L_{act}=\mathbb{E}_{\tau,Y_0,Y_1}\left[\frac{1}{c}\sum_{k=0}^{c-1}\ell_k\right]
+            \]
+          </div>
+          <p>
+            实现意义：不同 embodiment 的 channel 数不同，如果直接对所有元素平均，高维机器人会主导梯度。两级平均让每个有效控制维度权重接近一致。
+          </p>
+
+          <h3>公式 2：joint objective</h3>
+          <div class="math-block">
+            \[
+            L=\lambda_{act}L_{act}+\lambda_{vl}L_{vl}
+            \]
+          </div>
+          <p>
+            \(L_{vl}\) 是标准 next-token prediction，覆盖 VQA、caption、spatial grounding、fine-grained embodied action caption 等。
+            它的作用不是直接控制机器人，而是防止 action-heavy co-training 把 Qwen3.5 的视觉语言能力训坏。
+          </p>
+
+          <h3>公式 3：quantile normalization</h3>
+          <div class="math-block">
+            \[
+            \tilde a_d = 2\cdot \frac{a_d-q^k_{01}}{q^k_{99}-q^k_{01}}-1,\qquad
+            \tilde a_d\leftarrow \mathrm{clip}(\tilde a_d,-1,1)
+            \]
+          </div>
+          <p>
+            每个 dataset、每个 action dimension 用 1% 和 99% 分位数归一化。这样不同平台的尺度被压到同一区间，但不会强制它们共享物理含义。
+          </p>
+
+          <h3>公式 4：PPO for flow policy</h3>
+          <p>
+            PPO 仍是经典 clipped objective，但 action 是一个 \(H=16\) 的 action chunk，不是单步 token。论文把每个 chunk 视作一个 transition，reward 和 advantage 都按 chunk 粒度计算。
+          </p>
+          <div class="math-block">
+            \[
+            r_t(\theta)=\frac{\pi_\theta(a_t\mid s_t)}{\pi_{\theta_{old}}(a_t\mid s_t)},\qquad
+            s_t=(o_t,x,e)
+            \]
+          </div>
+          <p>
+            难点在 \(\log\pi_\theta\)。论文通过给 Euler denoising 注入 controlled noise，让每一步是 Gaussian transition，从而能算 log-prob。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练-推理对齐检查</h2>
+          <ul>
+            <li><strong>T2A 训练无图像，推理有图像：</strong>这是故意的。T2A 学 action prior，CPT/SFT 再补视觉 grounding。</li>
+            <li><strong>多 embodiment 共用 DiT：</strong>共用的是 latent decoder 和 tensor interface，不是每个通道的物理语义。prompt 和 mask 是对齐关键。</li>
+            <li><strong>SFT imitation vs RL success：</strong>SFT 优化 demo likelihood，RL 优化 sparse success。RL 只在 SimplerEnv 做，但结果显示在若干外部分布上未明显遗忘。</li>
+            <li><strong>state conditioning 默认不用：</strong>RoboTwin 消融里显式 proprioceptive state 只带来很小增益；论文因此选择让 embodiment prompt 成为默认平台接口。</li>
+            <li><strong>视觉语言能力的保留：</strong>VL data 在复杂 benchmark 上有收益，RoboCasa-GR1 提升 4.9 pp，RoboTwin-2.0 提升 4.6 pp；简单 benchmark 上无明显干扰。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <h3>主结果</h3>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>评测</th>
+                <th>Qwen-VLA-Base</th>
+                <th>Qwen-VLA-Instruct / w pretrain</th>
+                <th>解读</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>LIBERO</td>
+                <td>90.8</td>
+                <td>97.9</td>
+                <td>接近最强 specialist，说明 generalist 没明显牺牲单臂桌面操作</td>
+              </tr>
+              <tr>
+                <td>Simpler-WidowX</td>
+                <td>64.3</td>
+                <td>73.7</td>
+                <td>RL 主要在 SimplerEnv 上做，提升最明显</td>
+              </tr>
+              <tr>
+                <td>RoboTwin Easy / Hard</td>
+                <td>64.3 / 66.4</td>
+                <td>86.1 / 87.2</td>
+                <td>SFT 对双臂任务帮助很大</td>
+              </tr>
+              <tr>
+                <td>Real ALOHA in-domain</td>
+                <td>from scratch 48.5</td>
+                <td>with pretrain 83.6</td>
+                <td>同架构对比，收益主要来自预训练</td>
+              </tr>
+              <tr>
+                <td>Real ALOHA OOD</td>
+                <td>from scratch 36.2</td>
+                <td>with pretrain 76.9</td>
+                <td>颜色、实例、背景、指令泛化都明显更强</td>
+              </tr>
+              <tr>
+                <td>DOMINO zero-shot</td>
+                <td>SR 21.1 / MS 37.4</td>
+                <td>SR 26.6 / MS 39.5</td>
+                <td>动态物体无专门训练仍超过若干 dynamic fine-tuned baseline</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>消融是否支撑结论</h3>
+          <p>
+            T2A 消融比较有说服力：T2A 不是随便 warm start，而是一个特定的语言-动作 prior 学习阶段。
+            图像在 T2A 里反而伤性能，说明它真的想把 decoder 压到“从语言/具身 prompt 解压动作”的角色上。
+            多 embodiment projection 消融也说明 Zero-Padding、Multi-MLP、Concat 性能差异很小，因此轻量 zero-padding 是合理工程选择。
+          </p>
+          <figure class="wide-figure">
+            <img src="../assets/qwen-vla/roboinf-examples.png" alt="ROBOINF examples">
+            <figcaption>ROBOINF 合成数据示例：短程任务和长程任务都被分解成子任务段，为 T2A/CPT 提供多粒度动作监督。</figcaption>
+          </figure>
+
+          <h3>批判点</h3>
+          <ul>
+            <li><strong>数据和算力 confound 很大：</strong>预训练混合包含 10,000+ 小时公开机器人数据、1,000+ 小时私有真机、8M synthetic trajectories、人类 egocentric、导航、自动驾驶 VQA、general VL。性能提升不容易归因到单一设计。</li>
+            <li><strong>generalist vs specialist 对比不完全公平：</strong>specialist 模型可能没有同样的多源预训练和 post-training；Qwen-VLA 也不是“无适配”完成所有真机任务，ALOHA 有 real-world fine-tuning。</li>
+            <li><strong>代码未公开：</strong>论文给出 GitHub 链接但目前 404，很多实现细节无法核对，例如 action decoder 具体配置、T2A sampling、RLinf 集成和数据处理。</li>
+            <li><strong>长期自主部署还没解决：</strong>限制部分也承认，当前评测仍偏短时 benchmark，long-duration failure recovery、episodic memory、world modeling 仍是未来工作。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 可复现清单</h2>
+          <ul>
+            <li>Backbone：Qwen3.5-4B native multimodal VLM。</li>
+            <li>Action decoder：single-stream DiT flow-matching expert，约 1.15B 参数，16 个 DiT blocks。</li>
+            <li>Action tensor：\(Y\in\mathbb{R}^{H\times K}\)，zero-padding + validity mask。</li>
+            <li>Prompt：必须写 robot tag、arm configuration、control frequency、chunk size、task instruction。</li>
+            <li>Normalization：每 dataset 每 action dim 用 1/99 分位归一化到 [-1,1]。</li>
+            <li>Pretraining mix：robot manipulation 74.2%，egocentric 6.0%，navigation 7.5%，synthetic 3.7%，general/spatial/driving/caption 共 8.5%。</li>
+            <li>T2A：无图像，full-sequence prediction，20% synthetic + 80% real 最优，2k steps 最优。</li>
+            <li>SFT loss weight：论文写 VL next-token 0.1，manipulation/navigation action 1.0。</li>
+            <li>RL：PPO + GAE，\(\gamma=0.99\)，\(\lambda=0.95\)，\(\epsilon=0.2\)，actor LR \(5\times10^{-6}\)，value LR \(10^{-4}\)，每 rollout batch 4 epochs。</li>
+            <li>推理：flow action chunk 通过少量 Euler integration 生成，evaluation temperature 从 rollout 的 1.0 降到 0.6。</li>
+          </ul>
+          <p>
+            【不确定】论文没有公开完整训练代码和 checkpoint 配置。合理猜测有三种：
+            1. action decoder 的 DiT hidden size、RoPE section、AdaLN 细节继承内部 Qwen3.5 工程；
+            2. 多数据源 sampling ratio 除 Table 1 外还有 per-dataset temperature/power sampling；
+            3. 真机 ALOHA fine-tune 使用了额外数据清洗和 action smoothing。
+            验证方式是等官方仓库开放，优先查 configs、dataset mixer、action projection、RL rollout/logprob 实现。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 对 FastWAM / 具身操作的启发</h2>
+          <p>
+            对你的 FastWAM 来说，最值得搬的不是“Qwen3.5 + 1.15B DiT”这个规模，而是三条表示设计原则。
+          </p>
+          <ol>
+            <li><strong>把 action interface 和物理语义解耦：</strong>可以先统一成 padded action/trajectory tensor，再用 task/embodiment/context prompt 解释维度含义。</li>
+            <li><strong>先学 action prior，再接视觉：</strong>如果你有 one-shot task execution，先把 demonstration 压成 stage/action trajectory prior，再让视觉 observation 做 grounding，会比端到端从图像直接学动作稳定。</li>
+            <li><strong>任务执行不是单步 action，而是 chunk-level trajectory：</strong>Qwen-VLA、Wall-OSS、Demo-JEPA 都在往 chunk/subgoal/action-prior 方向靠。FastWAM 可以把 \(Y_{t:t+H-1}\)、progress state、latent goal 放在同一个 action execution object 里。</li>
+          </ol>
+          <p>
+            一个可用的 FastWAM 建模草图：
+          </p>
+          <div class="code-block">
+            <pre><code>one-shot demo
+  -&gt; parse stages / progress / embodiment convention
+  -&gt; build action prior token or latent trajectory prior
+
+current observation + task + embodiment prompt
+  -&gt; world/action model backbone
+  -&gt; condition on prior + current visual grounding
+  -&gt; predict action chunk + expected progress delta
+  -&gt; execute / monitor / replan</code></pre>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 可能的改进方向</h2>
+          <ul>
+            <li><strong>加 episodic memory / world state：</strong>改动点是让 VLM 输入不止当前帧，而是维护 persistent task state；收益是长程恢复和遮挡处理；风险是上下文成本暴涨；实验用长时收纳/多房间导航验证。</li>
+            <li><strong>动作维度从 zero-padding 改成 schema-aware projection：</strong>收益是减少 prompt 混淆；风险是削弱统一 decoder；实验比较 new robot few-shot adaptation。</li>
+            <li><strong>RL reward 从 binary success 扩展到 progress reward：</strong>可以接 ProcVLM 类 progress estimator；收益是更密集 credit assignment；风险是 reward hacking；实验看 SimplerEnv sparse vs progress-shaped PPO。</li>
+            <li><strong>联合预测 future latent state：</strong>在 action chunk 外加 world-model head；收益是动作后果可检查；风险是训练目标竞争；实验看 DOMINO dynamic 和 failure prediction。</li>
+            <li><strong>公开后做代码级 ablation：</strong>验证 T2A、VL co-training、Zero-Pad、state conditioning 在相同数据预算下的真实贡献，避免把数据规模误当方法贡献。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>11. 速读备忘卡</h2>
+          <ul>
+            <li>Qwen-VLA 的统一对象是 action-and-trajectory chunk，不是单一机器人动作语义。</li>
+            <li>Qwen3.5-4B 负责视觉语言理解，DiT flow decoder 负责连续动作生成。</li>
+            <li>Embodiment prompt 是平台接口：robot tag、arm count、FPS、chunk size、control convention。</li>
+            <li>动作张量 \(H\times K\) 用 zero-padding 和 mask 处理异构维度。</li>
+            <li>T2A 是核心：无图像，先学语言到动作的结构化解压。</li>
+            <li>T2A 最优组合：约 20% synthetic + 80% real、full-sequence、Sigmoid-Normal timestep、2k steps。</li>
+            <li>CPT 把 action prior 接上视觉 grounding；SFT 做 task specialization。</li>
+            <li>PPO 被接到 flow policy 上，靠 noisy Euler transition 估 log-prob。</li>
+            <li>真实 ALOHA 从 scratch 48.5，pretrained fine-tune 83.6；OOD 36.2 到 76.9。</li>
+            <li>代码当前不可核验，方法强但也高度依赖数据规模和工程 recipe。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Sources</h2>
+          <ul class="source-list">
+            <li><a href="https://arxiv.org/abs/2605.30280">Qwen-VLA arXiv abstract</a></li>
+            <li><a href="https://arxiv.org/pdf/2605.30280">Qwen-VLA PDF</a></li>
+            <li><a href="https://qwen.ai/blog?id=qwenvla">Qwen-VLA project/blog page</a></li>
+            <li><a href="https://github.com/QwenLM/Qwen-VLA">Qwen-VLA GitHub link from paper</a>（2026-05-29 查询时返回 404）</li>
+          </ul>
+        </section>
+
+        <nav class="next-links" aria-label="相关文章">
+          <a href="procvlm-procedure-grounded-progress-rewards.html">ProcVLM</a>
+          <a href="demo-jepa-cross-embodiment-imitation.html">Demo-JEPA</a>
+          <a href="world-model-robot-learning.html">World Model for Robot Learning</a>
+        </nav>
+      </article>
+    </main>
+  </body>
+</html>
