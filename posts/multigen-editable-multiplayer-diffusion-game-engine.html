@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="MultiGen 论文精读：可编辑多人扩散游戏引擎、外部记忆、Memory / Observation / Dynamics 模块、Doom/VizDoom 数据、多人一致性评测。"
+    >
+    <title>MultiGen：多人扩散游戏引擎为什么需要外部记忆</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+    <script type="application/json" id="paper-metadata">
+{
+  "title": "MultiGen：多人扩散游戏引擎为什么需要外部记忆",
+  "paper": "https://arxiv.org/abs/2603.06679",
+  "pdf": "https://arxiv.org/pdf/2603.06679",
+  "project": "https://ryanpo.com/multigen/",
+  "authors": ["Ryan Po", "David Junhao Zhang", "Amir Hertz", "Gordon Wetzstein", "Neal Wadhwa", "Nataniel Ruiz"],
+  "date": "2026-06-15",
+  "category": "game-world-models",
+  "tags": ["multigen", "diffusion-game-engine", "external-memory", "multiplayer-world-model", "level-design", "doom", "vizdoom", "shared-world-state", "action-conditioned-video", "game-world-models", "ue-dataset"],
+  "systems": ["MultiGen", "GameNGen", "ControlNet", "IP-Adapter", "split-screen baseline", "Doom", "ViZDoom", "Obsidian level generator", "UE multi-agent dataset proposal"],
+  "datasets": ["100 procedurally generated Doom maps", "10M level-design gameplay frames", "10M multiplayer deathmatch frames", "ViZDoom deathmatch trajectories", "Obsidian-generated layouts"],
+  "methods": ["external memory", "Memory-Observation-Dynamics decomposition", "top-down minimap memory", "ray-traced 1D disparity conditioning", "velocity-parameterized diffusion", "noised-context training", "history guidance", "lightweight transformer dynamics", "distributed shared-memory multiplayer rollout"],
+  "code": "No official code release found as of 2026-06-15; project page provides paper and media demos.",
+  "related_posts": ["posts/ai-game-world-models.html", "posts/cosmos3-omnimodal-world-models-physical-ai.html", "posts/world-model-applications.html", "posts/latent-world-models.html", "posts/prowl-regret-driven-world-model-learning.html"],
+  "graph_nodes": ["MultiGen", "external memory", "Memory module", "Observation module", "Dynamics module", "shared world state", "top-down minimap", "GameNGen", "Doom", "ViZDoom", "UE multi-agent dataset"],
+  "graph_edges": [
+    "MultiGen -> introduces -> external memory for diffusion game engines",
+    "external memory -> stores -> map geometry and player poses",
+    "Memory module -> provides -> ray-traced disparity readout",
+    "Observation module -> generates -> next first-person frame",
+    "Dynamics module -> predicts -> next player pose",
+    "shared world state -> enables -> multiplayer cross-view consistency",
+    "top-down minimap -> enables -> editable level design",
+    "MultiGen -> improves_over -> GameNGen frames-as-state baseline",
+    "MultiGen -> evaluates_on -> Doom and ViZDoom trajectories",
+    "MultiGen -> informs -> UE multi-agent world-model dataset design"
+  ]
+}
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#paper-reading">Paper</a>
+        <a href="../index.html#notes">AI Game</a>
+        <a href="../index.html#posts">Robot</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading · Game World Models</p>
+          <h1>MultiGen：多人扩散游戏引擎为什么需要外部记忆</h1>
+          <p class="article-dek">
+            这篇论文的核心不是“用 diffusion 生成 Doom 画面”，而是给 diffusion game engine 加了一个
+            <strong>显式、可编辑、多人共享的外部记忆</strong>。有了这个 memory，关卡结构不再只藏在最近几帧里；
+            多个玩家也不再各自做一段孤立视频，而是读写同一个 shared world state。
+          </p>
+          <div class="article-meta">
+            <span>2026.06.15</span>
+            <span>阅读约 35 分钟</span>
+            <span>arXiv:2603.06679</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            <strong>痛点：</strong>现有 diffusion game engine 多数把世界状态压在最近几帧里，能短程交互，但很难做可编辑关卡、长程一致性和多人共享世界。
+            <strong>核心招：</strong>MultiGen 把游戏引擎拆成 Memory / Observation / Dynamics：Memory 保存 top-down map 和玩家 pose，Observation 用 diffusion 生成下一帧，Dynamics 用轻量 transformer 更新 pose。
+            <strong>效果：</strong>在 Doom/VizDoom 上，它比 GameNGen、ControlNet、IP-Adapter 更好地保持关卡结构；多人场景中，opponent presence accuracy 从 split-screen baseline 的 65.31% 提到 75.38%。
+            <strong>代价：</strong>显式 memory 只保存了地图和玩家 pose，纹理、小物体、可破坏物等未建模状态仍会漂；实验也局限在 Doom 风格和相对简单的 multiplayer deathmatch。
+          </p>
+          <dl class="term-list">
+            <dt>这篇到底在解决什么</dt>
+            <dd>它解决的是 diffusion world model 的“状态在哪里”问题。仅靠 context frames，模型会把地图、玩家位置、可见对象都混进像素历史；MultiGen 把一部分状态搬到外部 memory。</dd>
+            <dt>核心 insight</dt>
+            <dd>多人世界模型不能只让每个玩家各自滚视频。必须有一个所有玩家共同读写的低维世界状态，否则“我看见你”和“你看见我”很容易在两个生成流里不一致。</dd>
+            <dt>和 UE 多人数据集的关系</dt>
+            <dd>如果你朋友要在 UE 里采多人交互数据，MultiGen 的启发是：录视频不够，必须录可查询的 shared state，例如 map、navmesh、player pose、visibility、event log、AI blackboard。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            MultiGen 处在 <strong>diffusion game engine / interactive video world model</strong> 这一支。
+            它继承 GameNGen 式 next-frame diffusion：给过去几帧和当前 action，生成下一帧。
+            但它认为 frames-as-state 不够，因为最近 \(L\) 帧不是一个可靠的世界状态。
+          </p>
+          <p>
+            论文选 Doom 作为 testbed。这个选择很务实：Doom 是第一人称、动作可控、地图结构清楚、可从 top-down layout 计算几何 readout；
+            又足够像游戏，可以测试 level design 和多人 deathmatch。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>状态表示</th>
+                <th>问题</th>
+                <th>MultiGen 的差异</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>GameNGen / next-frame diffusion</td>
+                <td>最近 \(L\) 帧 + action</td>
+                <td>长程地图结构容易漂；不可直接编辑关卡</td>
+                <td>增加外部 memory，持续查询地图和 pose</td>
+              </tr>
+              <tr>
+                <td>ControlNet / IP-Adapter conditioning</td>
+                <td>把 minimap 当附加条件</td>
+                <td>条件不是可更新的引擎状态</td>
+                <td>memory 是 persistent state，会随 action 更新玩家 pose</td>
+              </tr>
+              <tr>
+                <td>Split-screen multiplayer baseline</td>
+                <td>把两人视角拼成一个视频</td>
+                <td>玩家数固定，状态仍在像素里</td>
+                <td>每个玩家独立生成，但共享同一份世界状态</td>
+              </tr>
+              <tr>
+                <td>传统游戏引擎</td>
+                <td>规则、地图、物理、资产显式</td>
+                <td>渲染和内容非生成式</td>
+                <td>只显式保存 coarse state，像素细节交给 diffusion</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>
+            MultiGen 的 pipeline 很清楚：
+          </p>
+          <figure class="wide-figure">
+            <img src="../assets/multigen/method.png" alt="MultiGen method overview">
+            <figcaption>MultiGen 的三模块架构：Memory 提供地图和 pose；Observation 用 diffusion 生成下一帧；Dynamics 用中间 UNet feature、action 和几何信号更新 pose。</figcaption>
+          </figure>
+          <div class="code-block">
+            <pre><code>at timestep t:
+  Memory:
+    M = top-down level graph
+    p_t = player pose (x, y, yaw)
+    o_{t-L+1:t} = recent visual context
+    r_t = ray-traced disparity from (M, p_t)
+
+  Observation:
+    input = context frames + noised target frame + disparity + action embedding
+    model = velocity-parameterized diffusion UNet
+    output = next gameplay observation o_hat_{t+1}
+
+  Dynamics:
+    input = p_t, action a_t, disparity r_t, intermediate UNet feature f_t
+    model = small transformer encoder
+    output = pose delta Delta p_hat_t
+
+  State update:
+    p_{t+1} = wrap(p_t + Delta p_hat_t)
+    context = shift(context, o_hat_{t+1})</code></pre>
+          </div>
+          <p>
+            这里的关键是：Observation 不负责记住完整世界。它只负责把当前 memory readout 和视觉历史翻译成下一帧。
+            Dynamics 也不负责生成像素，只负责更新低维 state。这个拆分让系统更像“生成式游戏引擎”，而不是“滚动视频模型”。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>3.1 External memory：把关卡结构从像素历史里拿出来</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>GameNGen 这类模型把状态写成最近 \(L\) 帧 \(o_{t-L+1:t}\)。
+            这在短程动作可控上有效，但一旦玩家转身、绕路、回到旧区域，地图结构只能靠模型“记忆”或重建，容易出现墙体、走廊、开口位置漂移。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>MultiGen 显式维护 \(S_t=(M,p_t,o_{t-L+1:t})\)。其中 \(M\) 是静态 level map，\(p_t\) 是玩家 pose，视觉上下文只承担局部外观和短时连续性。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>地图不会因为 context window 滑走而消失。模型每一步都可以从 \(M,p_t\) ray trace 出当前视野的几何信号，把全局结构锚回像素生成。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>memory 里没有的状态不会被保真保存。论文也承认：纹理、小物体、局部 appearance 在 revisit 时仍可能不一致。
+          </p>
+
+          <h3>3.2 Editable minimap：关卡设计变成编辑 memory</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>如果游戏世界完全由视频模型隐式生成，用户很难指定“这里应该有一堵墙”“这个走廊应该通向这里”。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>用 top-down 2D geometry 表示 level：顶点和线段定义可走布局/墙体。用户编辑这个 minimap，就相当于编辑生成引擎的外部 memory。
+          </p>
+          <figure class="wide-figure">
+            <img src="../assets/multigen/level_design_method.png" alt="MultiGen level design via editable memory">
+            <figcaption>Level design 的关键不是生成一个固定地图图片，而是每一步从用户设计的 map memory 中读取几何条件，支撑可复现 rollout。</figcaption>
+          </figure>
+          <p>
+            <strong>为什么有效：</strong>它把“世界布局”从 prompt 变成结构化条件。prompt 描述走廊很容易模糊，2D map 则可以被 ray tracing、collision、visibility 直接使用。
+          </p>
+
+          <h3>3.3 Observation module：像素生成只做它该做的事</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>一个 diffusion UNet 同时要记住地图、估计 pose、推理动作、生成下一帧，负担太重。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>Observation module 接收 recent frames、action embedding 和由 memory ray-trace 得到的 disparity。
+            离玩家近的几何用 inverse depth 强化，再映射成空间 tensor，与上下文帧一起拼到 UNet 输入通道。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>生成器不用从像素里重新推断“前面多远有墙”，因为 depth/disparity 已经把几何局部结构告诉它了。
+          </p>
+
+          <h3>3.4 Dynamics module：用生成过程中的 feature 更新低维 pose</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>如果 pose 完全由规则引擎更新，生成图像可能和 pose 漂；如果 pose 完全从图像后验估计，长程误差会大。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>Dynamics module 输入 action、disparity、当前 pose 和 Observation UNet 的中间 feature，输出 \(\Delta \hat p_t\)。
+            这让低维 state update 既受 action 影响，也能读取模型生成下一帧时形成的视觉/几何表征。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>论文说 pose error 仍会累积。这个模块不是物理引擎，也不是完美 dead reckoning；它只是比完全隐式状态更可控。
+          </p>
+
+          <h3>3.5 Shared memory multiplayer：多人不是 split-screen，而是共享状态</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>把两个玩家视角拼成 split-screen 训练，玩家数固定，且模型仍然要从像素上下文中隐式维护“谁在哪里”。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>每个玩家各自运行 Observation/Dynamics 实例，但所有玩家共享同一个 memory：\(M\) 和 active player poses。
+            玩家死亡就从 shared state 移除，respawn 再加入。
+          </p>
+          <figure class="wide-figure">
+            <img src="../assets/multigen/multiplayer_method.png" alt="MultiGen shared memory multiplayer">
+            <figcaption>多人一致性的核心是 shared world state：两个生成流不是彼此独立的视频，而是同一个 map/pose memory 的不同视角读取。</figcaption>
+          </figure>
+          <p>
+            <strong>为什么有效：</strong>当 Player 1 进入 Player 2 视野，Player 2 的 Observation module 可以从 shared memory 读到 Player 1 的相对位置。
+            这样“对方是否可见”不需要每个玩家模型自己猜。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+          <h3>Level design 数据</h3>
+          <ul>
+            <li>使用 Obsidian map generator 生成 100 个程序化 Doom 地图。</li>
+            <li>用预训练 Doom agent 探索地图。</li>
+            <li>收集超过 1000 万帧 gameplay，配套 action 和 player pose。</li>
+            <li>训练目标是：给 map、initial pose、action sequence，生成与关卡结构一致的第一人称 observation sequence。</li>
+          </ul>
+
+          <h3>Multiplayer 数据</h3>
+          <ul>
+            <li>基于 ViZDoom 收集 deathmatch 序列。</li>
+            <li>设置为一个预训练 agent 对战四个相同 agent。</li>
+            <li>总计超过 1000 万帧。</li>
+            <li>每条序列记录 ego action、所有 active players 的 pose、map layout。</li>
+            <li>论文强调：模型只需要标准 single-view gameplay 数据训练；一致的多视角来自 shared external memory，而不是显式 multi-view supervision。</li>
+          </ul>
+
+          <h3>推理流程</h3>
+          <ul>
+            <li>单人：每步从 \(M,p_t\) ray trace 得到 \(r_t\)，Observation 采样 \(\hat o_{t+1}\)，Dynamics 更新 \(\hat p_{t+1}\)。</li>
+            <li>多人：每个玩家独立生成自己的第一人称帧，但共享同一个 \(M,\{p_t^{(i)}\}\)。</li>
+            <li>实时性：论文报告实现约 20 FPS，使用单个 NVIDIA A100 per player。</li>
+            <li>稳定性技巧：使用 noised-context training 和 history guidance，减小训练时真历史、推理时生成历史之间的 mismatch。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式逐行讲解</h2>
+
+          <h3>公式 1：交互 rollout</h3>
+          <div class="math-block">
+            \[
+            \tau=(o_0,a_0,o_1,a_1,\ldots,a_{T-1},o_T)
+            \]
+          </div>
+          <p>
+            \(o_t\in\mathbb{R}^{H\times W\times C}\) 是第 \(t\) 帧第一人称 observation，\(a_t\in\mathcal{A}\) 是离散动作。
+            传统 diffusion game engine 学的是 \(p(o_{t+1}\mid o_{\le t},a_{\le t})\)，即从历史预测下一帧。
+          </p>
+
+          <h3>公式 2：GameNGen 式 frames-as-state</h3>
+          <div class="math-block">
+            \[
+            S_t=o_{t-L+1:t},\qquad
+            o_{t+1}\sim p_\theta(o\mid S_t,a_t)
+            \]
+          </div>
+          <p>
+            \(L\) 是 context frame 数。这个状态完全由最近 \(L\) 帧表示。
+            实现上就是把多帧图像和 action condition 喂给 diffusion UNet。MultiGen 认为这不适合长程和多人。
+          </p>
+
+          <h3>公式 3：MultiGen 的外部 memory state</h3>
+          <div class="math-block">
+            \[
+            S_t=(M,p_t,o_{t-L+1:t})
+            \]
+            \[
+            M=(V,E),\quad V=\{v_i\}_{i=1}^{N_v},\ v_i\in\mathbb{R}^2,\quad
+            E=\{e_j\}_{j=1}^{N_e},\ e_j\in\{1,\ldots,N_v\}^2
+            \]
+          </div>
+          <p>
+            \(M\) 是地图，由 2D 顶点和线段组成；\(p_t=(x_t,y_t,\theta_t)\) 是玩家在地图坐标系里的位置和朝向。
+            这里的重点是 \(M\) 不随 context window 消失，属于 persistent external memory。
+          </p>
+
+          <h3>公式 4：Observation diffusion objective</h3>
+          <div class="math-block">
+            \[
+            o_{t+1}\sim p_\phi(o\mid o_{t-L+1:t},r_t,a_t)
+            \]
+            \[
+            \mathcal{L}_{obs}=
+            \mathbb{E}_{t,\tau}\left[
+            \left\|v_\phi(\cdot\mid o_{t-L+1:t},r_t,a_t;\tau)-v^\star(o_{t+1},\tau)\right\|_2^2
+            \right]
+            \]
+          </div>
+          <p>
+            \(r_t\) 是从 \(M,p_t\) ray-trace 得到的 disparity 条件；\(\tau\) 是 diffusion timestep；
+            \(v_\phi\) 是 velocity prediction UNet，\(v^\star\) 是标准 velocity target。
+            实现对应：上下文帧 + disparity tensor 作为输入通道，action embedding 通过 cross-attention 注入。
+          </p>
+
+          <h3>公式 5：Dynamics pose update</h3>
+          <div class="math-block">
+            \[
+            \Delta \hat p_t=D_\psi(p_t,a_t,r_t,f_t),\qquad
+            (S_t,a_t)\mapsto(\hat o_{t+1},S_{t+1})
+            \]
+          </div>
+          <p>
+            \(f_t\) 是 Observation UNet denoising 过程中的中间 feature，经 pooling 后和 pose/action/geometry embedding 拼接。
+            \(D_\psi\) 是轻量 transformer encoder，输出平移和角度增量。角度需要 wrap 到规范范围。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练-推理对齐</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>问题</th>
+                <th>训练时</th>
+                <th>推理时</th>
+                <th>MultiGen 的处理</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Context mismatch</td>
+                <td>context 是 ground-truth frames</td>
+                <td>context 是模型自己生成的 frames</td>
+                <td>训练时给 context frames 加随机 Gaussian noise；推理时用 history guidance</td>
+              </tr>
+              <tr>
+                <td>Long-horizon memory</td>
+                <td>每步有真实 pose/map 标签</td>
+                <td>pose 由 Dynamics 预测，会累积误差</td>
+                <td>显式 \(M,p_t\) 减少纯像素漂移，但不能完全消除 pose drift</td>
+              </tr>
+              <tr>
+                <td>Multiplayer visibility</td>
+                <td>训练主要来自 single-view gameplay</td>
+                <td>多玩家同时滚动多个生成流</td>
+                <td>共享 active player poses，让每个玩家从同一 state 读对方位置</td>
+              </tr>
+              <tr>
+                <td>Level editability</td>
+                <td>100 个程序生成地图覆盖布局变化</td>
+                <td>用户可给新 minimap</td>
+                <td>泛化依赖 map distribution；超出 Doom/Obsidian 风格的布局未充分证明</td>
+              </tr>
+              <tr>
+                <td>Appearance consistency</td>
+                <td>纹理和小物体在视频里隐式出现</td>
+                <td>revisit 时未必复现</td>
+                <td>论文承认 memory 不保存 appearance，因此这一点仍弱</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+          <h3>Level design</h3>
+          <p>
+            评测设置是：给同一个初始 observation/pose 和同一个 action sequence，让不同方法 rollout，再和底层 Doom simulator 的 ground truth 比 SSIM、PSNR、LPIPS。
+            表 1 的关键数字如下：
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>方法</th>
+                <th>SSIM All</th>
+                <th>PSNR All</th>
+                <th>LPIPS All</th>
+                <th>后半段 LPIPS</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>IP-Adapter</td>
+                <td>0.415</td>
+                <td>18.74</td>
+                <td>0.488</td>
+                <td>0.578</td>
+              </tr>
+              <tr>
+                <td>ControlNet</td>
+                <td>0.411</td>
+                <td>18.51</td>
+                <td>0.524</td>
+                <td>0.596</td>
+              </tr>
+              <tr>
+                <td>GameNGen</td>
+                <td>0.405</td>
+                <td>18.77</td>
+                <td>0.471</td>
+                <td>0.562</td>
+              </tr>
+              <tr>
+                <td>MultiGen</td>
+                <td>0.418</td>
+                <td>19.32</td>
+                <td>0.453</td>
+                <td>0.505</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            结论是：优势不算压倒性，但在 rollout 后半段更明显。这符合论文论点：external memory 的价值主要体现在长程结构不漂。
+          </p>
+
+          <h3>Multiplayer interaction</h3>
+          <p>
+            多人评测不是直接比 FVD，而是看 opponent presence：当 ground-truth 里对手应可见时，生成帧里是否也出现对手。
+            论文用 VLM 作为 automated judge，计算 accuracy、precision、recall。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>方法</th>
+                <th>Accuracy</th>
+                <th>Precision</th>
+                <th>Recall</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>IP-Adapter</td>
+                <td>62.12%</td>
+                <td>84.62%</td>
+                <td>40.73%</td>
+              </tr>
+              <tr>
+                <td>ControlNet</td>
+                <td>60.71%</td>
+                <td>82.16%</td>
+                <td>39.20%</td>
+              </tr>
+              <tr>
+                <td>Split-screen</td>
+                <td>65.31%</td>
+                <td>86.86%</td>
+                <td>44.59%</td>
+              </tr>
+              <tr>
+                <td>MultiGen</td>
+                <td>75.38%</td>
+                <td>88.12%</td>
+                <td>65.07%</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            真正重要的是 recall：MultiGen 明显更少漏掉应该出现的对手。这说明 shared memory 对“别人在哪里”这个 multiplayer consistency 问题有实质帮助。
+          </p>
+
+          <h3>Context length ablation</h3>
+          <p>
+            \(L=2,4,8,16,32\) 的 ablation 显示，更多 context frames 提升 fidelity：SSIM 从 0.709 到 0.789，PSNR 从 27.6 到 30.0，LPIPS 从 0.121 降到 0.089。
+            但这也说明 external memory 没有替代视觉上下文；它只是补上全局结构，局部 appearance 仍靠 context frames。
+          </p>
+
+          <h3>批判</h3>
+          <ul>
+            <li>评测域很窄：Doom/VizDoom 的几何和视觉复杂度远低于现代 UE 多人游戏。</li>
+            <li>Multiplayer 主要评测对手是否出现，而不是战术、碰撞、弹道、血量、技能、物理交互的一致性。</li>
+            <li>VLM judge 的 presence accuracy 有用，但仍可能受生成质量、遮挡、模型偏差影响。</li>
+            <li>对比 baseline 里 ControlNet/IP-Adapter 不是为 persistent state 设计的；因此它们输给 MultiGen 并不意外。</li>
+            <li>没有官方代码，很多实现细节只能按论文描述复原，不能核对训练超参、UNet 结构、action vocabulary 和 sampler 设置。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 可复现清单</h2>
+          <ul>
+            <li>环境：Doom / ViZDoom，可导出每帧 RGB、action、player pose、map layout。</li>
+            <li>地图：Obsidian 生成 100 个程序化地图；需要把 map 转成 \(V,E\) 顶点/边结构。</li>
+            <li>数据：level design 约 10M frames；multiplayer deathmatch 约 10M frames。</li>
+            <li>Observation：diffusion UNet，输入 recent frames、noised frame、ray-traced disparity；action 用 learned embedding 和 cross-attention。</li>
+            <li>Dynamics：小 transformer encoder，输入 pose/action/geometry/UNet feature，预测 \(\Delta p\)。</li>
+            <li>训练技巧：velocity objective、noised context、pose translation \(L_2\)、wrapped-angle orientation loss。</li>
+            <li>推理技巧：history guidance；多人时每个玩家一套模型实例，但共用 shared memory。</li>
+            <li>评测：SSIM/PSNR/LPIPS 看视觉和结构，opponent presence accuracy/precision/recall 看多人一致性。</li>
+            <li>论文没写清的细节：具体 UNet backbone、diffusion step 数、action 离散空间定义、ray count/FOV、transformer dynamics 层数、VLM judge prompt。</li>
+          </ul>
+          <p>
+            【不确定】官方没有公开代码。合理复现路径有两种：一是从 GameNGen 类 next-frame diffusion baseline 改造，加入 map/pose/disparity channels 和 dynamics head；
+            二是先用低分辨率 latent diffusion 或 UNet 做 proof-of-concept，验证 memory readout 是否提升 consistency。验证方式是先复现表 1 的后半段 LPIPS 和表 2 的 opponent presence recall。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 对 UE 多人 world-model 数据集的启发</h2>
+          <p>
+            这篇对你朋友做 UE 多人数据集很有价值，因为它把“多人 world model 数据到底该录什么”讲清了：
+            <strong>不要只录每个玩家的视频流，要录一个可被所有视角共同引用的 shared state。</strong>
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>MultiGen 里是什么</th>
+                <th>UE 数据集里应该对应什么</th>
+                <th>为什么重要</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Map \(M=(V,E)\)</td>
+                <td>Level geometry、NavMesh、rooms/corridors、cover points、doors</td>
+                <td>让模型知道世界结构，而不是从像素里猜</td>
+              </tr>
+              <tr>
+                <td>Player pose \(p_t\)</td>
+                <td>每个 pawn 的 transform、velocity、team、alive/dead、spawn state</td>
+                <td>多人一致性必须依赖同一个 actor state</td>
+              </tr>
+              <tr>
+                <td>Ray-traced disparity \(r_t\)</td>
+                <td>depth、visibility set、line-of-sight、occlusion mask</td>
+                <td>给 world model 提供几何 grounding</td>
+              </tr>
+              <tr>
+                <td>Action \(a_t\)</td>
+                <td>movement、aim、fire、ability、interact、BT/StateTree decision</td>
+                <td>才能做 action-conditioned rollout 和 policy learning</td>
+              </tr>
+              <tr>
+                <td>Shared memory update</td>
+                <td>event log：hit、death、pickup、capture、respawn、door open</td>
+                <td>跨玩家因果交互不应该只藏在视频里</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="insight">
+            如果 UE proposal 要写得更强，可以直接借 MultiGen 的三分法：
+            <strong>Memory = UE authoritative game state；Observation = 每个 agent 的 RGB/depth/semantic view；Dynamics = engine tick + AI controller + physics/event update。</strong>
+            这样你的数据集天然支持 multi-view consistency、counterfactual rollout 和多人 intent/action 预测。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 改进方向</h2>
+          <ul>
+            <li><strong>把 memory 从 map/pose 扩到 object/event graph -></strong>保存门、物品、弹药、血量、capture point；收益是更复杂互动一致；风险是状态 schema 变重；实验看 event F1 和 object persistence。</li>
+            <li><strong>加 visibility-aware memory readout -></strong>不仅 ray-trace 墙，还输出其他玩家/物体的可见性 token；收益是多人遮挡更准；风险是泄漏不可见信息；实验看 hidden-state ablation。</li>
+            <li><strong>训练 learned dynamics + engine dynamics hybrid -></strong>UE/ViZDoom 规则更新 pose，模型只估计 residual；收益是少积累 drift；风险是泛化到非规则动作弱；实验比较 long rollout pose error。</li>
+            <li><strong>多人 event consistency benchmark -></strong>从 opponent presence 扩展到 kill/hit/pickup/respawn/capture；收益是更接近游戏逻辑；风险是需要高质量 event labels；实验用 event precision/recall。</li>
+            <li><strong>agent internal state supervision -></strong>记录 Behavior Tree node、utility score、current target；收益是 intent model 可训练；风险是脚本 AI 偏差；实验看 intent/action prediction 和 counterfactual planning。</li>
+            <li><strong>从 Doom 扩到 UE 小原型 -></strong>保留 MultiGen memory 架构，但用 UE 录高质量多 agent 数据；收益是更贴近现代多人游戏；风险是数据量和工程成本大；实验先做 capture point / pursuit-evasion。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>11. 速读备忘卡</h2>
+          <ul>
+            <li>MultiGen 的核心是 external memory，不是更大的 diffusion UNet。</li>
+            <li>传统 next-frame game engine 把 state 写成最近 \(L\) 帧，长程和多人都容易漂。</li>
+            <li>Memory 保存 top-down map 和 player pose。</li>
+            <li>Observation 用 diffusion 生成下一帧，条件包括 context frames、ray-traced disparity、action embedding。</li>
+            <li>Dynamics 用轻量 transformer 更新 pose，输入包括 UNet 中间 feature。</li>
+            <li>Level design 等价于编辑 minimap memory。</li>
+            <li>Multiplayer 等价于多个生成流读写同一个 shared world state。</li>
+            <li>数据来自 Doom/ViZDoom，level design 和 multiplayer 各约 10M frames。</li>
+            <li>多人评测最关键数字是 recall：MultiGen 65.07%，split-screen 44.59%。</li>
+            <li>最大局限是 memory 太粗，只保地图和 pose，不保 texture/object/event 的完整状态。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Sources</h2>
+          <ul class="source-list">
+            <li><a href="https://arxiv.org/abs/2603.06679">arXiv abstract: MultiGen</a></li>
+            <li><a href="https://arxiv.org/pdf/2603.06679">PDF: MultiGen: Level-Design for Editable Multiplayer Worlds in Diffusion Game Engines</a></li>
+            <li><a href="https://ryanpo.com/multigen/">Project page</a></li>
+          </ul>
+        </section>
+
+        <nav class="next-links" aria-label="相关文章">
+          <a href="ai-game-world-models.html">AI Game World Models</a>
+          <a href="cosmos3-omnimodal-world-models-physical-ai.html">Cosmos 3</a>
+          <a href="world-model-applications.html">世界模型能做什么</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="site-footer">
+      <a href="../index.html#paper-reading">返回 Paper Reading</a>
+      <a href="#">回到顶部</a>
+    </footer>
+  </body>
+</html>
