@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="γ-World 论文精读：多人生成式世界模型、Simplex Rotary Agent Encoding、Sparse Hub Attention、Cosmos-Predict2.5-2B、Self-Forcing 蒸馏、KV cache、Minecraft 多人世界和机器人协作。"
+    >
+    <title>γ-World：多人 world model 需要交换对称的 agent 轴</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+    <script type="application/json" id="paper-metadata">
+{
+  "title": "γ-World：多人 world model 需要交换对称的 agent 轴",
+  "paper": "https://arxiv.org/abs/2605.28816",
+  "pdf": "https://arxiv.org/pdf/2605.28816",
+  "project": "https://research.nvidia.com/labs/sil/projects/gamma-world/",
+  "code": "https://github.com/nv-tlabs/Gamma-World ; as of 2026-06-15 the repository contains README/assets only, with code, distilled streaming checkpoints, training scripts, and dataset preparation tools marked as coming soon.",
+  "authors": ["Fangfu Liu", "Kai He", "Tianchang Shen", "Tianshi Cao", "Sanja Fidler", "Yueqi Duan", "Jun Gao", "Igor Gilitschenski", "Zian Wang", "Xuanchi Ren"],
+  "date": "2026-06-15",
+  "category": "game-world-models",
+  "tags": ["gamma-world", "multi-agent-world-model", "simplex-rope", "sparse-hub-attention", "permutation-symmetry", "interactive-video-generation", "cosmos-predict2.5", "self-forcing", "kv-cache", "minecraft", "multi-robot-coordination", "ue-dataset", "fastwam"],
+  "systems": ["γ-World", "Gamma-World", "Cosmos-Predict2.5-2B", "Solaris", "Frame concat baseline", "Sparse Hub Attention", "Simplex Rotary Agent Encoding", "Diffusion Forcing", "Self-Forcing", "DMD", "FastWAM", "UE multi-agent dataset proposal"],
+  "datasets": ["Synchronized multi-agent Minecraft trajectories", "2-agent gameplay at 320x480 per view", "4-agent zero-shot evaluation scenes", "RealOmin-Open Dataset", "24-second supplementary rollouts"],
+  "methods": ["flow matching", "latent video diffusion", "causal multi-agent DiT", "4D RoPE with agent axis", "regular simplex agent identity", "random vertex assignment", "sequence concatenation", "hub-mediated cross-agent attention", "block-causal mask", "KV-cached streaming inference", "conditional Self-Forcing distillation", "DMD loss", "rollout-aware training", "per-agent action encoder"],
+  "related_posts": ["posts/multigen-editable-multiplayer-diffusion-game-engine.html", "posts/ai-game-world-models.html", "posts/cosmos3-omnimodal-world-models-physical-ai.html", "posts/qwen-vla-unified-embodied-action-model.html", "posts/procvlm-procedure-grounded-progress-rewards.html", "posts/world-model-applications.html"],
+  "graph_nodes": ["γ-World", "Simplex Rotary Agent Encoding", "Sparse Hub Attention", "hub tokens", "agent axis", "Cosmos-Predict2.5-2B", "Solaris", "multi-agent Minecraft", "RealOmin-Open", "FastWAM", "UE multi-agent dataset"],
+  "graph_edges": [
+    "γ-World -> introduces -> Simplex Rotary Agent Encoding",
+    "Simplex Rotary Agent Encoding -> preserves -> permutation symmetry",
+    "Simplex Rotary Agent Encoding -> enables -> zero-shot two-to-four agent scaling",
+    "γ-World -> introduces -> Sparse Hub Attention",
+    "Sparse Hub Attention -> routes -> agent-to-hub-to-agent communication",
+    "Sparse Hub Attention -> reduces -> cross-agent attention from quadratic to linear",
+    "γ-World -> initializes_from -> Cosmos-Predict2.5-2B",
+    "conditional Self-Forcing -> distills -> bidirectional teacher into causal student",
+    "causal student -> uses -> KV cache for 24 FPS streaming",
+    "γ-World -> improves_over -> Solaris and frame concat baselines",
+    "γ-World -> informs -> UE multi-agent dataset design",
+    "γ-World -> informs -> FastWAM exchangeable agent conditioning"
+  ]
+}
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#paper-reading">Paper</a>
+        <a href="../index.html#notes">AI Game</a>
+        <a href="../index.html#posts">Robot</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Paper Reading · Game World Models</p>
+          <h1>γ-World：多人 world model 需要交换对称的 agent 轴</h1>
+          <p class="article-dek">
+            这篇论文的核心不是“把多个玩家画面拼成一个大视频”，而是给 video world model 明确加上
+            <strong>agent 轴</strong>、<strong>交换对称的身份编码</strong>和<strong>低成本的跨 agent 通信通道</strong>。
+            它回答的是多人 world model 的一个根问题：多个可控主体共享同一个世界时，模型怎样既区分“你我”，又不把“1 号位/2 号位”写死。
+          </p>
+          <div class="article-meta">
+            <span>2026.06.15</span>
+            <span>阅读约 40 分钟</span>
+            <span>arXiv:2605.28816</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            <strong>痛点：</strong>单人 interactive video world model 只要跟随一条 action stream；多人场景还要保证多个视角、多个动作、同一个共享世界之间一致。
+            <strong>核心招：</strong>γ-World 把多人输入组织成 \(P\times T\times H\times W\) 的 agent-time-space latent，用 Simplex Rotary Agent Encoding 给 agent 做无参数、交换对称的身份编码，再用 Sparse Hub Attention 让 agent 通过少量 hub tokens 通信。
+            <strong>效果：</strong>在多人 Minecraft 评测上，γ-World 在 Memory/Grounding/Movement/Building/Consistency 五类任务的 FVD/FID 都明显优于 Frame concat 和 Solaris；并用 causal student + KV cache 做到 24 FPS streaming rollout。
+            <strong>代价：</strong>实现依赖大模型、大算力和蒸馏流程；代码尚未释放；hub 是通信瓶颈，能不能承载复杂多人策略和长程物理仍要更强验证。
+          </p>
+          <dl class="term-list">
+            <dt>这篇到底在解决什么</dt>
+            <dd>它解决的是多人生成式 world model 的 agent identity 和 cross-agent communication 问题。不是“生成更清楚的视频”，而是让多个独立可控 agent 在同一个生成世界里互相看见、互相影响，并且可扩到超过两个玩家。</dd>
+            <dt>核心 insight</dt>
+            <dd>多人世界里的 agent 是 exchangeable entities：同能力玩家不该因为占了 slot 1 或 slot 2 被模型区别对待。身份编码应该“可区分但不偏置槽位”，通信也不该是所有 token 两两全连。</dd>
+            <dt>和 MultiGen 的关系</dt>
+            <dd>MultiGen 的核心是外部 shared memory；γ-World 的核心是把 shared world consistency 做进 transformer 的 agent 轴、RoPE 和 attention mask。一个偏显式状态，一个偏 neural token topology。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <figure class="wide-figure">
+            <img src="../assets/gamma-world/teaser.png" alt="γ-World teaser across game and real-world scenes">
+            <figcaption>项目页 teaser：γ-World 同时展示 Minecraft 多玩家场景和真实机器人双臂/多机器人协作场景。论文主要定量验证仍集中在多人游戏环境。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 论文定位</h2>
+          <p>
+            γ-World 属于 <strong>action-conditioned multi-agent video world model</strong>。
+            输入是多个 agent 的历史观察和动作，输出是每个 agent 下一步或未来一段观察。
+            它不是强化学习里的 compact latent dynamics，也不是传统游戏引擎；它是把 video diffusion transformer 当成视觉模拟器，再补上多人一致性的结构。
+          </p>
+          <div class="equation">
+            \[
+              \gamma\text{-World}\left(\{o^p_{1:t}\}_{p=1}^{P}, \{a^p_{1:t}\}_{p=1}^{P}\right)
+              \rightarrow
+              \{o^p_{t+1}\}_{p=1}^{P}
+            \]
+          </div>
+          <p>
+            这里 \(P\) 是 agent 数，\(o^p_t\) 是第 \(p\) 个 agent 在时间 \(t\) 看到的图像，\(a^p_t\) 是它的动作。
+            关键假设是：\(\{o^p_t\}_{p=1}^{P}\) 不是互不相关的视频，而是同一个 underlying world state 的不同视角。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>范式</th>
+                <th>典型做法</th>
+                <th>瓶颈</th>
+                <th>γ-World 的差异</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Single-agent world model</td>
+                <td>一条 action stream 控制一个观察流</td>
+                <td>没有跨视角一致性约束</td>
+                <td>显式建模 \(P\) 个 agent 的同步 observation/action</td>
+              </tr>
+              <tr>
+                <td>Frame / spatial concat</td>
+                <td>把多玩家视角拼成大画布</td>
+                <td>玩家数变动会改变分辨率和 token 组织</td>
+                <td>Sequence concat，保留每个 agent 独立 stream</td>
+              </tr>
+              <tr>
+                <td>Solaris</td>
+                <td>多人 Minecraft + learned player ID + dense joint attention</td>
+                <td>ID 绑定固定 slot，dense attention 随 agent 数二次增长</td>
+                <td>Simplex RoPE 身份 + Sparse Hub Attention</td>
+              </tr>
+              <tr>
+                <td>MultiGen</td>
+                <td>显式 map/pose memory 维护共享世界</td>
+                <td>依赖可读写的外部状态结构</td>
+                <td>把共享一致性压进 token 拓扑和 attention 结构</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <p>γ-World 的 pipeline 可以压缩成五步：</p>
+          <ol>
+            <li>收集同步多人轨迹：每个时间步有 \(P\) 个 agent 的观察 \(o^p_t\) 和动作 \(a^p_t\)。</li>
+            <li>视觉 tokenization：把未来视频表示成 latent \(Z_0\in\mathbb{R}^{P\times T\times H\times W\times C_z}\)。</li>
+            <li>动作注入：共享 action encoder 把 \(a^p_t\) 映射到 \(u^p_t\in\mathbb{R}^{D}\)，作为每层 transformer token 的 bias。</li>
+            <li>多人 DiT：用 4D RoPE 编码 \(t,p,h,w\)，其中 agent 轴用 regular simplex 的顶点做相位。</li>
+            <li>实时 rollout：先训 bidirectional teacher，再训 causal student，最后用 conditional Self-Forcing + DMD 蒸馏成 few-step causal generator，推理时按 block 生成并维护 KV cache。</li>
+          </ol>
+          <figure class="wide-figure">
+            <img src="../assets/gamma-world/multiagent_method.png" alt="γ-World method overview">
+            <figcaption>方法总览：同步多人输入进入 shared action encoder 和 visual tokenizer；agent 轴通过 simplex RoPE 标识；跨 agent 通信走 hub；推理时 causal student 读写 KV cache。</figcaption>
+          </figure>
+          <pre><code>per-agent observations/actions
+  -> visual tokenizer: Z0 in R^{P x T x H x W x Cz}
+  -> shared action encoder: u_t^p in R^D
+  -> causal multi-agent DiT
+       -> 4D RoPE(t, p, h, w)
+       -> Simplex Rotary Agent Encoding on p
+       -> Sparse Hub Attention for cross-agent messages
+  -> future rollouts for every agent
+  -> streaming with agent KV caches + shared hub KV cache</code></pre>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键创新点</h2>
+
+          <h3>创新 1：把 agent identity 从 learned slot 改成 simplex RoPE</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>如果用 learned player embedding，slot 1 和 slot 2 会变成有语义差别的位置。
+            这违背多人世界的交换性：两个同能力玩家对调编号，世界规律不应该变。
+            如果用线性 agent index \(p\omega\)，agent 1-2、1-4、2-4 的距离也不同，本质上还是给 slot 排了序。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>γ-World 把 agent 放在 regular simplex 的顶点上。所有顶点到顶点的距离相同，所以任意两个 agent 的相对身份距离等价。
+          </p>
+          <div class="equation">
+            \[
+              s_v=\sqrt{\frac{V}{V-1}}\ Q\left(e_v-\frac{1}{V}\mathbf{1}\right),\quad
+              \lVert s_v\rVert^2=1,\quad
+              \lVert s_v-s_{v'}\rVert^2_2=\frac{2V}{V-1}
+            \]
+          </div>
+          <p>
+            \(V\) 是 simplex pool size，\(e_v\) 是第 \(v\) 个 one-hot，\(Q\) 把零均值子空间等距嵌入到 agent-angle space。
+            一个 batch 里只有 \(P\le V\) 个 active agents，训练时随机采样 injective assignment \(\pi\)，把 agent \(p\) 分到顶点 \(s_{\pi(p)}\)。
+          </p>
+          <div class="equation">
+            \[
+              \theta_p=\alpha s_{\pi(p)},\qquad
+              R_{\text{simp-4D}}(t,p,h,w)=
+              \operatorname{diag}\left(R_t(t),R_{\text{simp}}(\pi(p)),R_h(h),R_w(w)\right)
+            \]
+          </div>
+          <p>
+            <strong>为什么有效：</strong>它同时满足两个目标：每个 agent 有不同 phase，模型能区分“这个动作是谁发的”；所有 agent pair 又等距，模型不会偏爱固定 slot。
+            这就是它能从 2-agent 训练 zero-shot 激活到 4-agent inference 的结构基础。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>它支持的最大 agent 数受 simplex pool 和 agent rotary band 限制，论文给出 \(V\le d_p/2+1\)。非常大规模群体可能需要更大的 agent band 或层级分组。
+          </p>
+          <p>
+            <strong>实现细节：</strong>Appendix 写得很具体：模型把 head rotary dimension 分成 \((64,32,16,16)\)，分别对应 \((t,p,h,w)\)；simplex pool size 为 4，训练时只有 2 个 active runtime slots，每步随机采样 2 个顶点并打乱 slot 顺序。
+          </p>
+
+          <h3>创新 2：用 Sparse Hub Attention 替代 dense all-to-all cross-agent attention</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>dense joint attention 会让每个 agent token 直接看所有其他 agent token。
+            设每帧空间 token 数为 \(L=HW\)，block 长度为 \(n\)，agent 数为 \(P\)，cross-agent attention 成本是 \(\mathcal{O}(P^2 n^2 L^2)\)。超过两个玩家后，这个成本很快吞掉实时性。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>γ-World 加 \(K\) 个 learnable hub tokens。agent token 只能看自己 stream 和 hub；hub 可以看所有 agent 和其他 hub。
+            不同 agent 之间没有直接 attention，只能走两跳路径：agent -> hub -> agent。
+          </p>
+          <div class="equation">
+            \[
+              \mathcal{M}_{hub}(i,j)=
+              \mathbf{1}\left[\rho(i)=\rho(j)\ \vee\ \rho(i)=hub\ \vee\ \rho(j)=hub\right]
+            \]
+          </div>
+          <div class="equation">
+            \[
+              \mathcal{M}(i,j)=\mathbf{1}[b(j)\le b(i)]\cdot \mathcal{M}_{hub}(i,j)
+            \]
+          </div>
+          <p>
+            \(\rho(i)\) 表示 token 属于哪个 agent 或 hub，\(b(i)\) 是 temporal block index。
+            第一项保证 block-causal，第二项保证跨 agent 信息只能通过 hub。
+          </p>
+          <div class="equation">
+            \[
+              \mathcal{O}(P n L(nL+nK))+\mathcal{O}(nK(PnL+nK))
+            \]
+          </div>
+          <p>
+            固定 \(n,L,K\) 后，这个复杂度对 \(P\) 近似线性。
+            Hub tokens 在输出前丢掉，只作为内部 shared communication state。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>多人交互不一定需要每层每个 pixel token 对所有其他玩家 pixel token 做全连接。
+            许多互动可以被压成“谁在哪、做了什么、共享对象发生了什么”的紧凑状态。Hub 就是这种 neural blackboard。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>hub 是瓶颈。K 太小会丢交互信息；K 太大又回到高成本。论文选 \(K=8\) 是工程折中，不是理论最优。
+          </p>
+
+          <h3>创新 3：把高质量 bidirectional diffusion 蒸馏成 causal streaming student</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>bidirectional DiT 能看完整未来视频，质量好，但不能在线交互；causal model 可以流式生成，但只用 teacher forcing 训练会遇到 train-test mismatch，长 rollout 时误差累积。
+          </p>
+          <p>
+            <strong>它怎么改：</strong>三阶段训练：先训练 full-context bidirectional teacher；再训练 block-causal multi-step student；最后用 Conditional Self-Forcing + DMD 把 student 蒸馏成 4-step few-step generator。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>teacher 提供高质量条件分布，causal student 学会只看过去，distillation 让模型在自己生成的历史上继续训练，推理时 distribution mismatch 更小。
+          </p>
+          <p>
+            <strong>实现细节：</strong>蒸馏时每个 block 用 timesteps \(\{1000,750,500,250\}\)，flow shift 为 5.0；生成后的 block 会重新以 context-noise level 128 前向一次，写入每层 KV cache。
+            generator/critic 交替比例为 1:4，总共 400 iterations。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 训练和推理流程</h2>
+
+          <h3>输入和输出</h3>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>输出</th>
+                <th>关键约束</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Teacher training</td>
+                <td>完整 \(P\)-agent video latent、initial observations、per-agent actions</td>
+                <td>velocity field / denoised latent</td>
+                <td>dense bidirectional attention，质量优先</td>
+              </tr>
+              <tr>
+                <td>Causal student pretraining</td>
+                <td>block-wise noised latent、actions、past blocks</td>
+                <td>autoregressive diffusion rollout</td>
+                <td>block-causal mask + Sparse Hub Attention</td>
+              </tr>
+              <tr>
+                <td>Self-Forcing distillation</td>
+                <td>student 自己生成的历史、teacher conditional score</td>
+                <td>few-step causal generator</td>
+                <td>rollout-aware，减少 exposure bias</td>
+              </tr>
+              <tr>
+                <td>Inference</td>
+                <td>first frames + latest action block + KV cache</td>
+                <td>每个 agent 的未来视觉 latent/video</td>
+                <td>4-step denoise，24 latent-frame rolling window，24 FPS</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>动作格式</h3>
+          <p>
+            游戏域每帧每个 agent 有 25 维 action：23 个离散玩家控制和 2 个连续 camera 控制。
+            离散项包括 inventory、ESC、hotbar.1-9、forward/back/left/right、jump/sneak/sprint、swapHands、attack/use/pickItem/drop。
+            连续项是 cameraX/cameraY。
+          </p>
+          <p>
+            机器人域每帧每个 robot 有 10 维连续 action：3D end-effector position、6D orientation、gripper opening。
+            论文把左右机械臂看成两个 interacting agents。
+          </p>
+
+          <h3>模型规模和训练设置</h3>
+          <ul>
+            <li>Backbone：Cosmos-Predict2.5-2B TI2V checkpoint。</li>
+            <li>Transformer：hidden dimension \(D=2048\)，28 blocks，16 heads，head dim 128，MLP ratio 4，AdaLN-LoRA rank 256。</li>
+            <li>训练分辨率：2-agent gameplay，320×480 per view。</li>
+            <li>Teacher：93-frame clips / latent length 24 训练 10k iterations，再用 189-frame clips / latent length 48 fine-tune 6k。</li>
+            <li>Causal student：93-frame clips 训练 15k iterations。</li>
+            <li>Optimizer：AdamW，LR \(3\times10^{-5}\)，weight decay \(10^{-3}\)，\((\beta_1,\beta_2)=(0.0,0.999)\)，100-step warmup，gradient clipping 0.1。</li>
+            <li>算力：teacher 和 student 都使用 32 NVIDIA GB200s。这个成本是复现门槛。</li>
+            <li>Inference：不使用 CFG，论文说 unguided sampling 经验上更准确。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 公式逐行讲解</h2>
+
+          <h3>公式 1：flow matching 目标</h3>
+          <div class="equation">
+            \[
+              z_{\sigma}=(1-\sigma)z_0+\sigma\epsilon,\qquad
+              \mathcal{L}_{FM}=
+              \mathbb{E}_{z_0,\epsilon,\sigma}
+              \left[\lVert v_{\theta}(z_{\sigma},\sigma,\mathcal{C})-(\epsilon-z_0)\rVert_2^2\right]
+            \]
+          </div>
+          <p>
+            \(z_0\) 是 clean video latent，\(\epsilon\sim\mathcal{N}(0,I)\) 是噪声，\(\sigma\in[0,1]\) 是 noise level。
+            \(v_\theta\) 预测从 clean 到 noise 的 velocity，\(\mathcal{C}\) 包括 initial observations 和 per-agent actions。
+            实现上就是 DiT 在 noised latent 上回归 velocity。
+          </p>
+
+          <h3>公式 2：多 agent latent 形状</h3>
+          <div class="equation">
+            \[
+              Z_0\in\mathbb{R}^{P\times T\times H\times W\times C_z}
+            \]
+          </div>
+          <p>
+            这是整篇最重要的 shape。
+            相比单人 video latent \(T\times H\times W\times C_z\)，它增加了显式 agent axis。
+            这让“哪个 token 属于哪个 agent”成为模型结构的一部分，而不是拼图后的隐含信息。
+          </p>
+
+          <h3>公式 3：动作注入</h3>
+          <div class="equation">
+            \[
+              u^p_t=f_a(a^p_t)\in\mathbb{R}^{D},\qquad
+              \beta^p_{\ell,t}=g_{\ell}(u^p_t)\in\mathbb{R}^{D}
+            \]
+          </div>
+          <div class="equation">
+            \[
+              x_{\ell,p,t,h,w}\leftarrow x_{\ell,p,t,h,w}+\beta^p_{\ell,t}
+            \]
+          </div>
+          <p>
+            \(f_a\) 是共享 action encoder，所有 agent 共用同一套参数；\(g_\ell\) 是每层 action projection。
+            \(\beta^p_{\ell,t}\) 被 broadcast 到该 agent、该时间步的所有 spatial tokens。
+            这样同一个动作在不同 agent 上有同样表示，身份差异交给 simplex RoPE，而不是交给 action encoder。
+          </p>
+
+          <h3>公式 4：Simplex agent rotation</h3>
+          <div class="equation">
+            \[
+              R_{4D}(t,p,h,w)=\operatorname{diag}(R_t(t),R_p(p),R_h(h),R_w(w))
+            \]
+          </div>
+          <p>
+            普通 3D RoPE 只有 \(t,h,w\)。γ-World 加了 \(p\)，并把 \(R_p(p)\) 换成 \(R_{\text{simp}}(\pi(p))\)。
+            这相当于给每个 agent 一个相位，但这些相位来自 simplex 顶点，天然等距。
+          </p>
+
+          <h3>公式 5：Hub attention mask</h3>
+          <div class="equation">
+            \[
+              \mathcal{M}(i,j)=\mathbf{1}[b(j)\le b(i)]
+              \cdot
+              \mathbf{1}[\rho(i)=\rho(j)\vee \rho(i)=hub\vee \rho(j)=hub]
+            \]
+          </div>
+          <p>
+            这个 mask 同时做两件事：时间上不能看未来 block；agent 上不能直接看其他 agent，只能看自己和 hub。
+            推理时也维护相同拓扑：每个 agent 有自己的 KV cache，hub 有共享 KV cache。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 训练-推理细节对齐</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>可能 mismatch</th>
+                <th>为什么危险</th>
+                <th>γ-World 怎么处理</th>
+                <th>仍然的问题</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Bidirectional training vs causal inference</td>
+                <td>teacher 能看未来，推理不能</td>
+                <td>单独训练 block-causal student，再蒸馏</td>
+                <td>distilled 质量仍低于 bidirectional teacher</td>
+              </tr>
+              <tr>
+                <td>Teacher forcing vs self rollout</td>
+                <td>训练看真历史，推理看自己生成历史</td>
+                <td>Self-Forcing：生成 blocks 写入 KV cache 后继续训练</td>
+                <td>长程 24 秒以外的稳定性未充分量化</td>
+              </tr>
+              <tr>
+                <td>2-agent train vs 4-agent inference</td>
+                <td>learned slot 会过拟合两个玩家</td>
+                <td>simplex pool size 4，训练随机采样两个顶点并打乱 slot</td>
+                <td>超过 pool size 或异构 agent 仍不清楚</td>
+              </tr>
+              <tr>
+                <td>Dense teacher vs Sparse Hub student</td>
+                <td>teacher 的全连接互动可能难压进 hub</td>
+                <td>K=8 hub tokens + DMD distillation</td>
+                <td>复杂群体策略可能需要更大 K 或层级 hub</td>
+              </tr>
+              <tr>
+                <td>短窗口 cache vs 长程世界状态</td>
+                <td>24 latent-frame rolling window 可能忘记长期事件</td>
+                <td>KV cache bounded，保证实时性</td>
+                <td>没有显式地图/对象 memory，和 MultiGen 不同</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 实验复盘</h2>
+
+          <h3>主结果：对 Solaris 和 Frame concat</h3>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Memory FVD/FID</th>
+                <th>Grounding FVD/FID</th>
+                <th>Movement FVD/FID</th>
+                <th>Building FVD/FID</th>
+                <th>Consistency FVD/FID</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Frame concat</td>
+                <td>450.6 / 69.8</td>
+                <td>528.3 / 63.2</td>
+                <td>556.9 / 65.0</td>
+                <td>551.8 / 87.3</td>
+                <td>576.0 / 123.2</td>
+              </tr>
+              <tr>
+                <td>Solaris</td>
+                <td>333.8 / 51.7</td>
+                <td>301.9 / 36.1</td>
+                <td>311.1 / 36.3</td>
+                <td>448.6 / 71.0</td>
+                <td>443.1 / 94.8</td>
+              </tr>
+              <tr>
+                <td>γ-World</td>
+                <td>184.1 / 24.8</td>
+                <td>199.3 / 24.0</td>
+                <td>191.5 / 21.2</td>
+                <td>264.5 / 32.1</td>
+                <td>280.0 / 46.9</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            这个表的结论很清楚：γ-World 在五类多人任务上都明显优于两个 baseline。
+            最有说服力的是 Building 和 Consistency，因为它们更依赖 agent 间共享状态，而不只是单视角动作响应。
+          </p>
+
+          <h3>架构消融：simplex 和 hub 到底有没有用</h3>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Setting</th>
+                <th>Composition</th>
+                <th>Agent encoding</th>
+                <th>Interaction</th>
+                <th>FVD</th>
+                <th>FID</th>
+                <th>LPIPS</th>
+                <th>PSNR</th>
+                <th>SSIM</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Spatial Concat</td>
+                <td>Spatial</td>
+                <td>None</td>
+                <td>Full</td>
+                <td>312.4</td>
+                <td>38.7</td>
+                <td>0.326</td>
+                <td>24.8</td>
+                <td>0.782</td>
+              </tr>
+              <tr>
+                <td>Sequence Concat</td>
+                <td>Sequence</td>
+                <td>None</td>
+                <td>Full</td>
+                <td>285.6</td>
+                <td>35.2</td>
+                <td>0.298</td>
+                <td>25.6</td>
+                <td>0.798</td>
+              </tr>
+              <tr>
+                <td>View Embedding</td>
+                <td>Sequence</td>
+                <td>Learned view</td>
+                <td>Full</td>
+                <td>256.3</td>
+                <td>32.4</td>
+                <td>0.281</td>
+                <td>26.4</td>
+                <td>0.815</td>
+              </tr>
+              <tr>
+                <td>Simplex Encoding</td>
+                <td>Sequence</td>
+                <td>Simplex</td>
+                <td>Full</td>
+                <td>228.5</td>
+                <td>29.6</td>
+                <td>0.265</td>
+                <td>27.5</td>
+                <td>0.830</td>
+              </tr>
+              <tr>
+                <td>γ-World Full</td>
+                <td>Sequence</td>
+                <td>Simplex</td>
+                <td>Sparse Hub</td>
+                <td>223.4</td>
+                <td>30.2</td>
+                <td>0.269</td>
+                <td>27.7</td>
+                <td>0.836</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            批判性看这个表：Simplex 的收益非常稳定，从 learned view embedding 到 simplex full attention，FVD 从 256.3 降到 228.5。
+            Sparse Hub 相比 full attention 不是每项都更好，FID 和 LPIPS 略差，但 FVD/PSNR/SSIM 更好，且换来更强扩展性。
+            所以 hub 的核心证据不只是 Table 2，而是和 Figure 3 的效率一起看。
+          </p>
+
+          <figure class="wide-figure">
+            <img src="../assets/gamma-world/sparse_hub_timing_comparison.png" alt="Sparse Hub Attention timing and FLOPs comparison">
+            <figcaption>Figure 3：2 个玩家时 Sparse Hub 有额外 overhead，但 4/8 个玩家后 dense attention 的 DiT latency、self-attention latency 和 FLOPs 都明显膨胀。</figcaption>
+          </figure>
+
+          <h3>效率数字</h3>
+          <ul>
+            <li>DiT latency：2 players dense 129ms / sparse 170ms；4 players 210ms / 177ms；8 players 611ms / 246ms。</li>
+            <li>Self-attention latency：2 players 2.5ms / 2.8ms；4 players 5.1ms / 3.2ms；8 players 17.6ms / 4.5ms。</li>
+            <li>Self-attention FLOPs：2 players 477.8G / 245.3G；4 players 1.9T / 490.5G；8 players 7.6T / 981.0G。</li>
+          </ul>
+
+          <h3>蒸馏阶段对比</h3>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Variant</th>
+                <th>FVD</th>
+                <th>FID</th>
+                <th>LPIPS</th>
+                <th>PSNR</th>
+                <th>SSIM</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Bidirectional</td>
+                <td>227.3</td>
+                <td>31.0</td>
+                <td>0.272</td>
+                <td>27.7</td>
+                <td>0.828</td>
+              </tr>
+              <tr>
+                <td>Causal</td>
+                <td>266.4</td>
+                <td>34.4</td>
+                <td>0.277</td>
+                <td>26.2</td>
+                <td>0.805</td>
+              </tr>
+              <tr>
+                <td>Distilled</td>
+                <td>239.7</td>
+                <td>30.9</td>
+                <td>0.273</td>
+                <td>26.8</td>
+                <td>0.811</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            Distilled model 的 FID 接近 teacher，但 PSNR/SSIM 没完全追回。
+            这符合预期：实时 causal student 是部署版本，不是离线质量上限。
+          </p>
+
+          <h3>隐藏 confound</h3>
+          <ul>
+            <li>对比 Solaris 时，具体训练数据、模型容量、算力是否完全对齐不够透明；论文更像“系统设计胜出”，不是严格同参公平赛。</li>
+            <li>定量主要在 Minecraft-style 游戏上，真实机器人部分更多是 qualitative demo。</li>
+            <li>FVD/FID 衡量视频分布质量，不等于策略一致性或可用于规划的状态正确性。</li>
+            <li>zero-shot 2-to-4 的论据很有价值，但 pool size 已经设为 4；它不是无限扩 agent。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 可复现清单</h2>
+          <p>
+            代码现实：GitHub 仓库截至 2026-06-15 只有 README 和 assets。README 明确写了 code、distilled streaming checkpoints、training scripts、dataset preparation tools 都是 coming soon / planned。
+            所以下面是论文和 appendix 能确认的复现要点，不是代码级复现。
+          </p>
+          <ul>
+            <li>需要 Cosmos-Predict2.5-2B TI2V 初始化权重。</li>
+            <li>需要同步多人数据：每个时间步对齐 \(P\) 个 agent 的 video/action。</li>
+            <li>训练时至少要实现 sequence concat，而不是 spatial concat。</li>
+            <li>RoPE head partition 使用 \((64,32,16,16)\)，对应 \((t,p,h,w)\)。</li>
+            <li>simplex pool size 4；2-agent 训练时随机抽两个顶点并 permute slot。</li>
+            <li>action encoder 需要共享参数，避免把 agent identity 泄漏进 action branch。</li>
+            <li>Sparse Hub Attention 默认 \(K=8\) hub tokens per latent frame。</li>
+            <li>causal student 需要 local attention window，论文为最近 24 latent frames per view。</li>
+            <li>distillation 要按 rollout 写 KV cache，否则训练和推理仍不一致。</li>
+            <li>论文没有释放数据生成脚本，Minecraft bot 脚本、动作同步、episode taxonomy 都是复现风险点。</li>
+          </ul>
+          <p>
+            【不确定】RealOmin-Open 的具体数据预处理、camera/action 对齐频率、机器人视频分辨率没有在正文里展开。
+            合理猜测有三种：一是按原数据集频率直接重采样；二是对齐到 Cosmos latent temporal stride；三是只做短片段 qualitative。
+            验证方式：等代码/data prep release，或检查未来仓库里的 robot preprocessing scripts。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 对 FastWAM / UE 多人数据集的启发</h2>
+          <p>
+            如果你要做 UE 多人 world model 数据集，这篇比 MultiGen 更接近“多人 agent 轴怎么设计”。
+            它的可搬运点不是 Minecraft，而是三条结构原则。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>γ-World 设计</th>
+                <th>在 UE 数据集里对应什么</th>
+                <th>对 FastWAM 的意义</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>显式 agent axis</td>
+                <td>每个 pawn/NPC/player 一条同步 observation/action/state stream</td>
+                <td>不要把多人数据拼成单视频；保留 agent 维度</td>
+              </tr>
+              <tr>
+                <td>Simplex identity</td>
+                <td>同类 bot 共享能力，不绑定 Player1/Player2 固定语义</td>
+                <td>支持 one checkpoint 泛化到不同 agent count/order</td>
+              </tr>
+              <tr>
+                <td>Sparse hub</td>
+                <td>共享黑板：目标点、敌我位置、关键物体、zone 控制、事件摘要</td>
+                <td>把多人交互压成 shared latent，而不是 all-to-all token 暴力交互</td>
+              </tr>
+              <tr>
+                <td>per-agent action trace</td>
+                <td>BT/StateTree decision、nav target、look yaw/pitch、fire/use、skill id、delta pose</td>
+                <td>没有人类键鼠 action 时，也要定义可学习的 agent control interface</td>
+              </tr>
+              <tr>
+                <td>2-agent train, 4-agent test</td>
+                <td>先做小规模 capture/pursuit，再测试更多 bot</td>
+                <td>可以把 scalability 变成 proposal 的核心实验</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            对 FastWAM，我会把这篇转成一个表示设计建议：
+            <strong>world latent</strong> 不只是一段视频 latent，而应该有 shape 类似
+            \(Z\in\mathbb{R}^{P\times T\times N\times D}\)，其中 \(P\) 是 exchangeable agent axis，\(N\) 是每个 agent 的视觉/状态 tokens。
+            跨 agent 通信走 hub tokens，hub 可以显式接 UE shared state，也可以纯 neural learnable。
+          </p>
+          <p>
+            如果没有底层 action，可以先定义 proxy action：
+          </p>
+          <pre><code>agent action at t =
+  behavior_tree_node_id
+  + high_level_intent_id
+  + nav_target_delta
+  + look_delta
+  + weapon/use/skill command
+  + compact physical delta pose</code></pre>
+          <p>
+            这里的 action 不一定是玩家键鼠输入；它可以是 AI 控制栈对 pawn 发出的可执行控制。
+            关键是每个 agent 的 action 必须同步、可复现、可用于条件生成。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 改进方向</h2>
+          <ol>
+            <li><strong>层级 hub tokens -></strong>把 squad/team/scene/event 分成不同 hub；预期收益是支持 8+ 或 16+ agent；风险是 routing 变复杂；实验用 2/4/8/16 agent scaling curve。</li>
+            <li><strong>显式 shared state + neural hub 混合 -></strong>把 MultiGen 式 map/pose memory 接到 γ-World hub；预期收益是长程一致性更强；风险是工程接口变重；实验比较无 memory、纯 hub、hub+map。</li>
+            <li><strong>异构 agent encoding -></strong>在 simplex identity 外加 role/type embedding；预期收益是支持玩家、NPC、车辆、机器人混合；风险是破坏交换对称；实验做同类交换不变性和异类可区分性测试。</li>
+            <li><strong>任务级 action abstraction -></strong>把键鼠 action 换成 intent/action chunk；预期收益是更适合机器人和 UE AI；风险是丢低层控制细节；实验比较 raw action、delta pose、BT intent 三种条件。</li>
+            <li><strong>规划可用评测 -></strong>不只看 FVD/FID，而测 rollout 是否能支持 agent 选择动作；预期收益是接近 world model 本义；风险是需要 closed-loop eval；实验用生成未来做 MPC/BT lookahead。</li>
+            <li><strong>长程 memory benchmark -></strong>构造离开视野后再相遇、建筑被修改后回访、多人协作搬运；预期收益是测 shared state 而不是短视频质量；风险是数据采集更复杂。</li>
+          </ol>
+        </section>
+
+        <section class="article-section">
+          <h2>11. 速读备忘卡</h2>
+          <ul>
+            <li>γ-World 的核心是多人 world model 的 agent identity 和 communication 设计。</li>
+            <li>不要把多玩家视角拼成大图；保留 \(P\times T\times H\times W\) 的 agent axis。</li>
+            <li>Simplex RoPE：agent 是 regular simplex 顶点，彼此等距，交换对称。</li>
+            <li>训练时用 pool size 4，但只激活 2 个 agent，并随机抽顶点和打乱 slot。</li>
+            <li>Sparse Hub Attention：agent 不直接互看，信息走 agent -> hub -> agent。</li>
+            <li>Cross-agent attention 从 \(\mathcal{O}(P^2)\) 变成近似 \(\mathcal{O}(P)\)。</li>
+            <li>部署靠 bidirectional teacher -> causal student -> conditional Self-Forcing distillation。</li>
+            <li>实时推理维护每个 agent 的 KV cache 和共享 hub KV cache，论文报告 24 FPS。</li>
+            <li>主表中 γ-World 在五类 Minecraft 多人任务 FVD/FID 都优于 Solaris。</li>
+            <li>代码截至 2026-06-15 尚未释放，复现只能依据论文 appendix。</li>
+            <li>对 UE/FastWAM：重点是同步 per-agent stream、exchangeable agent encoding、shared hub/blackboard。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Sources</h2>
+          <ul>
+            <li><a href="https://arxiv.org/abs/2605.28816">arXiv: Gamma-World: Generative Multi-Agent World Modeling Beyond Two Players</a></li>
+            <li><a href="https://arxiv.org/pdf/2605.28816">PDF: arXiv:2605.28816</a></li>
+            <li><a href="https://research.nvidia.com/labs/sil/projects/gamma-world/">Project page: γ-World</a></li>
+            <li><a href="https://github.com/nv-tlabs/Gamma-World">GitHub: nv-tlabs/Gamma-World</a></li>
+          </ul>
+        </section>
+      </article>
+    </main>
+  </body>
+</html>
