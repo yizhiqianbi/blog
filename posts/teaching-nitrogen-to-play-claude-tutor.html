@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Philo Labs Teaching NitroGen to Play 博客解读：用 Claude privileged-state tutor 生成小样本演示，再把策略蒸馏到 pixels-only NitroGen 游戏 agent。"
+    >
+    <title>Teaching NitroGen to Play：用 Claude 当 privileged tutor，给 pixels-only 游戏智能补课</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+    <script type="application/json" id="paper-metadata">
+{
+  "title": "Teaching NitroGen to Play：用 Claude 当 privileged tutor，给 pixels-only 游戏智能补课",
+  "paper": "https://philolabs.ai/essays/teaching-nitrogen-to-play",
+  "project": "https://nitrogen.minedojo.org/",
+  "authors": ["Philo Labs"],
+  "date": "2026-06-18",
+  "category": "game-world-models",
+  "parent_file": "index.html",
+  "remix_prompt": "解读 Philo Labs 的 Teaching NitroGen to Play 博客，生成中文详细讲解并放入个人博客。",
+  "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+  "tags": ["nitrogen", "game-agent", "policy-distillation", "privileged-teacher", "pixels-to-gamepad", "claude-tutor", "flow-matching-action-head", "low-data-adaptation", "game-world-models", "ue-dataset", "fastwam"],
+  "systems": ["NitroGen", "Claude Opus 4.8", "Arena Breaker", "Godot", "SigLIP", "Action DiT", "Flow Matching Transformer"],
+  "datasets": ["17 Claude tutor episodes", "3276 frame-to-action-chunk samples", "NitroGen internet gameplay pretraining data", "Arena Breaker held-out stages"],
+  "methods": ["behavior cloning", "policy distillation", "privileged-state teacher", "pixels-only student", "flow matching for action chunks", "vision encoder freezing", "idle segment filtering", "HUD-less training frames"],
+  "code": "https://github.com/MineDojo/NitroGen",
+  "related_posts": ["posts/ai-game-world-models.html", "posts/multigen-editable-multiplayer-diffusion-game-engine.html", "posts/gamma-world-multi-agent-world-model.html", "posts/qwen-vla-unified-embodied-action-model.html", "posts/procvlm-procedure-grounded-progress-rewards.html", "posts/demo-jepa-cross-embodiment-imitation.html"],
+  "graph_nodes": ["NitroGen", "Claude tutor", "privileged state", "pixels-only policy", "Action DiT", "flow matching action diffusion", "Arena Breaker", "policy distillation", "low-data game adaptation", "UE multi-agent dataset", "FastWAM"],
+  "graph_edges": [
+    "Claude tutor -> reads -> privileged engine state",
+    "Claude tutor -> generates -> gamepad demonstrations",
+    "NitroGen -> consumes -> 256px pixel frame",
+    "NitroGen -> predicts -> 18-frame gamepad chunk",
+    "policy distillation -> transfers -> privileged reasoning into reactive pixel policy",
+    "Action DiT -> trained_with -> flow matching velocity loss",
+    "idle filtering -> prevents -> stand-still policy collapse",
+    "Arena Breaker -> tests -> unseen visual domain adaptation",
+    "UE multi-agent dataset -> should_record -> privileged state and behavior traces",
+    "FastWAM -> can_use -> privileged teacher to pixel student distillation"
+  ]
+}
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#paper-reading">Paper</a>
+        <a href="../index.html#notes">AI Game</a>
+        <a href="../index.html#posts">Robot</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Essay Reading · Game Agents</p>
+          <h1>Teaching NitroGen to Play：用 Claude 当 privileged tutor，给 pixels-only 游戏智能补课</h1>
+          <p class="article-dek">
+            Philo Labs 这篇不是论文，而是一个很有信息量的小实验：把一个只看像素、输出手柄动作的 NitroGen agent 扔进没见过的新游戏。
+            zero-shot 不会玩；但用 Claude 读取游戏内部结构化状态来打 17 局，再把这些演示蒸馏给 NitroGen，几分钟后它就学会了射击、躲避和过第一波。
+          </p>
+          <div class="article-meta">
+            <span>2026.06.18</span>
+            <span>阅读约 28 分钟</span>
+            <span>Philo Labs · NitroGen</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            <strong>痛点：</strong>NitroGen 这类 pixels-to-gamepad foundation agent 有跨游戏动作先验，但换一个全新视觉风格的游戏后，zero-shot 技能不一定自动迁移。
+            <strong>核心招：</strong>用 Claude 读取 privileged engine state 当 tutor，生成少量高质量手柄轨迹，再只微调 NitroGen 的 action DiT / action head，把“会看结构化状态的慢老师”蒸馏成“只看像素的实时学生”。
+            <strong>效果：</strong>原博客报告 zero-shot 平均 0 kills，微调后 2.7 kills；修复游戏碰撞 bug 后，同一组权重提升到 6.8 kills，接近 Claude tutor 的 7.9。
+            <strong>代价：</strong>这是单游戏、小样本、工程 demo，不是通用游戏智能证明；教师用了学生推理时拿不到的精确世界状态，评测规模和训练超参也没有完整公开。
+          </p>
+          <dl class="term-list">
+            <dt>这篇到底在解决什么</dt>
+            <dd>它验证的是 low-data post-training 能不能把一个通用游戏动作模型适配到视觉完全没见过、但控制语义类似的新游戏。</dd>
+            <dt>核心 insight</dt>
+            <dd>真正有复用价值的不是“Claude 会打游戏”，而是 <strong>privileged-state teacher → pixels-only student</strong> 这条数据生成链：用引擎内部状态生成便宜演示，再训练一个部署时不依赖内部状态的反应式 agent。</dd>
+            <dt>和 world model 的关系</dt>
+            <dd>这不是视频 world model，但它是游戏 world-model 数据集/agent 训练的关键范式：如果你能记录引擎状态、AI blackboard、事件流，就可以构造高质量 teacher，而不是只靠人类慢慢打数据。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <figure class="wide-figure">
+            <img src="../assets/nitrogen/arena_showcase.jpg" alt="Arena Breaker game showcase">
+            <figcaption>Philo Labs 的 Arena Breaker：视觉上没出现在 NitroGen 训练集里，但控制上仍是 twin-stick movement、aim-and-shoot、dash dodge。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 文章定位</h2>
+          <p>
+            这篇博客的位置可以概括成：<strong>generalist game agent 的 unseen-game adaptation demo</strong>。
+            主体模型 NitroGen 是 pixels → gamepad：输入最近渲染帧，输出一段手柄动作 chunk。
+            Philo Labs 的问题不是“NitroGen 是否强到能 zero-shot 玩所有游戏”，而是更实际的：
+          </p>
+          <blockquote>
+            <p>如果新游戏的玩法和训练过的游戏类似，但视觉资产、HUD、关卡完全不同，少量 tutor demonstrations 能不能快速把技能迁移过来？</p>
+          </blockquote>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>路线</th>
+                <th>输入</th>
+                <th>输出</th>
+                <th>这篇的位置</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>规则/脚本 AI</td>
+                <td>游戏状态、碰撞、目标列表</td>
+                <td>确定性动作</td>
+                <td>Claude tutor 更像这个层级，但由 LLM 推理产生动作</td>
+              </tr>
+              <tr>
+                <td>pixels-only game agent</td>
+                <td>RGB frame</td>
+                <td>gamepad chunk</td>
+                <td>NitroGen student 的部署形态</td>
+              </tr>
+              <tr>
+                <td>behavior cloning</td>
+                <td>观测-动作演示对</td>
+                <td>模仿人类/教师动作</td>
+                <td>本文的训练机制</td>
+              </tr>
+              <tr>
+                <td>policy distillation</td>
+                <td>强教师轨迹</td>
+                <td>弱/快学生策略</td>
+                <td>本文最核心的可复用范式</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 方法总览</h2>
+          <pre><code>Arena Breaker engine state
+  -> structured JSON state: player / enemies / hazards / projectiles / stage
+  -> Claude tutor: move vector + aim vector + dash
+  -> record episodes
+  -> render each state to 256x256 HUD-less frame
+  -> pair frame with next 18 gamepad actions
+  -> filter idle segments
+  -> fine-tune NitroGen action DiT + action head
+  -> deploy: only RGB frame -> gamepad chunk, real time</code></pre>
+          <p>
+            这个流程最重要的张量/对象对应关系是：
+            \(s_t^{engine}\) 是教师看到的 privileged state；
+            \(o_t\in\mathbb{R}^{256\times256\times3}\) 是学生看到的像素；
+            \(a_{t:t+17}\) 是学生要预测的 18-frame gamepad action chunk。
+            训练数据就是
+            \[
+              \mathcal{D}=\{(o_t, a^{Claude}_{t:t+17})\}_{t=1}^{3276}.
+            \]
+          </p>
+          <p>
+            原博客给出的数字：17 episodes，3,276 个 “frame + 18-action chunk” 样本；训练 4 epochs；冻结 vision encoder，只训练 Action DiT + action head，约 127M / 494M 参数；单张 A10G 约 7 分钟。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>3. 关键机制</h2>
+
+          <h3>3.1 为什么 zero-shot 不行：玩法相同，不等于视觉域相同</h3>
+          <p>
+            <strong>旧方法为什么不行：</strong>NitroGen 的先验来自互联网 gameplay video。它知道很多 twin-stick / aim-and-shoot 的动作模式，但这些模式是通过像素触发的。新游戏视觉资产、敌人形状、摄像机、HUD、颜色、动画都变了，模型未必知道“这个像素对象就是敌人”“右摇杆该推到这个方向才会开火”。
+          </p>
+          <p>
+            <strong>表现：</strong>原文说 zero-shot 时 NitroGen 漂移、乱 dash，aim-stick magnitude 只有 0.025，低于触发射击所需约 0.3，所以几乎不开火，最终 0 kills、stage 1 出局。
+          </p>
+          <p>
+            <strong>机制解释：</strong>这不是动作空间不匹配，而是 <em>视觉-动作 grounding</em> 没有对上。Twin-stick 技能在 action prior 里，但新视觉域没有激活正确的动作模式。
+          </p>
+
+          <h3>3.2 Claude tutor：不是看屏幕，而是读 privileged state</h3>
+          <p>
+            <strong>它怎么改：</strong>Claude 每一 turn 读取 compact JSON：玩家位置、血量、dash cooldown、敌人相对位置/类型/血量、敌方弹幕、hazards、stage、wave、score 等，然后输出 move vector、aim vector、dash flag。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>教师不需要从像素里做 perception。它直接拿到 collision/world state，可以稳定执行 kiting、保持距离、瞄准最近/危险目标、躲避弹幕。
+            这让数据收集从“找人类打很多局”变成“让 LLM 从引擎状态生成一批专家轨迹”。
+          </p>
+          <p>
+            <strong>代价/限制：</strong>教师不是实时玩家，游戏会停下来等 Claude 读状态和思考。它的能力来自作弊式 privileged observation，不能直接部署成公平 game agent。
+            但这不影响它当 teacher，因为 teacher 的目标是产出高质量 demonstrations。
+          </p>
+
+          <h3>3.3 蒸馏点：把慢的结构化推理压进快的像素策略</h3>
+          <p>
+            <strong>核心不是：</strong>让 NitroGen 学会读 JSON。
+            <strong>核心是：</strong>让 NitroGen 只从 \(o_t\) 里预测 Claude 在 \(s_t^{engine}\) 下会做出的 \(a_{t:t+17}\)。
+          </p>
+          <p>
+            这就是典型 privileged learning / policy distillation：
+            \[
+              a_t^T = \pi_T(s_t^{engine}), \qquad
+              a_{t:t+H}^S = \pi_\theta(o_t).
+            \]
+            训练时学生看不到 \(s_t^{engine}\)，只用它产生的 teacher action 作为监督信号。
+          </p>
+          <p>
+            <strong>为什么有效：</strong>视觉 encoder 已经有通用表示，动作 DiT 已经有 gamepad action 先验；小样本微调只需要把新视觉符号接到已有动作技能上。
+          </p>
+
+          <h3>3.4 idle filtering 和 HUD-less frames：两个小工程点很关键</h3>
+          <p>
+            <strong>idle filtering：</strong>如果保留大量无输入片段，behavior cloning 很容易学成“别动”。原文保留至少半数 frame 有真实输入的片段，这是低数据 regime 下防止动作分布塌缩的关键。
+          </p>
+          <p>
+            <strong>HUD-less frames：</strong>训练时隐藏屏幕手柄/HUD，防止模型通过 UI 读出动作而不是理解游戏画面。这个点很像机器人里的 action leakage：如果图像里直接显示 controller overlay，训练 loss 会很好，但部署到无 overlay 画面就崩。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>4. NitroGen 代码里的实现对应</h2>
+          <p>
+            官方 NitroGen README 明确提醒：当前公开模型是 500M 参数 DiT，只看最后一帧，是 fast-reacting system-1 sensory model；它还不能长程规划、端到端自改进，或完全 zero-shot 玩没见过的游戏。
+            这个限制和 Philo Labs 的 cold start 结果是一致的。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>代码模块</th>
+                <th>作用</th>
+                <th>和博客实验的关系</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>nitrogen/flow_matching_transformer/nitrogen.py</code></td>
+                <td>主模型：vision encoder、VL self-attention、Action DiT、action decoder</td>
+                <td>微调的核心是 action diffusion / action head</td>
+              </tr>
+              <tr>
+                <td><code>MultiEmbodimentActionEncoder</code></td>
+                <td>把 noisy action chunk + diffusion timestep 编成 hidden tokens</td>
+                <td>动作不是单步分类，而是一段连续 chunk 的流匹配采样</td>
+              </tr>
+              <tr>
+                <td><code>NitrogenTokenizer</code></td>
+                <td>打包 frame tokens、game id token、action tokens</td>
+                <td>博客中的 256px frame + 18-action chunk 对应 tokenizer 的视觉/动作序列</td>
+              </tr>
+              <tr>
+                <td><code>InferenceSession.predict</code></td>
+                <td>输入当前 frame，调用 <code>get_action</code>，输出 buttons / left stick / right stick</td>
+                <td>部署时 student 只看像素，不再读 engine JSON</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            代码里的 flow matching 目标可以写成：
+            \[
+              x_t=(1-t)\epsilon + t a,\qquad v^\star=a-\epsilon,
+            \]
+            模型预测 \(\hat{v}_\theta(x_t,t,c)\)，用 MSE 拟合 \(v^\star\)。
+            推理时从随机动作 chunk 开始，用 Euler step：
+            \[
+              x_{k+1}=x_k+\Delta t \cdot \hat{v}_\theta(x_k,t_k,c).
+            \]
+            这里 \(c\) 是视觉上下文 token，\(a\) 是真实 teacher action chunk。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>5. 训练和推理流程</h2>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>阶段</th>
+                <th>输入</th>
+                <th>输出</th>
+                <th>注意点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Teacher rollout</td>
+                <td>Engine JSON state</td>
+                <td>move / aim / dash</td>
+                <td>Claude 可暂停游戏、读精确状态，不是公平实时 agent</td>
+              </tr>
+              <tr>
+                <td>Dataset build</td>
+                <td>渲染帧 + teacher action log</td>
+                <td>3,276 个 frame-action chunk 样本</td>
+                <td>过滤 idle，隐藏 HUD/controller overlay</td>
+              </tr>
+              <tr>
+                <td>Fine-tuning</td>
+                <td>256px frame，18-frame action chunk</td>
+                <td>微调 Action DiT/action head</td>
+                <td>冻结 vision encoder，4 epochs，1x A10G，约 7 分钟</td>
+              </tr>
+              <tr>
+                <td>Deployment</td>
+                <td>实时 RGB frame</td>
+                <td>手柄动作 chunk</td>
+                <td>不读 JSON，不暂停游戏</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 实验复盘</h2>
+          <figure class="wide-figure">
+            <img src="../assets/nitrogen/finetune_compare.jpg" alt="Zero-shot and fine-tuned NitroGen comparison">
+            <figcaption>原文 side-by-side：zero-shot 几乎不射击；微调后 aim stick 被激活，开始稳定打敌人。</figcaption>
+          </figure>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>指标</th>
+                <th>Zero-shot</th>
+                <th>Fine-tuned</th>
+                <th>Bugfix 后同权重</th>
+                <th>Claude tutor</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Avg kills</td>
+                <td>0.0</td>
+                <td>2.7</td>
+                <td>6.8</td>
+                <td>7.9</td>
+              </tr>
+              <tr>
+                <td>Aim-stick magnitude</td>
+                <td>0.025</td>
+                <td>0.86</td>
+                <td>未报告</td>
+                <td>未报告</td>
+              </tr>
+              <tr>
+                <td>Avg score</td>
+                <td>10</td>
+                <td>37</td>
+                <td>未报告</td>
+                <td>未报告</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            最有意思的结果不是 2.7 kills，而是 bugfix 后同一权重直接跳到 6.8 kills。
+            这说明 fine-tuned NitroGen 已经学到了接近正确的战斗策略，只是被游戏碰撞 bug 卡住；它会被围住后打近身敌人，恰好触发了 Claude tutor 不常遇到的 point-blank collision 问题。
+          </p>
+          <p>
+            批判地看，博客没有公开评测 episode 数、随机种子、学习率、batch size、数据划分、是否多次重复实验。
+            所以它更像一篇 engineering case study，不是统计意义严格的 benchmark。
+          </p>
+          <p class="rich-callout rich-callout-uncertain">
+            【不确定】Claude tutor 的完整 prompt、动作后处理和采样温度没有公开。合理猜测有三种：一是固定启发式 prompt；二是带少量 hand-written safety rules；三是输出后有动作 clipping/smoothing。验证方式：公开 tutor prompt、保存 raw Claude response、比较 post-processed action 和 raw action。
+          </p>
+          <p class="rich-callout rich-callout-uncertain">
+            【不确定】Philo Labs 的 fine-tuning 是否完全复用 NitroGen 公开训练代码，还是内部有轻量 wrapper/脚本没有公开。验证方式：公开训练命令、checkpoint diff、optimizer state 和 dataset manifest。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 这件事真正说明了什么</h2>
+          <p>
+            <strong>它没有证明：</strong>NitroGen zero-shot 泛化到任意新游戏；Claude 可以直接替代人类玩家；7 分钟训练可以解决所有视觉域迁移。
+          </p>
+          <p>
+            <strong>它证明得比较扎实：</strong>当新任务和预训练技能在 action semantics 上相近时，小规模高质量演示可以快速重连视觉 grounding 和动作先验。
+            这里的 teacher 可以不是人类，只要它能产生稳定、可模仿、覆盖关键行为的轨迹。
+          </p>
+          <p>
+            <strong>最可复用的 insight：</strong>把 expensive reasoning 放在数据生成阶段，而不是部署阶段。
+            Claude 可以慢，可以作弊，可以读内部状态；学生不能。但学生可以在离线数据里吸收 teacher 的动作分布，最终变成实时 pixels-only policy。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>8. 对 UE 多人数据集 / FastWAM 的启发</h2>
+          <p>
+            如果要在 UE 里做多人 world model 数据集，这篇博客给了一个很清楚的 recipe：
+          </p>
+          <pre><code>UE authoritative state
+  -> player / NPC / projectile / objective / event / BT blackboard
+  -> teacher policy: LLM, scripted AI, behavior tree, utility AI, or hybrid
+  -> record privileged trajectory
+  -> render per-agent RGB/depth/semantic/egocentric streams
+  -> train pixel-only or partial-state student
+  -> evaluate zero-shot and low-data adaptation</code></pre>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>该记录什么</th>
+                <th>为什么</th>
+                <th>可训练任务</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Privileged game state</td>
+                <td>可产生高质量 teacher，也可做诊断</td>
+                <td>teacher distillation、state-to-action、counterfactual rollout</td>
+              </tr>
+              <tr>
+                <td>每个 agent 的 RGB / depth / semantic view</td>
+                <td>部署时 student 通常只能看局部观测</td>
+                <td>pixels-only policy、world model、belief state learning</td>
+              </tr>
+              <tr>
+                <td>Behavior Tree / StateTree / blackboard</td>
+                <td>比低层动作更接近 intent/progress</td>
+                <td>intent token、task progress prediction、subgoal inference</td>
+              </tr>
+              <tr>
+                <td>事件流</td>
+                <td>多人因果不该只藏在视频里</td>
+                <td>hit/death/pickup/capture prediction、reward model</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            对 FastWAM 或具身 one-shot 模仿，类似设计是：
+            用 privileged teacher 读完整状态生成少量专家执行，再训练 student 只从视觉和任务描述恢复 action / progress / latent goal。
+            这和之前讨论的 intent token 可以接起来：teacher 的 blackboard、目标选择、阶段标签可以变成学生的中间监督，而不只是最终动作。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. 可复现清单</h2>
+          <ul>
+            <li>确认 NitroGen checkpoint 和代码版本；官方 repo 当前入口是 <code>scripts/serve.py</code> 和 <code>scripts/play.py</code>。</li>
+            <li>实现游戏侧 state exporter：player、enemy、projectile、hazard、cooldown、score、stage/wave。</li>
+            <li>固定 teacher prompt，并保存 raw response、parsed action、post-processed action。</li>
+            <li>录制 episode 时同步保存 frame、state、action、reward/event，避免只留视频。</li>
+            <li>把 frame resize 到 NitroGen 期望的 256px 输入；去掉 HUD/controller overlay。</li>
+            <li>做 idle filtering，防止 BC 学成 stationary policy。</li>
+            <li>冻结 vision tower，先只调 action DiT/head；低数据时全量微调更容易过拟合。</li>
+            <li>报告多 seed、多 episode 的 kills、score、survival time、aim magnitude、dash usage。</li>
+            <li>分开评估原关卡、新关卡、bugfix 后同权重，避免把环境 bug 当模型失败。</li>
+            <li>保留失败视频，因为 pixels-only agent 经常能暴露游戏设计/碰撞/奖励漏洞。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>10. 改进方向</h2>
+          <ul>
+            <li><strong>更系统的 teacher ensemble -></strong>Claude + scripted AI + RL bot 混合；收益是覆盖更多策略模式；风险是动作分布不一致；实验看 mixture ablation。</li>
+            <li><strong>加入 state prediction auxiliary loss -></strong>让学生从像素预测敌人/弹幕/hazard latent；收益是增强视觉 grounding；风险是标注 schema 变复杂；实验看 low-data adaptation curve。</li>
+            <li><strong>从单帧扩到短历史 -></strong>NitroGen README 说公开模型只看最后一帧；短历史能处理速度和弹幕轨迹；风险是推理延迟和训练数据更重；实验看 projectile dodge success。</li>
+            <li><strong>把 bug discovery 变成正式指标 -></strong>记录 agent 触发的异常碰撞、卡墙、奖励漏洞；收益是让 game agent 变成 QA 工具；风险是难以区分模型失败和游戏 bug；实验做人类复核。</li>
+            <li><strong>多人版本 distillation -></strong>teacher 读 shared state，student 只看 ego view；收益是适配 UE 多人数据集；风险是 credit assignment 难；实验看 opponent tracking 和协作/对抗成功率。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>11. 速读备忘卡</h2>
+          <ul>
+            <li>这篇是工程实验，不是正式论文。</li>
+            <li>NitroGen 是 pixels-to-gamepad，不是视频 world model。</li>
+            <li>Zero-shot 失败的关键是视觉 grounding 断了，不是玩法完全不懂。</li>
+            <li>Claude tutor 读 privileged JSON state，学生 NitroGen 只看 RGB。</li>
+            <li>17 episodes 变成 3,276 个 frame-action chunk 样本。</li>
+            <li>训练只调 127M / 494M 参数，冻结 vision encoder。</li>
+            <li>核心范式是 privileged teacher 到 pixels-only student 的 policy distillation。</li>
+            <li>idle filtering 和 HUD-less frames 是低数据模仿里的关键工程细节。</li>
+            <li>同一权重在 bugfix 后提升很大，说明 agent 还能做游戏 QA。</li>
+            <li>对 UE 数据集最重要的启发：别只录视频，要录 authoritative state、event、blackboard 和每个 agent 的局部观测。</li>
+          </ul>
+        </section>
+
+        <section class="article-section">
+          <h2>Sources</h2>
+          <ul class="source-list">
+            <li><a href="https://philolabs.ai/essays/teaching-nitrogen-to-play">Philo Labs: We handed a CVPR-winning AI a game it had never seen</a></li>
+            <li><a href="https://nitrogen.minedojo.org/">NitroGen project page</a></li>
+            <li><a href="https://arxiv.org/abs/2601.02427">arXiv: NitroGen: An Open Foundation Model for Generalist Gaming Agents</a></li>
+            <li><a href="https://github.com/MineDojo/NitroGen">Official NitroGen code</a></li>
+          </ul>
+        </section>
+
+        <nav class="next-links" aria-label="相关文章">
+          <a href="ai-game-world-models.html">AI Game World Models</a>
+          <a href="multigen-editable-multiplayer-diffusion-game-engine.html">MultiGen</a>
+          <a href="gamma-world-multi-agent-world-model.html">γ-World</a>
+        </nav>
+      </article>
+    </main>
+
+    <footer class="site-footer">
+      <a href="../index.html#paper-reading">返回 Paper Reading</a>
+      <a href="#">回到顶部</a>
+    </footer>
+  </body>
+</html>
