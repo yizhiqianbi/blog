@@ -30,13 +30,14 @@
   "methods": ["alignment first then scale", "raw and canonical action storage", "binary action mask", "camera-frame delta EEF", "per-dataset quantile normalization", "embodiment-aware prompt", "action-rich caption", "clean/noisy token packing", "LeRobot v3 sharding", "WebDataset shards"],
   "code": "No implementation repository yet; this is a roadmap for a DataFiltering pipeline with adapters, filters, transforms, writers, and manifest stages.",
   "related_posts": ["posts/qwen-robotmanip-alignment-unlocks-scale.html", "posts/qwen-vla-unified-embodied-action-model.html", "posts/qwen-robotworld-language-conditioned-world-model.html", "posts/cosmos3-omnimodal-world-models-physical-ai.html", "posts/cosmos3-group-meeting-speaker-guide.html", "posts/rise-of-world-action-models.html"],
-  "graph_nodes": ["WAM data cleaning", "alignment first then scale", "raw manifest", "canonical action schema", "binary mask", "camera-frame EEF", "action-rich caption", "LeRobot v3", "WebDataset", "FastWAM"],
+  "graph_nodes": ["WAM data cleaning", "DataFiltering", "alignment first then scale", "raw manifest", "canonical action schema", "65D embodiment vector", "binary mask", "camera-frame EEF", "action-rich caption", "LeRobot v3", "WebDataset", "FastWAM"],
   "graph_edges": [
     "Qwen-RobotManip -> motivates -> alignment first then scale",
     "Qwen-VLA -> uses -> embodiment-aware prompt and quantile normalization",
     "Qwen-RobotWorld -> uses -> action-rich caption for video-only data",
     "Cosmos 3 -> uses -> action tokens as visual transitions",
     "WAM data cleaning -> outputs -> raw manifest and aligned manifest",
+    "DataFiltering -> contains -> adapters filters transforms writers",
     "canonical action schema -> requires -> binary masks and schema version",
     "FastWAM -> depends_on -> clean action/world model data contracts"
   ]
@@ -65,7 +66,7 @@
           </p>
           <div class="article-meta">
             <span>2026.06.23</span>
-            <span>阅读约 22 分钟</span>
+            <span>阅读约 35 分钟</span>
             <span>Data Cleaning Roadmap</span>
           </div>
         </header>
@@ -123,56 +124,112 @@
         </section>
 
         <section class="article-section">
-          <h2>2. 数据先分桶，不要一锅炖</h2>
+          <h2>2. PDF 的核心信息：它不是清单，是约束条件</h2>
           <p>
-            PDF 里的数据统计已经覆盖 action-labeled robot、ego video、sim/eval benchmark 等多类数据。
-            第一阶段应该先分桶，而不是直接合成一个巨大的训练池。
+            这份 Data Statistics PDF 里最重要的不是“我们有多少 TB 数据”，而是它暴露了四个真实工程约束：
+            数据格式碎片化、action 语义碎片化、视频规模巨大、标注/embedding 成本会迅速膨胀。
+            所以清洗系统要先服务三个目标：可追踪、可分层、可回滚。
           </p>
           <table class="data-table">
             <thead>
               <tr>
-                <th>桶</th>
-                <th>代表数据</th>
-                <th>第一阶段用途</th>
+                <th>PDF 信息</th>
+                <th>直接含义</th>
+                <th>清洗系统决策</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td>Action-labeled robot</td>
-                <td>DROID、AgiBotWorld、RoboMIND、InternData-A1、RDT-1B、Mobile ALOHA、RH20T</td>
-                <td>policy / WAM action modeling；优先做 state-action-video 对齐。</td>
+                <td>LeRobot v2.0/v2.1 仍然是 episode mp4 + parquet + info.json；v3.0 倾向 chunk/file 大文件和关系型 metadata。</td>
+                <td>不能把每条 episode 当独立小文件随机扫，IO 会崩。</td>
+                <td>先生成 inventory manifest，再按 dataset/shard/chunk 组织；训练侧读 LeRobot v3 chunk 或 WebDataset tar。</td>
               </tr>
               <tr>
-                <td>Video-only ego / ego-exo</td>
-                <td>EgoDex、Ego4D、EgoCentric、Ego-Exo4D</td>
-                <td>RobotWorld 式 action-rich caption；不要伪造低层 action。</td>
+                <td>PDF 提出 65D embodiment vector，并用 mask 或 NaN 处理 padding。</td>
+                <td>统一 action slot 是必要的，但 65D 不等于物理语义已经对齐。</td>
+                <td>保留 raw action/state；新增 canonical 65D；用 mask、schema_version、frame convention 标明语义。</td>
               </tr>
               <tr>
-                <td>Simulation / eval</td>
-                <td>LIBERO、CALVIN、RoboTwin、RoboCasa</td>
-                <td>schema debug、benchmark adapter、closed-loop eval；不要一开始就混入主池。</td>
+                <td>10M episodes、500 frames/episode 级别下，frame-level state/action metadata 约 TB 级。</td>
+                <td>embedding、caption、质量模型不能一上来全量跑。</td>
+                <td>先抽样 QA 和硬过滤；semantic filter 只在 pilot 或高价值 shard 上跑。</td>
               </tr>
               <tr>
-                <td>Low-confidence / unknown convention</td>
-                <td>缺标定、缺 action convention、帧率/时间戳不可靠的数据</td>
-                <td>先 quarantine，只出 manifest 和质量报告。</td>
+                <td>PDF 已经列出 adapters、filters、transforms、writers 的目录草图。</td>
+                <td>这是一个 DataFiltering 工程，而不是一次性脚本。</td>
+                <td>用 registry + stage manifest，任何过滤都必须留下 reason 和版本号。</td>
               </tr>
             </tbody>
           </table>
         </section>
 
         <section class="article-section">
-          <h2>3. 最小数据契约：先写 manifest</h2>
+          <h2>3. 数据先分桶，不要一锅炖</h2>
+          <p>
+            PDF 的数据源可以分成五类。第一阶段应该先分桶和打标签，不要直接合成一个巨大的训练池。
+            因为 WAM 训练有不同任务：有的需要低层 action，有的只需要视频世界动态，有的只适合 eval。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>桶</th>
+                <th>PDF 中的代表数据</th>
+                <th>规模信号</th>
+                <th>第一阶段用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Action-labeled real robot</td>
+                <td>AgiBotWorld-Beta、RoboMIND、InternData-A1、DROID、Mobile ALOHA、RH20T、RDT-1B、FastUMI、RoboCOIN</td>
+                <td>AgiBot 48.1TB、RoboMIND 12.3TB、InternData-A1 6.72TB、DROID 412GB。</td>
+                <td>policy / WAM action modeling；优先做 state-action-video 对齐和 schema coverage。</td>
+              </tr>
+              <tr>
+                <td>Simulation with action</td>
+                <td>GenieSim3.0、InternData-M1、RoboCasa、RoboTwin、CALVIN、LIBERO</td>
+                <td>GenieSim3.0 39.27TB、InternData-M1 5.1TB、RoboTwin2.0 1.36TB。</td>
+                <td>adapter debug、closed-loop eval、failure mode 复现；训练混入比例要单独控制。</td>
+              </tr>
+              <tr>
+                <td>Video-only ego / ego-exo</td>
+                <td>EgoDex、Ego4D、EgoCentric-10K/100K、Ego-Exo4D、EPIC-Kitchens、HOT3D、EgoLive</td>
+                <td>EgoDex 1.7TB、Ego4D 7.88TB、EgoCentric-10K 18.02TB、EgoCentric-100K 25.04TB。</td>
+                <td>RobotWorld 式 action-rich caption、human-object dynamics、world model pretraining；不要伪造 robot action。</td>
+              </tr>
+              <tr>
+                <td>Benchmark / reproduction set</td>
+                <td>LIBERO-fastwam、RoboTwin2.0-FastWAM、CALVIN HF mirrors</td>
+                <td>LIBERO-fastwam 4.69GB、RoboTwin FastWAM 79.1GB。</td>
+                <td>固定验证集和论文复现实验；不参与训练池随机混合。</td>
+              </tr>
+              <tr>
+                <td>Low-confidence / unknown convention</td>
+                <td>质量被 PDF 标注为需要严格筛选的 OXE、缺标定或缺控制约定的数据</td>
+                <td>OXE LeRobot subset 450GB，Open-X subset 1.13TB。</td>
+                <td>先 quarantine，只出 manifest、质量报告和小样本 QA；通过后再进主池。</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>4. 最小数据契约：先写 manifest</h2>
           <p>
             不要从“读出来一个 tensor”开始。先从 manifest 开始，因为后面每一步 filter、transform、recaption、sampling 都需要可追踪。
+            PDF 里也明确建议每条样本至少记录 episode video path 和 filter reason，并且每个过滤步骤都更新 JSONL。
           </p>
           <div class="code-block">
             <pre><code>episode record:
   dataset_id
+  dataset_version
   episode_id
   source_path
+  storage_state: compressed | extracted | migrated | corrupted
   robot_type
   embodiment_tags
+  source_type: real_robot | sim | ego_video | eval
+  supervision_type: action | state_only | video_only | caption_only
   camera_names
   fps
   control_hz
@@ -182,17 +239,22 @@
   has_state
   has_calibration
   instruction_raw
-  filter_status
+  instruction_high_level
+  instruction_low_level
+  filter_status: keep | drop | quarantine | downweight
   filter_reasons
   schema_version
+  license_or_access_note
 
 frame record:
   episode_id
   frame_index
   timestamp
   video_frame_idx
-  state_raw
-  action_raw
+  state_raw_ref
+  action_raw_ref
+  state_canonical_ref
+  action_canonical_ref
   state_mask
   action_mask
   camera_frame_refs</code></pre>
@@ -201,117 +263,388 @@ frame record:
             每个 stage 输出一个新 manifest，而不是覆盖旧文件：
           </p>
           <div class="code-block">
-            <pre><code>raw_manifest.jsonl
-  -> stage1_hard_filter_manifest.jsonl
-  -> aligned_manifest.jsonl
-  -> semantic_manifest.jsonl
-  -> sampling_manifest.jsonl</code></pre>
+            <pre><code>raw_inventory.jsonl
+  -> stage1_integrity_manifest.jsonl
+  -> stage2_hard_filter_manifest.jsonl
+  -> stage3_aligned_manifest.jsonl
+  -> stage4_semantic_manifest.jsonl
+  -> stage5_sampling_manifest.jsonl</code></pre>
           </div>
+          <p>
+            这样做的实际好处是：任何一次训练崩了，都能反查是哪类 robot、哪个 adapter、哪个 transform、哪个 filter reason 引入了分布偏差。
+          </p>
         </section>
 
         <section class="article-section">
-          <h2>4. Hard filters 先跑，语义模型后跑</h2>
+          <h2>5. 存储策略：LeRobot v3 负责索引，WebDataset 负责吞吐</h2>
           <p>
-            第一阶段只做便宜、确定、可解释的硬过滤。VLM/CLIP progress check 计算贵、误判多，应放在第二阶段作为弱标签或权重，而不是 hard delete。
+            PDF 里的存储草图是合理的：dataset 级 info、episode 级 parquet、frame 级 parquet、视频 shard 分开。
+            但是要避免两个坑：一是每帧都挂巨大 JSON，二是过早把所有文本 embedding 存成 float32。
+            如果按 PDF 的估算走到 10M episodes、5B frames，65D state/action/mask 本身就会到数 TB 级，
+            所以列式存储和按需读取不是优化项，而是基本条件。
           </p>
+          <div class="code-block">
+            <pre><code>dataset/
+  info.json
+  episodes/episodes-00000.parquet
+  frames/frames-00000.parquet
+  videos/shard_00000/episode_*.mp4
+  embeddings/text_t5xxl_fp16-00000.arrow
+  manifests/stage*.jsonl
+  reports/filter_report.json
+  reports/schema_coverage.csv</code></pre>
+          </div>
           <table class="data-table">
             <thead>
               <tr>
-                <th>处理</th>
-                <th>规则</th>
+                <th>字段</th>
                 <th>建议</th>
+                <th>原因</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td>硬删</td>
-                <td>视频打不开；首帧/尾帧 decode 失败；metadata 损坏；frame/action 长度对不上。</td>
-                <td>这些样本无法可靠训练。</td>
+                <td>文本 embedding</td>
+                <td>不要默认 float32 全量常驻；优先 fp16/bf16，或按 shard 懒缓存。</td>
+                <td>PDF 估算 10M episodes 仅 T5-XXL pooled float32 就约 160GB；多模型 embedding 会翻倍。</td>
               </tr>
               <tr>
-                <td>硬删或隔离</td>
-                <td>action/state NaN/Inf，且该数据声明有 action。</td>
-                <td>无 action 数据不适用这个规则，应该进 video-only branch。</td>
+                <td>state/action</td>
+                <td>用 fixed-size list / Arrow tensor + zstd；raw 和 canonical 分列。</td>
+                <td>5B frames 级别下，列裁剪和压缩比一次性 JSON 更关键。</td>
               </tr>
               <tr>
-                <td>标记</td>
-                <td>静止、抖动、模糊、低亮度、过曝、超长/超短。</td>
-                <td>先写 quality tags，不要全删；失败恢复和等待片段可能有用。</td>
+                <td>视频</td>
+                <td>保留源编码；只在训练导出阶段生成统一 resolution/fps 的缓存。</td>
+                <td>几十 TB 数据全量重编码成本高，也会丢失原始证据。</td>
               </tr>
               <tr>
-                <td>后置</td>
-                <td>CLIP 首尾帧进展、VLM recaption、success/failure 判定。</td>
-                <td>用于 sampling weight 和 semantic split，不作为第一阶段入口。</td>
+                <td>训练 shard</td>
+                <td>离线导出 WebDataset tar 或 LeRobot v3 chunk。</td>
+                <td>清洗侧要可审计，训练侧要吞吐，两者不要用同一个物理布局硬扛。</td>
               </tr>
             </tbody>
           </table>
         </section>
 
         <section class="article-section">
-          <h2>5. Action schema：65D 可以做 v0，但不能当唯一真相</h2>
+          <h2>6. DataFiltering 工程骨架</h2>
           <p>
-            PDF 里提出的 65D 结构有用：主臂 7D、主末端 24D、副臂 7D、副末端 24D、底盘 3D。
-            但从 Qwen-RobotManip / Cosmos 3 看，清洗层更应该保留两套表示：
+            PDF 里已经有一个很好的工程拆法：adapters 负责把不同原始格式读进来，filters 只负责判定质量，
+            transforms 只负责对齐表示，writers 只负责导出训练格式。不要把这些揉成一个巨大的转换脚本。
           </p>
+          <div class="code-block">
+            <pre><code>DataFiltering/
+  configs/
+    base.yaml
+    pipeline.yaml
+    output.yaml
+    datasets/
+      droid.yaml
+      agibotworld.yaml
+      robomind.yaml
+      ego4d.yaml
+      libero.yaml
+  src/
+    config.py
+    registry.py
+    pipeline.py
+    manifest.py
+    adapters/
+      lerobot_v21_adapter.py
+      hdf5_adapter.py
+      rlds_adapter.py
+      raw_video_adapter.py
+    filters/
+      metadata/
+        static_motion.py
+        jerk_outlier.py
+        trajectory_length.py
+        nan_inf_check.py
+      visual/
+        video_integrity.py
+        resolution_fps.py
+        brightness.py
+        blur_detection.py
+        motion_magnitude.py
+      semantic/
+        clip_progress.py
+        vqa_quality.py
+      diversity/
+        sampling_balancer.py
+        text_clustering.py
+        kinematic_diversity.py
+    transforms/
+      action_space_align.py
+      frequency_resample.py
+      camera_unify.py
+      instruction_normalize.py
+      resolution_transform.py
+      action_normalize.py
+    writers/
+      lerobot_v30_writer.py
+      webdataset_writer.py</code></pre>
+          </div>
+          <p>
+            这里最重要的约束是：adapter 不做过滤，filter 不做坐标变换，transform 不偷偷删除样本。
+            每个 stage 只读入上一个 manifest，输出一个新 manifest 和 report。这样 pipeline 才能重跑、对账和抽样复查。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. Action schema：65D 可以做 v0，但不能当唯一真相</h2>
+          <p>
+            PDF 提出的 65D embodiment vector 很适合作为第一版 canonical slot，因为它能覆盖单臂、双臂、夹爪、灵巧手和移动底盘。
+            但它只能说明“维度位置”，不能自动说明“坐标系、单位、控制模式、绝对/相对动作”。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>slot</th>
+                <th>维度</th>
+                <th>含义</th>
+                <th>清洗注意点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>primary arm</td>
+                <td>7D</td>
+                <td>X, Y, Z, Quat_X, Quat_Y, Quat_Z, Quat_W</td>
+                <td>必须记录 base frame / camera frame / end-effector frame；四元数需要归一化和符号约定。</td>
+              </tr>
+              <tr>
+                <td>primary effector</td>
+                <td>24D</td>
+                <td>灵巧手或夹爪；单自由度夹爪只用第 1 维。</td>
+                <td>其余维度 mask=0；不要只填 0 后丢掉 mask。</td>
+              </tr>
+              <tr>
+                <td>secondary arm</td>
+                <td>7D</td>
+                <td>左臂/副臂 pose。</td>
+                <td>单臂数据 padding；双臂数据要记录左右臂命名是否和数据源一致。</td>
+              </tr>
+              <tr>
+                <td>secondary effector</td>
+                <td>24D</td>
+                <td>副臂末端执行器。</td>
+                <td>同样需要 mask；灵巧手维度语义最好另有 hand_schema。</td>
+              </tr>
+              <tr>
+                <td>mobile base</td>
+                <td>3D</td>
+                <td>X, Y, Yaw</td>
+                <td>区分世界坐标、机器人局部坐标、速度命令和位置命令。</td>
+              </tr>
+            </tbody>
+          </table>
           <div class="code-block">
             <pre><code>raw_state / raw_action:
   dataset original convention
   units, coordinate frame, controller mode preserved
 
 canonical_state / canonical_action:
-  slot-based vector
+  65d slot vector
   binary mask
   schema_version
-  action_repr: joint / eef / camera_frame_delta_eef / waypoint / base
-  rotation_repr: quaternion raw, 6d model-side optional</code></pre>
+  action_repr: joint | eef_pose | delta_eef | waypoint | base_velocity
+  frame_repr: world | robot_base | camera | end_effector
+  rotation_repr: quaternion_raw, rotation6d_model_optional</code></pre>
           </div>
           <p>
-            关键是：<strong>padding 维度必须有 mask</strong>。不能只把缺失值填 0，因为 0 可能是一个真实动作。
-            另外，四元数适合存储和接口，但模型侧可以额外提供 6D rotation，避免旋转表示不连续的问题。
+            对模型而言，四元数不一定是最舒服的旋转表示；训练侧可以额外派生 6D rotation。
+            但清洗层应该保存原始四元数或源数据 pose，因为这是最接近设备接口的证据。
           </p>
         </section>
 
         <section class="article-section">
-          <h2>6. Alignment transform 的顺序</h2>
-          <ol>
-            <li><strong>camera_unify：</strong>统一 `front / wrist_primary / wrist_secondary / overhead` 等名字，保留原始相机名。</li>
-            <li><strong>frequency_resample：</strong>写入 `fps, control_hz, action_dt, action_chunk_size`；先不要盲目全部重采样到 10Hz。</li>
-            <li><strong>action_space_align：</strong>raw action 到 canonical slot；如果缺标定，只标记 `cannot_camera_frame_eef`。</li>
-            <li><strong>normalizer_stats：</strong>按 dataset 和 action dim 计算 mean/std/1%/99% quantile。</li>
-            <li><strong>instruction_normalize：</strong>保留 raw instruction，新增 high-level / low-level / objects / success condition。</li>
-          </ol>
+          <h2>8. Hard filters：先删坏数据，再谈语义质量</h2>
           <p>
-            Qwen-VLA 的 per-dataset quantile normalization 很适合这里：先把不同平台尺度压到稳定范围，
+            第一阶段只做便宜、确定、可解释的硬过滤。VLM/CLIP progress check 计算贵、误判多，应放在第二阶段作为弱标签或权重，而不是 hard delete。
+            PDF 里列出的 filters 可以分成 metadata、visual、semantic、diversity 四层。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>层级</th>
+                <th>规则</th>
+                <th>建议动作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Integrity</td>
+                <td>视频打不开；首帧/尾帧 decode 失败；metadata/HDF5/json/parquet 截断；frame/action 长度对不上。</td>
+                <td>硬删或 quarantine；这类样本无法可靠训练。</td>
+              </tr>
+              <tr>
+                <td>NaN/Inf</td>
+                <td>action/state 出现 NaN/Inf，且该数据声明有 action/state。</td>
+                <td>隔离并记录字段；video-only 数据不适用这个规则。</td>
+              </tr>
+              <tr>
+                <td>Trajectory length</td>
+                <td>过短，例如 &lt;10 或 &lt;20 frames；过长，例如 &gt;2000 frames。</td>
+                <td>先标记，不同任务阈值不同；超长可能需要切段而不是删除。</td>
+              </tr>
+              <tr>
+                <td>Static motion</td>
+                <td>state/action 方差接近 0，或首尾视觉几乎不变。</td>
+                <td>不要全删；等待、reset、失败恢复都可能有价值。建议 downweight 或切掉静止前后缀。</td>
+              </tr>
+              <tr>
+                <td>Jerk/outlier</td>
+                <td>action 一阶/二阶差分异常尖峰，或 state derivative 与 action 明显不一致。</td>
+                <td>孤立尖峰可插值/平滑；连续尖峰 quarantine；阈值按 dataset 分位数设。</td>
+              </tr>
+              <tr>
+                <td>Visual quality</td>
+                <td>分辨率过低、fps 过低、黑屏/过曝、Laplacian blur 过低、遮挡严重。</td>
+                <td>写 quality tags；只对完全不可见或不可 decode 硬删。</td>
+              </tr>
+              <tr>
+                <td>Semantic progress</td>
+                <td>CLIP/VLM 比较首帧/尾帧与 task text 的匹配提升，或 VQA 判断是否完成。</td>
+                <td>只做 weak label：success_score、progress_score、caption_confidence；不要作为第一轮硬门槛。</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            一个关键工程细节：filter 输出不应该只有 keep/drop，还要有 reason、metric value、threshold、filter_version。
+            否则后面发现某个阈值错了，无法恢复被误删的数据。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>9. Alignment transforms：顺序比模型更重要</h2>
+          <p>
+            transforms 的目标不是“把所有数据变得一样”，而是把差异显式化。PDF 里列出的 action_space_align、frequency_resample、camera_unify、
+            instruction_normalize、resolution_transform、action_normalize 都应该是可单独重跑的 stage。
+          </p>
+          <ol>
+            <li><strong>camera_unify：</strong>统一 <code>front / wrist_primary / wrist_secondary / overhead / ego</code> 等名字，保留原始相机名、内参、外参和是否可用。</li>
+            <li><strong>timebase_unify：</strong>先记录原始 <code>fps</code>、<code>control_hz</code>、timestamp drift，再决定是否重采样；不要一上来全转 10Hz。</li>
+            <li><strong>action_space_align：</strong>raw joint / EEF / base command 到 canonical slot；如果缺 URDF、标定或 FK，不要伪装成 EEF，只标记 alignment_level。</li>
+            <li><strong>instruction_normalize：</strong>保留 raw instruction，新增 high-level task、low-level subtask、object set、success condition。</li>
+            <li><strong>normalizer_stats：</strong>按 dataset、robot、slot 计算 mean/std/1%/99% quantile；训练时选择 per-dataset 或 grouped normalization。</li>
+            <li><strong>export_writer：</strong>输出 LeRobot v3 和 WebDataset 两套视图；清洗原表不因训练格式而丢字段。</li>
+          </ol>
+          <div class="code-block">
+            <pre><code>alignment_level:
+  0 raw_only
+  1 time_aligned
+  2 camera_named
+  3 joint_to_eef_base_frame
+  4 eef_camera_frame_available
+  5 calibrated_multi_view_available</code></pre>
+          </div>
+          <p>
+            Qwen-VLA 的 per-dataset quantile normalization 很适合这里：先把不同平台尺度压到稳定范围。
             但不要假装相同数值代表相同物理含义。物理语义仍然靠 schema、mask、prompt 和数据分桶说明。
           </p>
         </section>
 
         <section class="article-section">
-          <h2>7. Video-only 数据不要浪费，但不能伪装成 robot action</h2>
+          <h2>10. Video-only 数据不要浪费，但不能伪装成 robot action</h2>
           <p>
             EgoDex、Ego4D、EgoCentric 这类数据可以给 WAM 很多世界动态和人类操作先验。
             但如果没有低层 robot action，就不要强行变成 action regression 数据。
           </p>
           <p>
-            更合理的是 Qwen-RobotWorld 路线：给它生成 action-rich caption。
+            更合理的是 Qwen-RobotWorld 路线：给它生成 action-rich caption，把“人做了什么、对象发生了什么变化、成功条件是什么”写清楚。
           </p>
           <div class="code-block">
             <pre><code>video-only episode
   -> high_level_task
   -> subtask_sequence
   -> manipulated_objects
-  -> state_changes
+  -> contact / grasp / release events
+  -> visible state changes
   -> success_condition
   -> optional hand/object tracks
   -> world model / language-conditioned future generation branch</code></pre>
           </div>
           <p>
-            后续如果要做人到机器人迁移，再单独做 H2R、retargeting 或 synthetic robot rendering。不要在清洗阶段把这些假设混进主 manifest。
+            后续如果要做人到机器人迁移，再单独做 H2R、retargeting 或 synthetic robot rendering。
+            不要在清洗阶段把这些假设混进主 manifest，因为 fake action 会污染 action head。
           </p>
         </section>
 
         <section class="article-section">
-          <h2>8. MVP：先跑四个 pilot，不要全量开炸</h2>
+          <h2>11. Model-in-the-loop 清洗：只能加标签，不能替代数据契约</h2>
+          <p>
+            PDF 里提到 CLIP progress、VQA quality、recaptioning。这些都应该做，但位置要后置。
+            原因很简单：模型判断的错误通常是系统性错误，直接硬删会把某些机器人、视角、物体、语言风格整体删掉。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>模型步骤</th>
+                <th>产物</th>
+                <th>使用方式</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>CLIP start/end progress</td>
+                <td><code>progress_delta</code>, <code>text_visual_alignment</code></td>
+                <td>训练采样权重；人工 QA 排序；不直接删除。</td>
+              </tr>
+              <tr>
+                <td>VLM recaption</td>
+                <td><code>high_level_task</code>, <code>low_level_subtasks</code>, <code>objects</code>, <code>success_condition</code></td>
+                <td>补足 instruction 粗细粒度；为 video-only 数据建语言监督。</td>
+              </tr>
+              <tr>
+                <td>No-reference video quality</td>
+                <td><code>quality_score</code>, <code>blur_score</code>, <code>occlusion_score</code></td>
+                <td>采样和可视化排序；和硬指标冲突时交给人工抽检。</td>
+              </tr>
+              <tr>
+                <td>Text clustering</td>
+                <td><code>task_cluster_id</code>, <code>long_tail_score</code></td>
+                <td>控制大任务过采样，保护小任务和困难任务。</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>12. 删、降权、隔离：三种决策要分开</h2>
+          <p>
+            数据清洗最容易犯的错是把所有问题都变成 drop。更稳的策略是三类决策分开：
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>决策</th>
+                <th>适用样本</th>
+                <th>原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Drop</td>
+                <td>无法 decode、metadata 截断、帧数/action 数无法对齐且无法修复。</td>
+                <td>训练读不出来或监督错位，保留没有意义。</td>
+              </tr>
+              <tr>
+                <td>Downweight</td>
+                <td>静止片段、轻微模糊、弱 progress、重复任务、大规模低质量来源。</td>
+                <td>信息量低但不一定有害；可用于 world dynamics 或失败建模。</td>
+              </tr>
+              <tr>
+                <td>Quarantine</td>
+                <td>action convention 不清楚、坐标系缺失、FK 不可用、VLM 与 metadata 冲突。</td>
+                <td>这类数据可能有价值，但不能进入主 action pool。</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>13. MVP：先跑四个 pilot，不要全量开炸</h2>
           <table class="data-table">
             <thead>
               <tr>
@@ -329,7 +662,7 @@ canonical_state / canonical_action:
               <tr>
                 <td>RoboMIND 或 AgiBot</td>
                 <td>多 embodiment，适合验证 slot/mask/schema。</td>
-                <td>schema coverage 表能看出每个 robot 的有效 slot。</td>
+                <td>schema coverage 表能看出每个 robot 的有效 slot；单臂/双臂/人形机器人不互相污染。</td>
               </tr>
               <tr>
                 <td>EgoDex 或 Ego4D</td>
@@ -346,17 +679,19 @@ canonical_state / canonical_action:
         </section>
 
         <section class="article-section">
-          <h2>9. 最终流水线</h2>
+          <h2>14. 最终流水线</h2>
           <div class="code-block">
-            <pre><code>download / unpack
+            <pre><code>download / unpack / migrate
   -> raw inventory manifest
+  -> integrity scan: video + metadata + frame count
   -> hard metadata/video filters
   -> dataset-specific adapter
   -> raw-to-canonical action/state transform
   -> frequency / camera / instruction normalization
-  -> normalizer stats: per dataset, per action dim
+  -> normalizer stats: per dataset, per robot, per action slot
   -> semantic recaption / progress scoring
-  -> balanced sampling manifest
+  -> diversity balancing: text cluster + kinematic cluster
+  -> sampling manifest
   -> LeRobot v3 chunks or WebDataset tar shards</code></pre>
           </div>
           <p>
@@ -366,17 +701,19 @@ canonical_state / canonical_action:
         </section>
 
         <section class="article-section">
-          <h2>10. 第一周真正要交付什么</h2>
+          <h2>15. 第一周真正要交付什么</h2>
           <ul>
-            <li><code>dataset_card.yaml</code>：每个数据集的 robot、camera、fps、action convention、license/status。</li>
-            <li><code>raw_manifest.jsonl</code>：全量 episode 索引和路径。</li>
-            <li><code>filter_report.json</code>：每个 stage 的保留率和 filter reason 分布。</li>
-            <li><code>schema_coverage.csv</code>：每个 canonical slot 的覆盖率。</li>
-            <li><code>normalizer_stats.parquet</code>：每 dataset/action dim 的 mean/std/1%/99%。</li>
-            <li><code>qa_contact_sheet/</code>：每数据集随机 100 条，首中尾帧 + instruction + action 曲线。</li>
+            <li><code>dataset_card.yaml</code>：每个数据集的 robot、camera、fps、action convention、license/status、下载/解压/迁移状态。</li>
+            <li><code>raw_inventory.jsonl</code>：全量 episode 索引、路径、source_type、supervision_type。</li>
+            <li><code>filter_report.json</code>：每个 stage 的保留率、drop/downweight/quarantine reason 分布。</li>
+            <li><code>schema_coverage.csv</code>：每个 canonical slot 的覆盖率、mask 比例、alignment_level 分布。</li>
+            <li><code>normalizer_stats.parquet</code>：每 dataset/robot/action slot 的 mean/std/1%/99%。</li>
+            <li><code>qa_contact_sheet/</code>：每数据集随机 100 条，首中尾帧 + instruction + action 曲线 + filter reason。</li>
+            <li><code>pilot_export/</code>：DROID、RoboMIND/AgiBot、EgoDex/Ego4D、LIBERO/RoboTwin 各一小份 LeRobot v3 或 WebDataset 输出。</li>
           </ul>
           <p>
-            只要这六个产物站住，后面才值得谈大规模 recaption、embedding、WebDataset 打包和训练混合比例。
+            只要这些产物站住，后面才值得谈大规模 recaption、embedding、WebDataset 打包和训练混合比例。
+            这也是把 PDF 中“数据统计表”变成真正 WAM 数据工程的分界线。
           </p>
         </section>
 
