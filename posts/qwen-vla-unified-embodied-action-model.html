@@ -20,6 +20,9 @@
   "paper": "https://arxiv.org/abs/2605.30280",
   "pdf": "https://arxiv.org/pdf/2605.30280",
   "project": "https://qwen.ai/blog?id=qwenvla",
+  "parent_file": "index.html",
+  "remix_prompt": "按 paper-deep-dive-style 解读 Qwen-VLA 技术报告，关注 action decoder、T2A、embodiment prompt 和对 FastWAM 的启发。",
+  "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
   "authors": ["Qwen Team", "Qiuyue Wang", "Mingsheng Li", "Jian Guan", "Jinhui Ye", "Sicheng Xie", "Yitao Liu", "Junhao Chen", "Zhixuan Liang", "Jie Zhang", "Xintong Hu", "Xuhong Huang", "Pei Lin", "Junyang Lin", "Dayiheng Liu", "Shuai Bai", "Jingren Zhou"],
   "date": "2026-05-29",
   "category": "robotics-world-models",
@@ -28,7 +31,7 @@
   "datasets": ["RobotSet", "Galaxea", "AgiBot World", "RoboCOIN", "RoboMIND V1/V2", "RDT-1B", "DROID", "BridgeData V2", "RH20T", "RT-1", "BC-Z", "Ego4D", "EPIC-KITCHENS", "EgoDex", "EgoVerse", "Xperience", "ROBOINF synthetic data", "VLN-CE", "R2R", "RxR", "autonomous driving VQA", "spatial grounding data"],
   "methods": ["unified action-and-trajectory prediction", "embodiment-aware prompt conditioning", "zero-padding action projection", "per-dataset quantile normalization", "DiT flow matching", "Text-to-Action DiT pretraining", "continued pretraining", "multi-task SFT", "PPO over flow-matching action chunks", "SDE log-prob estimation", "view-specific camera tags"],
   "code": "https://github.com/QwenLM/Qwen-VLA",
-  "related_posts": ["posts/procvlm-procedure-grounded-progress-rewards.html", "posts/demo-jepa-cross-embodiment-imitation.html", "posts/motus-lingbot-va.html", "posts/world-model-robot-learning.html", "posts/vla-policies.html"],
+  "related_posts": ["posts/wam-data-cleaning-qwen-cosmos-roadmap.html", "posts/procvlm-procedure-grounded-progress-rewards.html", "posts/demo-jepa-cross-embodiment-imitation.html", "posts/motus-lingbot-va.html", "posts/world-model-robot-learning.html", "posts/vla-policies.html"],
   "graph_nodes": ["Qwen-VLA", "Qwen3.5-4B", "DiT action decoder", "T2A", "embodiment-aware prompt", "unified action tensor", "flow matching", "ROBOINF", "PPO for flow policies", "ALOHA", "DOMINO", "FastWAM"],
   "graph_edges": [
     "Qwen-VLA -> extends -> Qwen3.5-4B from VLM to VLA",

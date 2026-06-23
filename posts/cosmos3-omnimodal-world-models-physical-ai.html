@@ -14,6 +14,332 @@
     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
     <script defer src="../assets/article.js?v=20260513"></script>
+    <style>
+      .mrope-visual {
+        width: 100%;
+        min-width: 0;
+        max-width: 980px;
+        margin: 26px 0 30px;
+        padding: 22px;
+        overflow: hidden;
+        border: 1px solid rgba(128, 203, 193, 0.24);
+        border-radius: 8px;
+        background:
+          linear-gradient(90deg, rgba(128, 203, 193, 0.055) 1px, transparent 1px) 0 0 / 72px 72px,
+          linear-gradient(180deg, rgba(128, 203, 193, 0.045) 1px, transparent 1px) 0 0 / 72px 72px,
+          linear-gradient(180deg, rgba(15, 21, 29, 0.96), rgba(9, 12, 17, 0.98));
+      }
+
+      .mrope-visual h4 {
+        margin: 0;
+        color: var(--ink);
+        font-size: 1rem;
+        line-height: 1.35;
+      }
+
+      .mrope-visual p,
+      .mrope-visual figcaption {
+        max-width: none;
+      }
+
+      .mrope-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 18px;
+        min-width: 0;
+        padding-bottom: 18px;
+        border-bottom: 1px solid rgba(128, 203, 193, 0.16);
+      }
+
+      .mrope-head span,
+      .mrope-label,
+      .mrope-axis,
+      .mrope-equation,
+      .mrope-chip {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+
+      .mrope-head span {
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+
+      .mrope-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.55fr) minmax(260px, 0.82fr);
+        gap: 22px;
+        min-width: 0;
+        margin-top: 20px;
+      }
+
+      .mrope-timeline {
+        min-width: 0;
+      }
+
+      .mrope-axis {
+        display: grid;
+        grid-template-columns: 96px repeat(5, 1fr);
+        align-items: center;
+        gap: 0;
+        margin-bottom: 14px;
+        color: var(--muted);
+        font-size: 0.72rem;
+      }
+
+      .mrope-axis div {
+        min-width: 0;
+      }
+
+      .mrope-axis div:not(:first-child) {
+        position: relative;
+        padding-top: 10px;
+        text-align: center;
+      }
+
+      .mrope-axis div:not(:first-child)::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 50%;
+        width: 1px;
+        height: 8px;
+        background: rgba(128, 203, 193, 0.4);
+      }
+
+      .mrope-track {
+        display: grid;
+        grid-template-columns: 96px minmax(0, 1fr);
+        gap: 14px;
+        align-items: center;
+        padding: 14px 0;
+        border-top: 1px solid rgba(128, 203, 193, 0.13);
+      }
+
+      .mrope-track:last-child {
+        border-bottom: 1px solid rgba(128, 203, 193, 0.13);
+      }
+
+      .mrope-label {
+        color: var(--soft);
+        font-size: 0.78rem;
+        line-height: 1.45;
+      }
+
+      .mrope-label small {
+        display: block;
+        color: var(--muted);
+        font-size: 0.69rem;
+      }
+
+      .mrope-lane {
+        position: relative;
+        min-height: 54px;
+      }
+
+      .mrope-lane::before {
+        content: "";
+        position: absolute;
+        top: 50%;
+        right: 0;
+        left: 0;
+        height: 1px;
+        background: linear-gradient(90deg, rgba(128, 203, 193, 0.2), rgba(128, 203, 193, 0.58));
+      }
+
+      .mrope-frame,
+      .mrope-dot {
+        position: absolute;
+        top: 50%;
+        transform: translate(-50%, -50%);
+      }
+
+      .mrope-frame {
+        display: grid;
+        grid-template-columns: repeat(2, 18px);
+        grid-template-rows: repeat(2, 18px);
+        gap: 3px;
+        padding: 5px;
+        border: 1px solid rgba(128, 203, 193, 0.5);
+        border-radius: 6px;
+        background: rgba(10, 17, 22, 0.94);
+        box-shadow: 0 0 0 1px rgba(128, 203, 193, 0.08), 0 10px 26px rgba(0, 0, 0, 0.22);
+      }
+
+      .mrope-cell {
+        display: grid;
+        place-items: center;
+        border-radius: 3px;
+        background: rgba(128, 203, 193, 0.14);
+        color: #c9eee7;
+        font-size: 0.62rem;
+      }
+
+      .mrope-frame::after,
+      .mrope-dot::after {
+        content: attr(data-t);
+        position: absolute;
+        top: calc(100% + 5px);
+        left: 50%;
+        transform: translateX(-50%);
+        color: var(--muted);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        font-size: 0.62rem;
+        white-space: nowrap;
+      }
+
+      .mrope-dot {
+        width: 12px;
+        height: 12px;
+        border-radius: 999px;
+        background: var(--accent-warm);
+        box-shadow: 0 0 0 5px rgba(216, 181, 109, 0.1);
+      }
+
+      .mrope-dot.audio {
+        background: #9fb8ff;
+        box-shadow: 0 0 0 5px rgba(159, 184, 255, 0.1);
+      }
+
+      .mrope-dot.action {
+        width: 15px;
+        height: 15px;
+        border-radius: 4px;
+        background: #e3b36f;
+        transform: translate(-50%, -50%) rotate(45deg);
+        box-shadow: 0 0 0 5px rgba(227, 179, 111, 0.1);
+      }
+
+      .mrope-dot.action::after {
+        transform: translateX(-50%) rotate(-45deg);
+      }
+
+      .mrope-gap {
+        display: grid;
+        grid-template-columns: 96px minmax(0, 1fr);
+        gap: 14px;
+        align-items: center;
+        margin-bottom: 12px;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+
+      .mrope-gap-line {
+        display: grid;
+        grid-template-columns: 0.38fr 44px 1fr;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .mrope-gap-line::before,
+      .mrope-gap-line::after {
+        content: "";
+        height: 1px;
+        background: rgba(216, 181, 109, 0.36);
+      }
+
+      .mrope-chip {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 26px;
+        padding: 0 8px;
+        border: 1px solid rgba(216, 181, 109, 0.34);
+        border-radius: 999px;
+        background: rgba(216, 181, 109, 0.08);
+        color: #e6cf96;
+        font-size: 0.7rem;
+        white-space: nowrap;
+      }
+
+      .mrope-side {
+        display: grid;
+        align-content: start;
+        gap: 12px;
+        padding-left: 20px;
+        border-left: 1px solid rgba(128, 203, 193, 0.16);
+      }
+
+      .mrope-equation {
+        padding: 12px 13px;
+        border: 1px solid rgba(128, 203, 193, 0.18);
+        border-radius: 6px;
+        background: rgba(9, 12, 17, 0.72);
+        color: #d6e7e3;
+        font-size: 0.78rem;
+        line-height: 1.65;
+        overflow-wrap: anywhere;
+      }
+
+      .mrope-equation strong {
+        color: var(--ink);
+      }
+
+      .mrope-legend {
+        display: grid;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 0.86rem;
+        line-height: 1.55;
+      }
+
+      .mrope-legend b {
+        color: var(--soft);
+        font-weight: 720;
+      }
+
+      @media (max-width: 820px) {
+        .mrope-visual {
+          padding: 18px;
+        }
+
+        .mrope-head {
+          align-items: flex-start;
+          flex-direction: column;
+          gap: 8px;
+        }
+
+        .mrope-grid {
+          display: block;
+        }
+
+        .mrope-side {
+          margin-top: 20px;
+          padding-top: 18px;
+          padding-left: 0;
+          border-top: 1px solid rgba(128, 203, 193, 0.16);
+          border-left: 0;
+        }
+
+        .mrope-axis,
+        .mrope-track,
+        .mrope-gap {
+          grid-template-columns: 74px minmax(0, 1fr);
+        }
+
+        .mrope-axis {
+          grid-template-columns: 74px repeat(5, 1fr);
+          font-size: 0.64rem;
+        }
+
+        .mrope-label {
+          font-size: 0.72rem;
+        }
+
+        .mrope-frame {
+          grid-template-columns: repeat(2, 15px);
+          grid-template-rows: repeat(2, 15px);
+          gap: 2px;
+          padding: 4px;
+        }
+
+        .mrope-cell,
+        .mrope-frame::after,
+        .mrope-dot::after {
+          font-size: 0.56rem;
+        }
+      }
+    </style>
     <script type="application/json" id="paper-metadata">
 {
   "title": "Cosmos 3：把 VLM、视频生成、世界模拟和动作模型合成一个 MoT",
@@ -23,19 +349,24 @@
   "authors": ["NVIDIA Cosmos Team"],
   "date": "2026-06-01",
   "category": "robotics-world-models",
-  "tags": ["cosmos3", "omnimodal-world-model", "mixture-of-transformers", "reasoner-generator", "action-token", "world-action-model", "rectified-flow", "3d-mrope", "physical-ai", "robot-policy", "droid", "cosmos-hue", "fastwam"],
+  "parent_file": "index.html",
+  "remix_prompt": "解读 Cosmos 3 技术报告，并持续补充 mRoPE、Action Representation、encoder、训练推理和组会讲稿相关内容。",
+  "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+  "tags": ["cosmos3", "omnimodal-world-model", "mixture-of-transformers", "reasoner-generator", "action-token", "unified-action-representation", "pseudo-action", "world-action-model", "rectified-flow", "3d-mrope", "physical-ai", "robot-policy", "droid", "cosmos-hue", "fastwam"],
   "systems": ["Cosmos 3", "Cosmos3-Nano", "Cosmos3-Super", "Cosmos3-Super-Text2Image", "Cosmos3-Super-Image2Video", "Cosmos3-Nano-Policy-DROID", "Cosmos Framework", "vLLM-Omni", "Diffusers Cosmos3OmniPipeline", "FastWAM"],
   "datasets": ["DROID", "AgiBot", "BridgeData", "Google Robot", "UMI", "Fractal", "RoboLab", "RoboArena", "LIBERO-10", "Cosmos-HUE", "PAIBench-G", "RBench", "Physics-IQ", "Cosmos synthetic Physical AI datasets"],
-  "methods": ["Mixture-of-Transformers", "dual-stream joint attention", "autoregressive reasoner", "diffusion generator", "rectified flow matching", "domain-aware action projection", "relative SE(3) pseudo-action", "3D MRoPE absolute temporal modulation", "structured JSON prompt upsampling", "multi-resolution sequence packing", "forward dynamics", "inverse dynamics", "joint video-action policy"],
+  "methods": ["Mixture-of-Transformers", "dual-stream joint attention", "modality-specific encoders", "ViT visual understanding encoder", "Wan2.2 video VAE", "audio VAE", "autoregressive reasoner", "diffusion generator", "rectified flow matching", "unified action representation", "domain-aware action projection", "relative SE(3) pseudo-action", "action-conditioned rollout", "3D MRoPE absolute temporal modulation", "structured JSON prompt upsampling", "multi-resolution sequence packing", "forward dynamics", "inverse dynamics", "joint video-action policy"],
   "code": "https://github.com/NVIDIA/cosmos",
-  "related_posts": ["posts/cosmos-single-backbone.html", "posts/qwen-vla-unified-embodied-action-model.html", "posts/motus-lingbot-va.html", "posts/prowl-regret-driven-world-model-learning.html", "posts/demo-jepa-cross-embodiment-imitation.html", "posts/world-model-robot-learning.html"],
-  "graph_nodes": ["Cosmos 3", "MoT", "Reasoner tower", "Generator tower", "action tokens", "3D MRoPE", "rectified flow", "Cosmos-HUE", "Cosmos3-Nano-Policy-DROID", "DROID", "FastWAM"],
+  "related_posts": ["posts/cosmos3-group-meeting-speaker-guide.html", "posts/wam-data-cleaning-qwen-cosmos-roadmap.html", "posts/cosmos-single-backbone.html", "posts/qwen-vla-unified-embodied-action-model.html", "posts/motus-lingbot-va.html", "posts/prowl-regret-driven-world-model-learning.html", "posts/demo-jepa-cross-embodiment-imitation.html", "posts/world-model-robot-learning.html"],
+  "graph_nodes": ["Cosmos 3", "MoT", "Reasoner tower", "Generator tower", "modality-specific encoders", "ViT encoder", "video VAE encoder", "audio VAE encoder", "action tokens", "unified action representation", "domain-aware projection", "pseudo-action", "3D MRoPE", "rectified flow", "Cosmos-HUE", "Cosmos3-Nano-Policy-DROID", "DROID", "FastWAM"],
   "graph_edges": [
     "Cosmos 3 -> unifies -> VLM / video generator / forward dynamics / inverse dynamics / policy",
+    "modality-specific encoders -> project -> text / ViT vision / VAE vision / audio / action into shared hidden space",
     "MoT -> routes -> AR tokens to Reasoner tower",
     "MoT -> routes -> diffusion tokens to Generator tower",
     "Generator tower -> denoises -> vision / audio / action tokens",
     "action tokens -> represent -> state transition between adjacent video tokens",
+    "unified action representation -> builds_from -> ego pose / effector pose / grasp state",
     "domain-aware projection -> maps -> heterogeneous embodiment action vectors into shared latent tokens",
     "3D MRoPE -> aligns -> video / audio / action on physical time axis",
     "rectified flow -> trains -> multimodal diffusion subsequence",
@@ -189,6 +520,139 @@ MoT block:
   O_ar = causal_attn(Q_ar, K_ar, V_ar)
   O_dm = full_attn(Q_dm, [K_ar; K_dm], [V_ar; V_dm])</code></pre>
           </div>
+
+          <h3>2.1 Encoders：同一模型里其实有两套视觉入口</h3>
+          <p>
+            Cosmos 3 的 encoder 设计不是“所有模态一个 encoder”，而是 <strong>每种 modality 先用自己的 encoder/tokenizer 变成 transformer hidden token</strong>。
+            论文还明确说，除 language 外，非语言 modality 会额外加一个 learnable modality-specific embedding，让 MoT 能分辨这是 VAE video token、audio token 还是 action token。
+          </p>
+          <p>
+            最重要的分界是：<strong>理解用 token 走 AR subsequence，生成/动作 token 走 DM subsequence</strong>。所以视觉有两套入口：ViT 负责看懂图像/视频，VAE 负责生成图像/视频。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>输入</th>
+                <th>Encoder / tokenizer</th>
+                <th>输出 token</th>
+                <th>走哪条路</th>
+                <th>训练状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Text</td>
+                <td>LLM tokenizer + embedding</td>
+                <td>language tokens</td>
+                <td>AR / Reasoner</td>
+                <td>Reasoner pre-training 和 SFT 中更新。</td>
+              </tr>
+              <tr>
+                <td>Image / video for understanding</td>
+                <td>ViT encoder + projector</td>
+                <td>ViT visual tokens</td>
+                <td>AR / Reasoner</td>
+                <td>和 Reasoner backbone 联合训练。</td>
+              </tr>
+              <tr>
+                <td>Image / video for generation</td>
+                <td>Wan2.2-TI2V-5B video VAE encoder + linear projection</td>
+                <td>continuous VAE latent tokens</td>
+                <td>DM / Generator</td>
+                <td>VAE 冻结，只训练 projection / Generator。</td>
+              </tr>
+              <tr>
+                <td>Audio</td>
+                <td>frozen audio VAE + linear projection</td>
+                <td>audio latent tokens</td>
+                <td>DM / Generator</td>
+                <td>audio VAE 冻结。</td>
+              </tr>
+              <tr>
+                <td>Action</td>
+                <td>geometric pseudo-action + domain-aware projection</td>
+                <td>action tokens</td>
+                <td>DM / Generator</td>
+                <td>projection 从零初始化，和 MoT 一起训。</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3>2.2 Text / Reasoner 入口</h3>
+          <p>
+            Text 没有单独的“扩散 encoder”，就是语言模型自己的 tokenizer 和 embedding。Reasoner pre-training 从 language model + ViT encoder + multimodal projector 开始。
+            论文给的初始化路线是：Edge 用 NVIDIA 内部预训练模型，Nano 用 Qwen3-VL-8B，Super 用 Qwen3-VL-32B。
+          </p>
+          <p>
+            Text token 永远是 AR token：训练目标是 next-token prediction；推理时也只走 causal attention。它的作用是提供语义、任务、结构化 JSON prompt、reasoning context，而不是被 denoise。
+          </p>
+
+          <h3>2.3 ViT visual encoder：给 Reasoner 看懂图像/视频</h3>
+          <p>
+            ViT encoder 用于 <strong>visual understanding</strong>，也就是 VLM 侧的图像/视频输入。它先把图像切成 \(16\times16\) patch，然后通过两层 MLP 合并 \(2\times2\) tokens，并投影到 transformer latent space。
+            论文还沿用 Qwen3-VL 的做法：通过 DeepStack 聚合 ViT visual features，并在视频帧之间插入 text-based timestamps，帮助 AR Reasoner 保持视频时序。
+          </p>
+          <div class="code-block">
+            <pre><code>image / video frame
+  -> ViT patchify, patch size 16 x 16
+  -> 2-layer MLP merges 2 x 2 visual tokens
+  -> projector to transformer hidden dim
+  -> optional DeepStack visual features
+  -> AR subsequence
+  -> Reasoner causal attention</code></pre>
+          </div>
+          <p>
+            这一路输出的 visual tokens 不是拿来生成像素的，而是让 Reasoner 回答问题、做 grounding、判断物理合理性、做 prompt upsampling 或 action CoT。
+            因此它和语言 token 一样放在 AR 前缀里，受 causal attention 约束。
+          </p>
+
+          <h3>2.4 Video VAE encoder：给 Generator 生成图像/视频</h3>
+          <p>
+            Video VAE encoder 用于 <strong>visual generation</strong>。Cosmos 3 采用 Wan2.2-TI2V-5B 的 video VAE，把图像/视频压成连续 latent。
+            论文写得很具体：视频 VAE 时间上压缩 \(4\times\)，空间上总压缩 \(32\times32\)，实现上是 \(16\times16\) spatial compression 后再做 \(2\times2\) patch merge。
+            每个 VAE token 再通过 linear layer 投影到 MoT hidden dim。
+          </p>
+          <div class="code-block">
+            <pre><code>image / video
+  -> frozen Wan2.2 video VAE encoder
+       temporal compression: 4x
+       spatial compression: 32x32
+  -> VAE latent tokens
+  -> linear projection to d_model
+  -> modality embedding
+  -> DM subsequence
+       clean condition tokens
+       noisy target tokens
+  -> Generator full attention + flow denoising
+  -> frozen VAE decoder</code></pre>
+          </div>
+          <p>
+            这里的 VAE token 有两种身份：如果是 I2V/V2V 的输入帧，就是 clean conditioning token，不算 denoising loss；如果是要生成的未来帧，就是 noisy target token，Generator 预测 velocity。
+            这也是 Cosmos 3 能把 T2V、I2V、V2V、forward dynamics 统一起来的原因。
+          </p>
+
+          <h3>2.5 Audio VAE encoder：把声音也变成 DM token</h3>
+          <p>
+            Audio 使用 frozen audio VAE。原始 stereo audio 是 48kHz，hop size 为 1920 samples，因此是 \(48000/1920\approx25\) tokens per second。
+            和 video VAE 一样，audio latent 会通过 linear layer 投影到 transformer hidden dim，再进入 DM subsequence。
+          </p>
+          <p>
+            Audio token 没有空间坐标，只用 mRoPE 的 \((t,0,0)\)。它的训练目标也是 denoising，所以同步视频生成时，模型可以同时 denoise video tokens 和 audio tokens。
+          </p>
+
+          <h3>2.6 Action encoder：严格说是投影器，不是感知 encoder</h3>
+          <p>
+            Action 没有像 ViT/VAE 那样的感知 encoder。它先被整理成几何 pseudo-action：ego pose delta、effector pose delta、grasp state，再按 domain 做 normalization。
+            然后用 domain-specific \(W_{in}^{(k)}\) 投影到 MoT hidden dim，成为 action token。
+          </p>
+          <p>
+            也就是说，action encoder 更像 <strong>domain-aware input projection</strong>。它负责把 9D camera/AV、10D single-arm、20D dual-arm、29D humanoid 等不同维度的动作向量送进同一个 Generator latent space。
+            反向输出时再用 \(W_{out}^{(k)}\) 解码回原 domain 的动作维度。
+          </p>
+          <p class="insight">
+            总结一下：ViT 是“看懂”的 encoder，VAE 是“生成”的 encoder，audio VAE 是“声音生成”的 encoder，action projection 是“控制变量进共享 latent”的接口。
+            它们最后都进同一个 MoT，但不是同一个训练目标，也不是同一个 attention 路径。
+          </p>
         </section>
 
         <section class="article-section">
@@ -226,6 +690,131 @@ MoT block:
           <p>
             <strong>代价/限制：</strong>action 的物理语义没有天然统一。论文用 domain id、不同输入/输出投影、normalization 处理异构维度，但跨 embodiment 泛化仍依赖数据覆盖和后训练。
           </p>
+          <h3>3.2.1 Action Representation：不是黑盒 latent action，而是几何化的 pseudo-action</h3>
+          <p>
+            Cosmos 3 的 action representation 有四层：先定义动作语义，再把不同 embodiment 转成几何向量，再用 domain-aware projection 映射到 MoT hidden space，最后通过 clean/noisy token 布局切换 forward dynamics、inverse dynamics 和 policy。
+            所以这里的 <strong>action token</strong> 不是 Motus / LaWAM 那种从视频里离散发现的 latent action code，而是一个可解释 action vector 的连续投影。
+          </p>
+          <div class="code-block">
+            <pre><code>native control / trajectory
+  -> geometric pseudo-action
+       ego pose delta
+       effector pose delta
+       grasp state
+  -> per-dimension normalization
+       roughly [-1, 1]
+  -> domain-aware projection
+       z = W_in^(k) x + b_in^(k)
+  -> shared MoT action token
+       action token a_t aligns with v_{t-1} -> v_t
+  -> domain-aware decoding
+       x_hat = W_out^(k) z + b_out^(k)</code></pre>
+          </div>
+          <p>
+            <strong>为什么用相对位姿：</strong>机器人、车、相机、手部动作的底层控制接口完全不同。如果直接吃 PID、关节伺服命令、油门方向盘或数据集私有控制量，模型学到的是设备接口，不是世界状态转移。
+            Cosmos 3 把 ego pose 和 effector pose 都转成相邻时刻的相对 \(SE(3)\) 变换 \(\Delta T_t=T_{t-1}^{-1}T_t\)，再拆成 3D translation + 6D rotation。这样 action 的语义变成“这个主体或末端在 3D 中怎么动”。
+          </p>
+          <p>
+            <strong>为什么 grasp state 不取差分：</strong>抓取状态更像当前操作模式，而不是几何位移。手部数据用 fingertip positions 表示抓取形态，机器人用 gripper open/close 连续值表示夹爪状态。
+            对抓取来说，当前是否闭合、闭合到什么程度，通常比“比上一帧多闭合多少”更直接决定接触和物体运动。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Embodiment</th>
+                <th>Action vector</th>
+                <th>维度</th>
+                <th>语义</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Autonomous vehicle</td>
+                <td>ego pose delta</td>
+                <td>9D</td>
+                <td>车辆坐标系到前视相机坐标系下的相对运动。</td>
+              </tr>
+              <tr>
+                <td>Camera motion</td>
+                <td>ego pose delta</td>
+                <td>9D</td>
+                <td>相机轨迹本身就是 action，用于 camera-controllable rollout。</td>
+              </tr>
+              <tr>
+                <td>Egocentric motion</td>
+                <td>head pose + two wrist poses + fingertip states</td>
+                <td>57D</td>
+                <td>头戴相机 ego-motion、双腕 effector motion、两只手的细粒度抓取状态。</td>
+              </tr>
+              <tr>
+                <td>Single-arm robot</td>
+                <td>end-effector pose + gripper</td>
+                <td>10D</td>
+                <td>9D 末端相对位姿 + 1D 夹爪开合。</td>
+              </tr>
+              <tr>
+                <td>Dual-arm robot</td>
+                <td>left/right end-effector pose + grippers</td>
+                <td>20D</td>
+                <td>两条机械臂各 9D 末端相对位姿 + 1D 夹爪。</td>
+              </tr>
+              <tr>
+                <td>Humanoid robot</td>
+                <td>ego pose + two effectors + grippers</td>
+                <td>29D</td>
+                <td>主体运动加双末端控制，覆盖移动主体和双臂操作。</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            <strong>domain-aware projection 的作用：</strong>不同 embodiment 的 \(x\) 维度不同，不能直接塞进同一个 transformer。
+            Cosmos 3 给每个 domain \(k\) 一套输入/输出投影：\(W_{in}^{(k)}\) 把原始 action vector 映射到共享 \(d_{model}\)，\(W_{out}^{(k)}\) 再把生成出的 token 解码回该 domain 的原始动作空间。
+            中间的 MoT backbone 共享，因此模型有机会学到“移动相机、移动车、移动末端执行器”之间共同的几何运动结构。
+          </p>
+          <p>
+            <strong>代码 / API 里怎么落地：</strong>官方 README 把 action 请求暴露成 `extra_params`，核心字段包括 `action_mode`、`domain_name`、`raw_action_dim`、`action_chunk_size`，forward dynamics 还需要 `action_path`。
+            这和论文公式是一致的：`domain_name` 选择第 \(k\) 个 domain projection，`raw_action_dim` 对应 \(d_{in}^{(k)}\)，`action_chunk_size` 决定一次 denoise 的动作序列长度。
+            但 README 同时说明 vLLM-Omni 的 action policy / forward-dynamics 支持仍在 review；所以这些字段更适合当作接口契约和实现方向，而不是已经完全稳定的生产 API。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>API 字段</th>
+                <th>对应论文对象</th>
+                <th>作用</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>action_mode</code></td>
+                <td>clean/noisy token 布局</td>
+                <td>`policy`、`inverse_dynamics`、`forward_dynamics` 决定要 denoise action、video，还是二者一起。</td>
+              </tr>
+              <tr>
+                <td><code>domain_name</code></td>
+                <td>domain id \(k\)</td>
+                <td>选择机器人、自动驾驶、相机或 egocentric domain 的输入/输出投影。</td>
+              </tr>
+              <tr>
+                <td><code>raw_action_dim</code></td>
+                <td>\(d_{in}^{(k)}\)</td>
+                <td>告诉系统原始动作向量维度，例如 camera/AV 9D、single-arm 10D、dual-arm 20D、humanoid 29D。</td>
+              </tr>
+              <tr>
+                <td><code>action_chunk_size</code></td>
+                <td>action token horizon</td>
+                <td>决定一次 policy 或 inverse dynamics 返回多长的动作 chunk。</td>
+              </tr>
+              <tr>
+                <td><code>action_path</code></td>
+                <td>clean action condition</td>
+                <td>forward dynamics 时读取外部动作文件，用 clean action 条件生成未来视频。</td>
+              </tr>
+            </tbody>
+          </table>
+          <p class="insight">
+            对 WAM 来说，这个设计的核心启发是：动作表征不一定要一开始就追求“神秘的 latent action”。先把 action 变成跨 embodiment 可比较的几何状态转移，再用共享 world model 学它和视觉未来的对应关系，往往更稳、更可解释，也更容易接真实机器人接口。
+          </p>
 
           <h3>3.3 3D mRoPE：把视频、音频、动作放到同一个物理时间轴</h3>
           <p>
@@ -241,6 +830,90 @@ MoT block:
           <p>
             <strong>实现细节：</strong>论文还在 AR 和 DM token 的 temporal index 中间插入固定 gap 15000，避免文本末尾和首帧视觉 token 位置太近造成初始帧过饱和或棋盘 artifact。
           </p>
+          <figure class="mrope-visual" aria-labelledby="mrope-visual-title">
+            <div class="mrope-head">
+              <h4 id="mrope-visual-title">3D mRoPE 可视化：同一条物理时间轴，不同 modality 用不同坐标维度</h4>
+              <span>token index → scaled temporal coordinate</span>
+            </div>
+            <div class="mrope-grid">
+              <div class="mrope-timeline">
+                <div class="mrope-gap" aria-label="Autoregressive 和 diffusion token 的位置间隔">
+                  <div class="mrope-label">AR prefix<small>text / ViT</small></div>
+                  <div class="mrope-gap-line"><span class="mrope-chip">gap 15000</span></div>
+                </div>
+                <div class="mrope-axis" aria-hidden="true">
+                  <div>physical t</div>
+                  <div>0.0s</div>
+                  <div>0.17s</div>
+                  <div>0.33s</div>
+                  <div>0.50s</div>
+                  <div>0.67s</div>
+                </div>
+                <div class="mrope-track">
+                  <div class="mrope-label">video<small>\((t,h,w)\)</small></div>
+                  <div class="mrope-lane" aria-label="视频 token 同时编码时间和空间坐标">
+                    <div class="mrope-frame" style="left: 8%" data-t="t=0">
+                      <span class="mrope-cell">00</span><span class="mrope-cell">01</span><span class="mrope-cell">10</span><span class="mrope-cell">11</span>
+                    </div>
+                    <div class="mrope-frame" style="left: 33%" data-t="t=1">
+                      <span class="mrope-cell">00</span><span class="mrope-cell">01</span><span class="mrope-cell">10</span><span class="mrope-cell">11</span>
+                    </div>
+                    <div class="mrope-frame" style="left: 58%" data-t="t=2">
+                      <span class="mrope-cell">00</span><span class="mrope-cell">01</span><span class="mrope-cell">10</span><span class="mrope-cell">11</span>
+                    </div>
+                    <div class="mrope-frame" style="left: 83%" data-t="t=3">
+                      <span class="mrope-cell">00</span><span class="mrope-cell">01</span><span class="mrope-cell">10</span><span class="mrope-cell">11</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="mrope-track">
+                  <div class="mrope-label">audio<small>\((t,0,0)\)</small></div>
+                  <div class="mrope-lane" aria-label="音频 token 只编码时间坐标">
+                    <span class="mrope-dot audio" style="left: 8%" data-t="s0"></span>
+                    <span class="mrope-dot audio" style="left: 20%" data-t="s1"></span>
+                    <span class="mrope-dot audio" style="left: 32%" data-t="s2"></span>
+                    <span class="mrope-dot audio" style="left: 44%" data-t="s3"></span>
+                    <span class="mrope-dot audio" style="left: 56%" data-t="s4"></span>
+                    <span class="mrope-dot audio" style="left: 68%" data-t="s5"></span>
+                    <span class="mrope-dot audio" style="left: 80%" data-t="s6"></span>
+                    <span class="mrope-dot audio" style="left: 92%" data-t="s7"></span>
+                  </div>
+                </div>
+                <div class="mrope-track">
+                  <div class="mrope-label">action<small>\((t,0,0)\)</small></div>
+                  <div class="mrope-lane" aria-label="动作 token 只编码时间坐标">
+                    <span class="mrope-dot action" style="left: 8%" data-t="a0"></span>
+                    <span class="mrope-dot action" style="left: 28%" data-t="a1"></span>
+                    <span class="mrope-dot action" style="left: 48%" data-t="a2"></span>
+                    <span class="mrope-dot action" style="left: 68%" data-t="a3"></span>
+                    <span class="mrope-dot action" style="left: 88%" data-t="a4"></span>
+                  </div>
+                </div>
+              </div>
+              <div class="mrope-side">
+                <div class="mrope-equation">
+                  <strong>coordinate</strong><br>
+                  language: \(t=h=w=i\)<br>
+                  video: \(p=(t,h,w)\)<br>
+                  audio/action: \(p=(t,0,0)\)
+                </div>
+                <div class="mrope-equation">
+                  <strong>temporal scaling</strong><br>
+                  \(\delta t=\frac{TPS_{base}}{TPS}\)<br>
+                  \(TPS_{base}=24/4=6\)<br>
+                  \(TPS_{audio}=48000/1920\approx25\)
+                </div>
+                <div class="mrope-legend">
+                  <div><b>看图方式：</b>横向不是 packed sequence 的 token 序号，而是调制后的真实时间位置。</div>
+                  <div><b>关键点：</b>视频保留空间格子；audio/action 不需要空间坐标，只要和视频落在同一时间尺上。</div>
+                  <div><b>gap：</b>AR 和 DM 之间拉开 15000 的位置缓冲，避免首帧视觉 token 和最后文本 token 的 RoPE 过近。</div>
+                </div>
+              </div>
+            </div>
+            <figcaption>
+              Cosmos 3 的 3D mRoPE 不是简单给每个 token 编号，而是给 token 分配 \((t,h,w)\) 坐标，并用 \(TPS\) 把视频帧率、音频 hop、动作采样率映射到同一条物理时间轴。
+            </figcaption>
+          </figure>
 
           <h3>3.4 Structured JSON prompt upsampling：生成前先把世界状态写清楚</h3>
           <p>
@@ -268,12 +941,85 @@ MoT block:
 
         <section class="article-section">
           <h2>4. 训练和推理流程</h2>
+          <p>
+            这部分最好理解成一个 <strong>task compiler</strong>：Cosmos 3 不为 T2V、I2V、V2V、forward dynamics、inverse dynamics、policy 分别写不同 head，
+            而是把任务统一编译成 <strong>AR prefix + DM clean/noisy suffix</strong>。训练时对 noisy target 做 rectified-flow denoising；推理时把 target 从噪声采样回来。
+          </p>
+          <div class="code-block">
+            <pre><code>task
+  -> build AR prefix S_AR
+       text tokens / ViT image-video tokens / special tokens
+  -> build DM suffix S_DM
+       clean condition tokens first
+       noisy target tokens after
+  -> MoT
+       AR path: causal next-token prediction
+       DM path: full-attention flow denoising
+  -> decode
+       text / image / video / audio / action</code></pre>
+          </div>
+          <p>
+            这个设计的关键不是“支持很多模态”，而是把很多任务都化成同一个问题：
+            <mark>给定干净上下文，denoise 某些目标 modality</mark>。因此训练和推理的差异主要体现在哪些 token 是 clean、哪些 token 是 noisy。
+          </p>
+
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>任务</th>
+                <th>Clean condition</th>
+                <th>Noisy target</th>
+                <th>推理时得到什么</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>T2I / T2V</td>
+                <td>Text AR prefix</td>
+                <td>Image / video VAE tokens</td>
+                <td>从纯噪声生成图像或视频。</td>
+              </tr>
+              <tr>
+                <td>I2V / V2V</td>
+                <td>Text + 初始图像或视频前缀</td>
+                <td>未来视频 tokens</td>
+                <td>根据初始状态 rollout 后续视觉。</td>
+              </tr>
+              <tr>
+                <td>Video transfer</td>
+                <td>Text + edge / depth / segmentation 等控制视频</td>
+                <td>目标 RGB video tokens</td>
+                <td>做受控视频生成，而不是自由想象。</td>
+              </tr>
+              <tr>
+                <td>Forward dynamics</td>
+                <td>历史视频 + clean action tokens</td>
+                <td>未来视频 tokens</td>
+                <td>预测“执行动作后世界怎么变”。</td>
+              </tr>
+              <tr>
+                <td>Inverse dynamics</td>
+                <td>连续视频状态</td>
+                <td>Action tokens</td>
+                <td>反推“这个状态变化由什么动作造成”。</td>
+              </tr>
+              <tr>
+                <td>Policy</td>
+                <td>当前观察 + 任务文本 / proprioception</td>
+                <td>Action tokens + future video tokens</td>
+                <td>同时得到动作和预期视觉后果。</td>
+              </tr>
+            </tbody>
+          </table>
+
           <h3>Reasoner 训练</h3>
           <ul>
             <li>输入：图像/视频/text conversations，经过 tokenizer 和 ViT encoder 进入 AR subsequence。</li>
             <li>输出：文本 token，训练目标是 next-token prediction。</li>
             <li>数据：约 24.2M samples，其中 pre-training 22.0M，SFT 2.2M。SFT 更偏 Physical AI，包含 robotics、driving、smart infrastructure、spatial/temporal reasoning。</li>
             <li>优化：pre-training peak LR 为 \(5\times 10^{-5}\) 给 LM/projector，ViT 为 \(5\times 10^{-6}\)，10% warmup，AdamW，global grad clip 1.0。</li>
+            <li>训练策略：从语言模型 + ViT + multimodal projector 开始，论文说不单独冻结 projector 做 staged alignment，而是从 pre-training 一开始联合训练。</li>
+            <li>SFT 防遗忘：SFT 阶段额外混入高质量 pre-training 子集，采样预算约为 pre-training:SFT = 1:4，并加入 800K instruction-following 数据稳定对话能力。</li>
           </ul>
 
           <h3>Generator 训练</h3>
@@ -283,7 +1029,16 @@ MoT block:
             <li>pre-training：T2I、T2V、I2V、V2V、audio-video；256p/480p/720p 多分辨率，固定 74K token context packing。</li>
             <li>mid-training：继续保留 image/video/audio，同时加入 action 25%、general transfer 20%、driving transfer 5%。</li>
             <li>post-training：Super 专门后训练 T2I/I2V；Nano 后训练 DROID policy。</li>
+            <li>冻结关系：Generator pre-training 时只更新 generation-specific 参数，Reasoner tower 保持冻结，避免生成训练破坏语言和视觉理解能力。</li>
+            <li>多分辨率噪声：256p/480p/720p 使用不同 flow shift，论文给出 \(s=1,3,5\)，高分辨率用更强 shift 偏向高噪声训练。</li>
+            <li>CFG 训练：为了支持 classifier-free guidance，所有 modality 使用 10% text dropout。</li>
           </ul>
+          <p>
+            Generator 的 loss 是 masked MSE。对一个 target latent \(x_0\)，先采样噪声 \(\epsilon\)，构造
+            \(x_\sigma=\sigma\epsilon+(1-\sigma)x_0\)，模型预测 \(v^\*=\epsilon-x_0\)。
+            这里最重要的实现约束是：<strong>clean conditioning tokens 被 mask 掉，不计入 denoising loss</strong>。
+            这让同一个序列里可以同时放“已知条件”和“要生成的目标”，不会逼模型重建输入条件。
+          </p>
 
           <h3>推理</h3>
           <ul>
@@ -292,6 +1047,31 @@ MoT block:
             <li>Action forward/inverse dynamics：论文默认 50 steps、guidance 1、shift 5；DROID policy 为了低延迟改成 4 steps、guidance 3、shift 5，并跳过视频 latent decode。</li>
             <li>DROID policy 输入：当前 proprioception + 三视角视觉拼成 540x640 canvas；输出 32 个未来 absolute joint-position actions，15 Hz，部署在 2 张 RTX Pro 6000 上。</li>
           </ul>
+          <p>
+            推理时的一个细节是，Reasoner 和 Generator 可以串起来用。短 prompt 先交给 Reasoner 或外部 LLM 做 structured JSON prompt upsampling，
+            把对象、空间布局、动作时序、camera motion、duration、FPS 等字段补全；然后 Generator 读取这个更结构化的 AR context 去 denoise DM tokens。
+            这解释了为什么 Cosmos 3 文章里把 prompt upsampling 当作系统组件，而不是普通提示词润色。
+          </p>
+          <div class="code-block">
+            <pre><code>deployment examples
+
+VLM reasoning:
+  AR only
+  text/image/video -> Reasoner -> text
+
+I2V generation:
+  AR text + clean image latent + noisy future video
+  -> Generator denoise -> video decode
+
+Forward dynamics:
+  AR text + clean history video + clean action + noisy future video
+  -> Generator denoise -> predicted future video
+
+Robot policy:
+  AR instruction + clean observation/proprio + noisy action
+  -> Generator denoise -> action projection
+  -> execute action chunk</code></pre>
+          </div>
         </section>
 
         <section class="article-section">

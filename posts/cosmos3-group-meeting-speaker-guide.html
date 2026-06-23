@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      name="description"
+      content="Cosmos 3 组会讲稿整理：如何用一条主线讲清楚 MoT、AR/DM token packing、action tokens、3D mRoPE、训练 curriculum 和推理系统。"
+    >
+    <title>Cosmos 3 组会讲稿：把 MoT、Action Token 和 mRoPE 讲成一条线</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.css">
+    <link rel="stylesheet" href="../styles.css?v=20260513c">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.10/dist/contrib/auto-render.min.js"></script>
+    <script defer src="../assets/article.js?v=20260513"></script>
+    <script type="application/json" id="paper-metadata">
+{
+  "title": "Cosmos 3 组会讲稿：把 MoT、Action Token 和 mRoPE 讲成一条线",
+  "paper": "https://research.nvidia.com/labs/cosmos-lab/cosmos3/technical-report.pdf",
+  "authors": ["NVIDIA Cosmos Team"],
+  "date": "2026-06-23",
+  "category": "robotics-world-models",
+  "parent_file": "index.html",
+  "remix_prompt": "把最近整理的 Cosmos 3 组会讲稿、MoT 解释、mRoPE 讨论和训练/推理口播内容整理成博客。",
+  "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+  "tags": ["cosmos3", "mixture-of-transformers", "mot", "action-token", "3d-mrope", "world-action-model", "presentation-notes", "robotics-world-models", "fastwam"],
+  "systems": ["Cosmos 3", "Cosmos3-Nano", "Cosmos3-Super", "Cosmos3-Nano-Policy-DROID", "Qwen3-VL", "Wan2.2 VAE", "FastWAM"],
+  "datasets": ["DROID", "robot action data", "audio-video data", "Physical AI video data"],
+  "methods": ["AR subsequence", "diffusion subsequence", "Mixture-of-Transformers", "dual-stream joint attention", "rectified flow", "clean/noisy token packing", "action-as-transition", "3D MRoPE", "TPS scaling", "prompt upsampling"],
+  "code": "https://github.com/NVIDIA/cosmos",
+  "related_posts": ["posts/cosmos3-omnimodal-world-models-physical-ai.html", "posts/rise-of-world-action-models.html", "posts/qwen-robotworld-language-conditioned-world-model.html", "posts/qwen-vla-unified-embodied-action-model.html", "posts/wam-data-cleaning-qwen-cosmos-roadmap.html"],
+  "graph_nodes": ["Cosmos 3 talk", "MoT", "AR subsequence", "DM subsequence", "action token", "3D mRoPE", "TPS scaling", "clean/noisy token packing", "prompt upsampling", "FastWAM"],
+  "graph_edges": [
+    "Cosmos 3 talk -> explains -> MoT",
+    "MoT -> separates -> Reasoner and Generator parameter paths",
+    "DM subsequence -> attends_to -> AR subsequence",
+    "action token -> represents -> visual transition",
+    "3D mRoPE -> aligns -> video audio action physical time",
+    "clean/noisy token packing -> unifies -> VLM T2V I2V forward dynamics inverse dynamics policy",
+    "Cosmos 3 talk -> informs -> FastWAM action/world model design"
+  ]
+}
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="../index.html#paper-reading">Paper</a>
+        <a href="../index.html#notes">AI Game</a>
+        <a href="../index.html#posts">Robot</a>
+      </nav>
+    </header>
+
+    <main>
+      <article class="article-shell">
+        <header class="article-hero">
+          <a class="back-link" href="../index.html#paper-reading">← 返回文章列表</a>
+          <p class="kicker">Talk Notes · Cosmos 3</p>
+          <h1>Cosmos 3 组会讲稿：把 MoT、Action Token 和 mRoPE 讲成一条线</h1>
+          <p class="article-dek">
+            这份讲稿不是复述 Cosmos 3 全文，而是把汇报主线压成一个系统问题：
+            Physical AI 里的理解、生成、动作，能不能放进同一个 token/attention/position/loss 接口？
+          </p>
+          <div class="article-meta">
+            <span>2026.06.23</span>
+            <span>阅读约 18 分钟</span>
+            <span>Cosmos 3 · Talk Script</span>
+          </div>
+        </header>
+
+        <section class="article-section">
+          <h2>0. 一句话结论</h2>
+          <p>
+            Cosmos 3 的讲法应该避开“又一个视频生成模型”。更准确的定位是：
+            它试图把 <strong>VLM 的理解</strong>、<strong>world model 的想象</strong>、<strong>VLA/WAM 的动作输出</strong>
+            改写成同一个序列系统。核心不是模态多，而是任务差异被压缩成 clean/noisy token layout。
+          </p>
+          <dl class="term-list">
+            <dt>主线</dt>
+            <dd>从割裂的 VLM / video generator / VLA，走到 AR Reasoner + DM Generator 的统一 backbone。</dd>
+            <dt>听众要记住</dt>
+            <dd>MoT 分开 reasoning 和 denoising；action token 表示状态转移；3D mRoPE 把 video、audio、action 放到同一条物理时间轴。</dd>
+            <dt>汇报风格</dt>
+            <dd>先讲系统接口，再讲公式。不要先报参数和榜单，否则听众会把它误解成视频模型 scale-up。</dd>
+          </dl>
+        </section>
+
+        <section class="article-section">
+          <h2>1. 开场怎么讲</h2>
+          <p>
+            开场可以直接问：Physical AI 里的模型到底应该只会“看懂世界”，只会“生成未来”，还是要同时理解、预测和行动？
+            Cosmos 3 的答案是第三个。
+          </p>
+          <blockquote>
+            <p>过去我们常把系统拆开：VLM 看懂当前画面，world model 想象未来，policy 或 VLA 输出动作。这个 pipeline 很自然，但接口很碎。</p>
+          </blockquote>
+          <p>
+            所以这次讲 Cosmos 3，不要按技术报告顺序从数据讲到评测。更好的顺序是：
+            <strong>问题割裂 → 统一序列 → MoT → action token → mRoPE → 训练/推理系统</strong>。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>2. 用一张表讲清楚任务统一</h2>
+          <p>
+            Cosmos 3 最重要的抽象是：Generator 统一做一件事，给定 clean condition tokens，denoise noisy target tokens。
+            任务类型不是靠换模型完成，而是靠换 token 布局完成。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>模式</th>
+                <th>Clean condition</th>
+                <th>Noisy target</th>
+                <th>现场口播重点</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>VLM</td>
+                <td>text / image / video in AR</td>
+                <td>none</td>
+                <td>只走 Reasoner，像视觉语言模型。</td>
+              </tr>
+              <tr>
+                <td>T2V / I2V</td>
+                <td>text，或 text + initial frames</td>
+                <td>future VAE video tokens</td>
+                <td>把视频生成看成 conditional denoising。</td>
+              </tr>
+              <tr>
+                <td>Forward dynamics</td>
+                <td>observed video + clean action</td>
+                <td>future video</td>
+                <td>回答“如果这样动，未来会怎样”。</td>
+              </tr>
+              <tr>
+                <td>Inverse dynamics</td>
+                <td>before / after video</td>
+                <td>action tokens</td>
+                <td>回答“这个变化需要什么动作”。</td>
+              </tr>
+              <tr>
+                <td>Policy</td>
+                <td>observation + goal</td>
+                <td>action + future video</td>
+                <td>动作和视觉后果共同生成。</td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section">
+          <h2>3. MoT：不是把 VLM 和 diffusion model 粗暴串起来</h2>
+          <p>
+            MoT 的核心不是传统 MoE 那种动态专家路由，而是在每个 decoder block 里固定拆出两条参数路径：
+            Reasoner path 处理 AR subsequence，Generator path 处理 diffusion subsequence。
+          </p>
+          <div class="math-block">
+            \[
+            O_{AR}=\operatorname{Attn}_{causal}(Q_{AR},K_{AR},V_{AR})
+            \]
+          </div>
+          <div class="math-block">
+            \[
+            O_{DM}=\operatorname{Attn}_{full}(Q_{DM},[K_{AR};K_{DM}],[V_{AR};V_{DM}])
+            \]
+          </div>
+          <p>
+            现场讲的时候要强调信息方向：AR token 不被 noisy DM token 更新；DM token 可以读 AR context。
+            这样 Reasoner 保持干净语义上下文，Generator 用这些上下文去做高维连续 denoising。
+          </p>
+          <div class="code-block">
+            <pre><code>AR subsequence:
+  language tokens + ViT visual tokens
+  -> Reasoner tower
+  -> causal next-token prediction
+
+DM subsequence:
+  VAE vision + audio + action tokens
+  -> Generator tower
+  -> full-attention rectified-flow denoising
+
+Information flow:
+  AR -> DM allowed
+  noisy DM -> AR blocked</code></pre>
+          </div>
+        </section>
+
+        <section class="article-section">
+          <h2>4. Action token：把动作讲成 transition</h2>
+          <p>
+            Cosmos 3 里 action token \(a_t\) 放在 \(v_{t-1}\) 和 \(v_t\) 中间，所以它不是“第 t 帧的控制量”，而是连接相邻视觉状态的转移：
+          </p>
+          <div class="math-block">
+            \[
+            a_t:\ v_{t-1}\rightarrow v_t
+            \]
+          </div>
+          <p>
+            这句话适合在 slide 5 多停一下。它解释了为什么 forward dynamics、inverse dynamics、policy 可以是同一套模型：
+            只要改变哪个 token 是 clean，哪个 token 是 noisy，训练目标就从“预测后果”切换到“反推动作”或“联合生成策略”。
+          </p>
+          <p>
+            对 FastWAM 或自己的 WAM 工作，这里的可复用点不是直接照搬模型规模，而是：
+            <mark>先把 action 定义成状态转移，再用 world model 学 action 和未来视觉的对应关系。</mark>
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>5. mRoPE：讲成物理时间轴，不要讲成普通位置编码</h2>
+          <p>
+            Cosmos 3 的序列里混着 text、video、audio、action。它们的 token index 不等价于物理时间：
+            视频有 FPS 和 VAE temporal compression，音频有 hop size，动作有控制频率。
+          </p>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Token 类型</th>
+                <th>坐标</th>
+                <th>为什么这样讲</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Language</td>
+                <td><code>(i,i,i)</code></td>
+                <td>让 3D mRoPE 对文本退化成 1D RoPE，兼容预训练 VLM。</td>
+              </tr>
+              <tr>
+                <td>Video</td>
+                <td><code>(t,h,w)</code></td>
+                <td>保留时间和空间格子。</td>
+              </tr>
+              <tr>
+                <td>Audio / Action</td>
+                <td><code>(t,0,0)</code></td>
+                <td>没有空间网格，只需落在正确物理时间点。</td>
+              </tr>
+              <tr>
+                <td>AR/DM margin</td>
+                <td><code>gap=15000</code></td>
+                <td>在 RoPE 空间隔开文本末尾和首帧视觉 token。</td>
+              </tr>
+            </tbody>
+          </table>
+          <p>
+            TPS scaling 的口播方式也要简单：同样 10 个 token 在 16 FPS 和 30 FPS 里代表的真实时长不同，
+            所以需要用 \(\delta_t=TPS_{base}/TPS\) 映射到同一条物理时间轴。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>6. 15 分钟压缩版讲法</h2>
+          <ol>
+            <li><strong>Slide 1-3：</strong>问题定位。Cosmos 3 解决 VLM、video generator、VLA/WAM 割裂的问题。</li>
+            <li><strong>Slide 4-5：</strong>任务统一。forward / inverse / policy 都是 clean/noisy token 布局。</li>
+            <li><strong>Slide 7-10：</strong>架构。AR Reasoner + DM Generator + MoT 双路径 attention。</li>
+            <li><strong>Slide 11-12：</strong>mRoPE。用 \((t,h,w)\) 和 TPS scaling 对齐 video/audio/action。</li>
+            <li><strong>Slide 14-16：</strong>训练推理。先理解，再生成，再动作；推理时 Reasoner、Generator、upsampler、action mode 分工。</li>
+          </ol>
+          <p>
+            压缩版结论：Cosmos 3 最值得学的不是模型规模，而是三层统一接口：
+            token packing 统一任务，MoT 统一理解和生成，mRoPE 统一时空位置。
+          </p>
+        </section>
+
+        <section class="article-section">
+          <h2>7. 结尾逐字稿</h2>
+          <blockquote>
+            <p>
+              Cosmos 3 的核心不是“我有更多模态”，而是“我把不同 Physical AI 任务写成同一个 sequence contract”。
+              VLM 是 AR-only；视频生成是 text condition 加 noisy VAE token；forward dynamics 是 clean action 生成 future video；
+              inverse dynamics 是 clean video 反推 action；policy 是 action 和 future video 共同 denoise。
+            </p>
+          </blockquote>
+          <blockquote>
+            <p>
+              对我们自己的 WAM 工作，最可复用的不是 Cosmos 3 的训练规模，而是这个设计思想：
+              先把 action 定义成状态转移，再用 clean/noisy token layout 学 action 和未来世界的对应关系。
+            </p>
+          </blockquote>
+        </section>
+
+        <section class="article-section">
+          <h2>Sources</h2>
+          <ul class="source-list">
+            <li><a href="cosmos3-omnimodal-world-models-physical-ai.html">本站 Cosmos 3 技术解读</a></li>
+            <li><a href="https://research.nvidia.com/labs/cosmos-lab/cosmos3/technical-report.pdf">Cosmos 3 Technical Report</a></li>
+            <li><a href="https://github.com/NVIDIA/cosmos">NVIDIA/cosmos GitHub</a></li>
+          </ul>
+        </section>
+      </article>
+
+      <nav class="article-shell next-links" aria-label="文章导航">
+        <a href="cosmos3-omnimodal-world-models-physical-ai.html">上一篇：Cosmos 3 技术解读</a>
+        <a href="wam-data-cleaning-qwen-cosmos-roadmap.html">下一篇：WAM 数据清洗路线</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <a href="../index.html#paper-reading">返回首页</a>
+    </footer>
+  </body>
+</html>
