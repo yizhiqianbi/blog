@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Orca 论文精读：从 next-token / next-frame / next-action 转向 next-state prediction，用 Qwen3.5 VLM、query latent、unconscious/conscious learning 和多模态 readout 构建世界 latent。">
+<title>Orca：把世界模型的目标从输出预测改成状态预测</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,800;1,9..144,400&family=JetBrains+Mono:wght@300;400;500;700&family=Noto+Serif+SC:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script>
+window.MathJax = {
+  tex: {inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']]},
+  svg: {fontCache: 'global'}
+};
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+<script type="application/json" id="paper-metadata">
+{
+  "title": "Orca：把世界模型的目标从输出预测改成状态预测",
+  "paper": "https://arxiv.org/abs/2606.30534",
+  "pdf": "https://arxiv.org/pdf/2606.30534v1",
+  "project": "https://orca-wm.github.io/",
+  "repository": null,
+  "parent_file": "index.html",
+  "remix_prompt": "深入解读 https://arxiv.org/pdf/2606.30534v1 这篇论文，然后写一个博客到主页。",
+  "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+  "authors": ["Orca Team", "Beijing Academy of Artificial Intelligence", "Yihao Wang", "Yuheng Ji", "Mingyu Cao", "Yanqing Shen", "Runze Xiao"],
+  "date": "2026-07-02",
+  "paper_date": "2026-06-29",
+  "category": "robotics-world-models",
+  "tags": ["orca", "world-foundation-model", "next-state-prediction", "world-latent", "unconscious-learning", "conscious-learning", "query-latent", "qwen3.5", "sd3.5-readout", "action-expert", "flow-matching", "real-robot", "price-benchmark"],
+  "systems": ["Orca", "Qwen3.5", "Stable Diffusion 3.5", "DiT Action Expert", "FlagScale", "FSDP2", "V-JEPA 2.1", "Emu3", "Emu3.5", "Qwen3.5 baseline", "pi0.5"],
+  "datasets": ["125K hours video inventory", "160M event annotations", "11.5M VQA data", "PRICE-V0.1", "AgiBot-World", "HomeInteract", "PE-Video", "PSI-Ego", "real-robot five-task dataset", "MVBench", "TemporalBench", "3DSRBench", "SWITCH"],
+  "methods": ["latent world-state modeling", "next-state prediction", "observation-only state transition", "event-conditioned state transition", "VQA response generation", "learnable query tokens", "ViT-space latent matching", "frozen-backbone readout probing", "SD3.5 LoRA readout", "DiT action expert", "chunked cross entropy", "activation recomputation"],
+  "code": "The project page and v1 paper did not expose an official GitHub code repository as of this writeup. Implementation notes are therefore based on paper Appendix C/D and project-page figures, not code inspection.",
+  "related_posts": ["posts/rise-of-world-action-models.html", "posts/cosmos3-omnimodal-world-models-physical-ai.html", "posts/physisforcing-physics-reinforced-world-simulator.html", "posts/demo-jepa-cross-embodiment-imitation.html", "posts/qwen-robotworld-language-conditioned-world-model.html", "posts/qwen-vla-unified-embodied-action-model.html", "posts/prowl-regret-driven-world-model-learning.html"],
+  "graph_nodes": ["Orca", "next-state prediction", "world latent", "unconscious learning", "conscious learning", "Query 1", "Query 2", "Qwen3.5 VLM", "frozen ViT latent", "SD3.5 readout", "Action Expert", "PRICE-V0.1", "GalBot real robot", "FastWAM"],
+  "graph_edges": [
+    "Orca -> reframes -> next-token / next-frame / next-action as next-state prediction",
+    "unconscious learning -> predicts -> next-frame visual latent",
+    "conscious learning -> predicts -> event-conditioned visual latent",
+    "Query 1 -> carries -> observation-only predictive state",
+    "Query 2 -> carries -> event-conditioned predictive state",
+    "frozen ViT latent -> supervises -> latent matching loss",
+    "world latent -> readout_to -> language / image / action",
+    "SD3.5 readout -> decodes -> predicted target image",
+    "Action Expert -> decodes -> action chunks",
+    "Orca -> informs -> FastWAM latent-state conditioning"
+  ]
+}
+</script>
+<style>
+:root{
+  --ink:#1a1614;
+  --paper:#f4f0e8;
+  --paper-2:#ebe4d4;
+  --accent:#c8421f;
+  --accent-soft:#e8b89c;
+  --blue:#2d4a6e;
+  --green:#5a6b3a;
+  --gold:#b8924a;
+  --line:rgba(26,22,20,0.18);
+  --muted:rgba(26,22,20,0.55);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  font-family:'Noto Serif SC','Fraunces',Georgia,serif;
+  background:var(--paper);
+  color:var(--ink);
+  line-height:1.75;
+  font-size:16px;
+  background-image:
+    radial-gradient(circle at 20% 10%, rgba(184,146,74,0.06) 0, transparent 40%),
+    radial-gradient(circle at 80% 70%, rgba(200,66,31,0.04) 0, transparent 50%);
+  overflow-x:hidden;
+}
+.masthead{
+  border-bottom:3px double var(--ink);
+  padding:56px 60px 32px;
+}
+.masthead-top{
+  display:flex;
+  justify-content:space-between;
+  align-items:baseline;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.15em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin-bottom:28px;
+  border-bottom:1px solid var(--line);
+  padding-bottom:14px;
+}
+.masthead-top a{color:inherit;text-decoration:none}
+.masthead-top a:hover{color:var(--accent)}
+.masthead h1{
+  font-family:'Fraunces',serif;
+  font-weight:300;
+  font-size:clamp(40px,5.8vw,76px);
+  line-height:1.02;
+  letter-spacing:-0.025em;
+  margin-bottom:20px;
+  overflow-wrap:anywhere;
+}
+.masthead h1 em{font-style:italic;color:var(--accent);font-weight:400}
+.byline{
+  font-family:'Fraunces',serif;
+  font-style:italic;
+  font-size:18px;
+  color:var(--muted);
+  margin-bottom:24px;
+}
+.subtitle{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:15.5px;
+  max-width:900px;
+  line-height:1.7;
+}
+.tags{margin-top:28px;display:flex;gap:10px;flex-wrap:wrap}
+.tag{
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  padding:5px 11px;
+  border:1px solid var(--ink);
+}
+.tag.filled{background:var(--ink);color:var(--paper)}
+section{
+  padding:60px;
+  border-bottom:1px solid var(--line);
+}
+.section-num{
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.2em;
+  color:var(--accent);
+  margin-bottom:12px;
+  display:block;
+}
+.section-title{
+  font-family:'Fraunces',serif;
+  font-weight:400;
+  font-size:clamp(30px,3.8vw,46px);
+  line-height:1.1;
+  letter-spacing:-0.015em;
+  margin-bottom:34px;
+  max-width:1000px;
+}
+.section-title em{font-style:italic;color:var(--accent)}
+.body-text{max-width:920px;font-size:16.3px;line-height:1.9}
+.body-text p{margin-bottom:18px}
+.body-text strong{font-weight:600;color:var(--accent)}
+.body-text em{color:var(--blue);font-style:italic}
+.tldr{
+  background:var(--ink);
+  color:var(--paper);
+  padding:52px 60px;
+  display:grid;
+  grid-template-columns:1fr 2fr;
+  gap:60px;
+  position:relative;
+}
+.tldr::before{
+  content:'OVERVIEW';
+  position:absolute;
+  top:18px;
+  right:30px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.3em;
+  color:var(--accent-soft);
+}
+.tldr h2{
+  font-family:'Fraunces',serif;
+  font-weight:300;
+  font-size:36px;
+  line-height:1.15;
+  font-style:italic;
+}
+.tldr h2 strong{
+  display:block;
+  color:var(--accent-soft);
+  font-style:normal;
+  font-size:52px;
+  line-height:1;
+  margin-bottom:10px;
+}
+.tldr-content{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:15px;
+  line-height:1.85;
+}
+.tldr-content p{margin-bottom:16px}
+.tldr-content strong{color:var(--accent-soft)}
+.pullquote{
+  margin:40px 0;
+  padding:36px 44px;
+  border-left:4px solid var(--accent);
+  background:var(--paper-2);
+  font-family:'Fraunces',serif;
+  font-style:italic;
+  font-size:22px;
+  line-height:1.55;
+  font-weight:300;
+  max-width:980px;
+}
+.insight{
+  margin:32px 0;
+  padding:34px 38px;
+  border:1px solid var(--ink);
+  position:relative;
+  background:var(--paper);
+  max-width:980px;
+}
+.insight-label{
+  position:absolute;
+  top:-12px;
+  left:22px;
+  background:var(--paper);
+  padding:0 12px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.2em;
+  color:var(--accent);
+  text-transform:uppercase;
+}
+.insight h3{
+  font-family:'Fraunces',serif;
+  font-size:24px;
+  font-weight:500;
+  margin-bottom:16px;
+  font-style:italic;
+  line-height:1.3;
+}
+.insight p{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14.5px;
+  line-height:1.9;
+  margin-bottom:12px;
+}
+.formula,.code-block{
+  margin:22px 0;
+  padding:18px 22px;
+  background:var(--paper-2);
+  border-left:3px solid var(--ink);
+  font-family:'JetBrains Mono',monospace;
+  font-size:13px;
+  line-height:1.7;
+  overflow-x:auto;
+}
+.formula{font-family:'Noto Serif SC',serif}
+.wide-figure{
+  margin:34px 0;
+  padding:18px;
+  background:var(--paper-2);
+  border:1px solid var(--line);
+}
+.wide-figure img{
+  width:100%;
+  display:block;
+  background:white;
+}
+.wide-figure figcaption{
+  margin-top:12px;
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:13px;
+  color:var(--muted);
+}
+table.cmp{
+  width:100%;
+  border-collapse:collapse;
+  margin:28px 0;
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:13.5px;
+}
+table.cmp th,table.cmp td{
+  padding:13px 14px;
+  text-align:left;
+  vertical-align:top;
+  border-bottom:1px solid var(--line);
+}
+table.cmp th{
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  color:var(--muted);
+  background:var(--paper-2);
+  border-bottom:2px solid var(--ink);
+}
+table.cmp tr.best td{background:rgba(200,66,31,0.06);font-weight:600}
+table.cmp td.num{font-family:'JetBrains Mono',monospace;text-align:right;white-space:nowrap}
+.two-col{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:26px;
+  max-width:1100px;
+}
+.note-list{
+  max-width:940px;
+  margin:18px 0 0 20px;
+}
+.note-list li{margin:10px 0;padding-left:4px}
+.sources a{color:var(--blue);text-decoration:none;border-bottom:1px solid rgba(45,74,110,0.35)}
+.sources a:hover{color:var(--accent);border-color:var(--accent)}
+.footer{
+  padding:40px 60px;
+  background:var(--ink);
+  color:var(--paper);
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.15em;
+  text-transform:uppercase;
+}
+.footer-right{text-align:right;color:rgba(244,240,232,0.6)}
+@media (max-width:900px){
+  .masthead,section,.tldr{padding:38px 20px}
+  .masthead-top{flex-wrap:wrap;gap:8px 14px;align-items:flex-start}
+  .masthead h1{font-size:clamp(34px,12vw,48px);letter-spacing:0}
+  .tldr{grid-template-columns:1fr;gap:32px}
+  .two-col{grid-template-columns:1fr}
+  table.cmp{display:block;max-width:100%;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .formula,.code-block,.insight{max-width:100%;overflow-x:auto}
+  .pullquote{padding:26px 24px;font-size:19px}
+  .footer{padding:30px 20px;flex-direction:column;align-items:flex-start;gap:10px}
+  .footer-right{text-align:left}
+}
+</style>
+</head>
+<body>
+<header class="masthead">
+  <div class="masthead-top">
+    <a href="../index.html#paper-reading">← Paper Reading</a>
+    <span>Paper Notes · 2026</span>
+  </div>
+  <h1>Orca：<em>把世界模型的目标从输出预测改成状态预测</em></h1>
+  <p class="byline">Next-State Prediction · World Latent · Multimodal Readouts</p>
+  <p class="subtitle">
+    Orca 的核心不是“一个模型同时会聊天、画图、控制机器人”这么简单，而是把世界模型的中心对象从输出端迁到 latent state：先用 observation-only 和 event-conditioned 两类 state transition 训练一个世界 latent，再冻结 backbone，用语言、图像、动作 readout 去验证这个 latent 是否真的携带世界变化的信息。
+  </p>
+  <div class="tags">
+    <span class="tag filled">World Foundation Model</span>
+    <span class="tag">Next-State Prediction</span>
+    <span class="tag">Qwen3.5</span>
+    <span class="tag">Robot Action Readout</span>
+  </div>
+</header>
+
+<section class="tldr">
+  <div>
+    <h2><strong>0</strong>一句话结论</h2>
+  </div>
+  <div class="tldr-content">
+    <p><strong>痛点。</strong> 现有基础模型多围绕输出接口训练：LLM 做 next-token，视频模型做 next-frame，VLA 做 next-action；这些目标各自有效，但没有明确逼模型形成可被多种接口复用的“世界状态”。</p>
+    <p><strong>核心招。</strong> Orca 用 Qwen3.5 VLM 做 encoder，通过 learnable queries 预测冻结视觉编码器空间里的未来/事件目标 visual latent，同时保留 VQA next-token 监督，最后冻结 backbone，只训练轻量 readout 到文本、图像和动作。</p>
+    <p><strong>效果。</strong> Orca-4B 在文本 readout 平均 51.8，高于 Qwen3.5-4B 的 46.7；在 PRICE-V0.1 图像状态预测平均 59.8，超过 Flux.2 [klein] 的 56.1；在真实机器人 OOD action readout overall rule-based 32.4，高于 pi0.5 的 29.4、V-JEPA 2.1 的 17.0 和 Qwen3.5 的 10.5。</p>
+    <p><strong>代价。</strong> 训练依赖 32 nodes / 256 GPUs、12.5K hours 实际预训练视频、160M event inventory 的数据工程；当前只在 0.8B/4B 规模验证，监督仍绑定冻结 ViT 空间，项目页未公开官方代码。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 1 · POSITIONING</span>
+  <h2 class="section-title">这篇到底在解决什么：<em>让 world latent 成为共同中间层</em></h2>
+  <div class="body-text">
+    <p>
+      Orca 把问题定义为 <strong>latent world-state modeling</strong>。它不是只训练一个更强 VLM，也不是只训练一个机器人 policy，而是要学习一个 \(S_t\)：这个状态可以从视觉和语言信号里抽象出来，又能被语言、图像、动作三种 readout 读出去。
+    </p>
+    <p>
+      和 JEPA 类模型相比，Orca 不满足于 observation-only latent prediction，而是加入语言事件条件和 VQA，让 latent 同时学自然动态、事件语义和常识问答。和 VLA / WAM 相比，Orca 的预训练不依赖 action labels，而是先学状态变化，再用少量 action-labeled trajectories 训练 Action Expert。
+    </p>
+  </div>
+  <table class="cmp">
+    <thead>
+      <tr><th>范式</th><th>中心目标</th><th>学到什么</th><th>Orca 的差异</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Next-token</td>
+        <td>预测语言 token</td>
+        <td>语义、知识、推理接口</td>
+        <td>语言只是显式条件和 readout，不是唯一训练中心</td>
+      </tr>
+      <tr>
+        <td>Next-frame / video generation</td>
+        <td>预测像素或视频 latent</td>
+        <td>视觉动态和生成能力</td>
+        <td>Orca 预测冻结 ViT latent，不直接追求像素重建</td>
+      </tr>
+      <tr>
+        <td>Next-action / VLA</td>
+        <td>预测动作 chunk</td>
+        <td>policy 和 affordance</td>
+        <td>动作只作为 downstream readout，预训练先学世界变化</td>
+      </tr>
+      <tr class="best">
+        <td>Next-state / Orca</td>
+        <td>预测世界 latent state transition</td>
+        <td>可读出文本、图像、动作的共享状态表征</td>
+        <td>用 frozen-backbone probing 证明 latent 能迁移到多个输出接口</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="pullquote">
+    核心 insight：Orca 不是把所有输出都塞进一个 decoder，而是先训练一个“可被多种 decoder 读取”的世界 latent。
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 2 · FORMULATION</span>
+  <h2 class="section-title">方法总览：<em>两个 state-transition 目标加一个语言监督</em></h2>
+  <figure class="wide-figure">
+    <img src="../assets/orca/con_vs_uncon.png" alt="Orca unconscious and conscious learning">
+    <figcaption>项目页图：Orca encoder 用 unconscious learning 学自然密集转移，用 conscious learning 学语言事件条件下的稀疏有意义转移，并输出 world latent representation。</figcaption>
+  </figure>
+  <div class="formula">
+    \[
+    S=f_\theta(X), \qquad
+    S_{t+\Delta}\sim p_\Theta(S_{t+\Delta}\mid S_t,z_t,c_t),\quad \Delta\in\mathbb{Z}\setminus\{0\}
+    \]
+  </div>
+  <div class="body-text">
+    <p>
+      这里 \(X=\{X_m\}_{m\in M}\) 是多模态世界信号；当前版本主要用视觉和语言。\(S_t\) 是抽象 world state；\(z_t\) 表示不可见动态因素，例如物理规律、物体属性、环境力；\(c_t\) 是显式条件，例如事件描述、任务意图、因果前提。
+    </p>
+  </div>
+  <div class="code-block">
+visual frame v_t<br>
+  -> Qwen3.5 VLM encoder + learnable Query 1<br>
+  -> hidden(q_1) -> 2-layer MLP -> predicted visual latent \hat{v}^l_{t+1}<br>
+  -> match frozen ViT latent v^l_{t+1}<br><br>
+visual frame v_t + event text e_{t+\Delta}<br>
+  -> Qwen3.5 VLM encoder + Query 1 + Query 2<br>
+  -> hidden(q_2) -> MLP -> predicted event-target latent \hat{v}^l_{t+\Delta}<br>
+  -> match frozen ViT latent v^l_{t+\Delta}<br><br>
+video V + question l_q<br>
+  -> LM head -> answer l_a
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 3 · INNOVATIONS</span>
+  <h2 class="section-title">关键创新点：<em>从 slogan 还原到张量</em></h2>
+  <div class="insight">
+    <span class="insight-label">Innovation 1</span>
+    <h3>Unconscious learning：从连续视频里学密集自然动态</h3>
+    <p><strong>旧方法为什么不行。</strong> 只靠语言或 VQA 很难学到物体运动、遮挡、惯性、接触等低层连续变化；只做像素重建又容易把训练目标浪费在纹理。</p>
+    <p><strong>它怎么改。</strong> 输入当前帧 \(v_t\) 和 learnable Query 1，取 Query 1 的最后层 hidden state，经两层 MLP 预测下一帧的视觉 latent \(\hat{v}^l_{t+1}\)，目标 \(v^l_{t+1}\) 来自冻结 vision encoder。</p>
+    <p><strong>为什么有效。</strong> Query 1 成了一个“预测插槽”：它不需要输出文本，而是专门吸收当前视觉状态中对下一状态有用的信息。监督在 ViT latent 空间进行，比像素空间更偏语义和结构。</p>
+    <p><strong>代价/限制。</strong> 这个 latent 是否保留足够几何和动力学细节，取决于冻结 vision encoder。论文自己也承认 ViT-space supervision 会把世界状态绑定到已有语义空间。</p>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">Innovation 2</span>
+    <h3>Conscious learning：用事件语言指定“应该转到哪个状态”</h3>
+    <p><strong>旧方法为什么不行。</strong> observation-only 学到的是自然临近转移，但很多智能行为需要理解“做某件事之后世界应如何变化”，这不是单纯下一帧能覆盖的。</p>
+    <p><strong>它怎么改。</strong> 把视频切成粗粒度和细粒度事件，每个事件有语言 caption。输入 \(v_t\)、Query 1、事件描述 \(e_{t+\Delta}\)、Query 2，让 Query 2 预测前一个或后一个事件中的随机目标帧 latent。</p>
+    <p><strong>为什么有效。</strong> 语言事件提供了稀疏但有意义的 state transition supervision：比如“关上微波炉门”不是预测下一帧纹理，而是预测动作完成后的状态。</p>
+    <p><strong>代价/限制。</strong> 事件标注质量决定上限。论文说有 160M event annotations，但没有开放完整标注器、过滤规则和数据配比。</p>
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">Innovation 3</span>
+    <h3>Frozen-backbone readout probing：证明 latent 有用，而不是 decoder 很强</h3>
+    <p><strong>旧方法为什么不行。</strong> 如果 backbone 和 decoder 一起 fine-tune，结果变好很难归因：到底是世界 latent 更强，还是 decoder 记住了任务。</p>
+    <p><strong>它怎么改。</strong> 预训练完成后冻结 Orca backbone。语言 readout 直接复用 LM head；图像 readout 只训练 SD3.5 上的 MLP adaptor 和 LoRA；动作 readout 只训练 DiT Action Expert。</p>
+    <p><strong>为什么有效。</strong> 这相当于 probing：如果不同 readout 都随预训练数据和模型规模变强，就说明共享 latent 的质量在提升。</p>
+    <p><strong>代价/限制。</strong> 读出能力仍受 decoder 选择影响。图像 readout 依赖 SD3.5，动作 readout 依赖 DiT Action Expert；它证明 latent 可读出，但不等价于端到端最优。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 4 · TRAINING</span>
+  <h2 class="section-title">训练和推理流程：<em>先训练 encoder，再冻结读出</em></h2>
+  <figure class="wide-figure">
+    <img src="../assets/orca/readout.png" alt="Orca downstream readout architecture">
+    <figcaption>项目页 readout 图：语言复用 LM head，图像经 MLP adaptor + frozen SD3.5 MMDiT/LoRA 读出，动作经 MLP adaptor + DiT Action Expert 读出。</figcaption>
+  </figure>
+  <table class="cmp">
+    <thead>
+      <tr><th>阶段</th><th>输入</th><th>输出</th><th>训练哪些模块</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Pre-training / \(L_{obs}\)</td>
+        <td>当前帧 \(v_t\)、Query 1</td>
+        <td>下一帧 ViT latent \(\hat{v}^l_{t+1}\)</td>
+        <td>Qwen3.5 LLM、learnable queries、visual transition MLP；vision encoder frozen</td>
+      </tr>
+      <tr>
+        <td>Pre-training / \(L_{evt}\)</td>
+        <td>当前帧 \(v_t\)、事件文本 \(e_{t+\Delta}\)、Query 1/2</td>
+        <td>前/后相邻事件目标 latent \(\hat{v}^l_{prev/next}\)</td>
+        <td>同上，Query 2 负责 event-conditioned predictive state</td>
+      </tr>
+      <tr>
+        <td>Pre-training / \(L_{vqa}\)</td>
+        <td>视频 \(V\)、问题 \(l_q\)</td>
+        <td>语言答案 \(l_a\)</td>
+        <td>标准 next-token LM head 监督</td>
+      </tr>
+      <tr class="best">
+        <td>Readout post-training</td>
+        <td>冻结 Orca latent</td>
+        <td>文本、目标图像、动作 chunk</td>
+        <td>只训练对应 readout；Orca backbone frozen</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="body-text">
+    <p>
+      预训练主设置：Orca-4B 基于 Qwen3.5-4B，hidden size 2560；Orca-0.8B 基于 Qwen3.5-0.8B，hidden size 1024。两者都用 32 nodes / 256 GPUs，训练 10,844 steps，最大序列长度 1024，warmup 200 steps，AdamW，基础 VLM learning rate \(3.5\times10^{-5}\)，visual head learning rate \(1.2\times10^{-4}\)，learnable queries 数量 256。
+    </p>
+    <p>
+      论文说 inventory 有 125K hours video、160M event annotations、11.5M VQA；但 v1 当前实验只用了十分之一视频，即约 12.5K hours。这一点很关键：Orca 的 claim 是范式和 scaling trend，而不是已经吃完所有数据。
+    </p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 5 · FORMULAS</span>
+  <h2 class="section-title">公式/算法逐行讲解：<em>loss 对应什么操作</em></h2>
+  <div class="formula">
+    \[
+    \ell_{lat}(\hat{v}^l,v^l)=0.1\|\hat{v}^l-v^l\|_2^2+
+    0.9\left(1-\frac{\langle \hat{v}^l,v^l\rangle}{\|\hat{v}^l\|_2\|v^l\|_2}\right)
+    \]
+  </div>
+  <table class="cmp">
+    <thead>
+      <tr><th>项</th><th>含义</th><th>实现视角</th><th>风险</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>\(\hat{v}^l\)</td>
+        <td>Query hidden state 经过 visual transition head 后预测出的视觉 latent</td>
+        <td>Orca-4B 的 visual head 是 \(2560\to20480\to2560\) 两层 MLP</td>
+        <td>如果 query 学不到状态压缩，就会退化成弱特征预测</td>
+      </tr>
+      <tr>
+        <td>\(v^l\)</td>
+        <td>目标帧通过冻结 vision encoder 得到的 latent</td>
+        <td>teacher forcing 目标，不反传到 ViT</td>
+        <td>世界状态被固定 ViT 表征约束</td>
+      </tr>
+      <tr>
+        <td>0.1 MSE</td>
+        <td>对齐绝对向量位置</td>
+        <td>让 predicted latent 不偏离 teacher latent</td>
+        <td>高维 latent 中 MSE 可能过分惩罚无关方向</td>
+      </tr>
+      <tr>
+        <td>0.9 Cosine</td>
+        <td>对齐方向/语义相似性</td>
+        <td>更像 representation alignment</td>
+        <td>只保方向可能丢失尺度信息</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="formula">
+    \[
+    L_{obs}=\mathbb{E}[\ell_{lat}(\hat{v}^l_{t+1},v^l_{t+1})]
+    \]
+    \[
+    L_{evt}=\frac{1}{2}\mathbb{E}\left[
+      \ell_{lat}(\hat{v}^l_{prev},v^l_{prev})+
+      \ell_{lat}(\hat{v}^l_{next},v^l_{next})
+    \right]
+    \]
+    \[
+    L_{pre}=0.1L_{obs}+0.5L_{evt}+0.4L_{vqa}
+    \]
+  </div>
+  <div class="body-text">
+    <p>
+      \(L_{obs}\) 是无条件的临近未来预测，管自然连续动态；\(L_{evt}\) 是语言指定目标事件的双向预测，管“这个事件发生前/后世界应该是什么样”；\(L_{vqa}\) 是标准语言建模，保留语言接口和常识 grounding。采样层面，论文写 state transition samples 和 VQA samples 约按 5:1 混合。
+    </p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 6 · DATA</span>
+  <h2 class="section-title">数据系统：<em>world latent 不是只靠机器人数据训出来的</em></h2>
+  <figure class="wide-figure">
+    <img src="../assets/orca/datapipline.png" alt="Orca data composition and pretraining pipeline">
+    <figcaption>项目页数据 pipeline：video data、event data、VQA data 分别支撑 observation-only transition、event-conditioned transition 和 VQA response generation。</figcaption>
+  </figure>
+  <table class="cmp">
+    <thead>
+      <tr><th>数据类型</th><th>包含什么</th><th>服务哪个目标</th><th>价值</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>A. Video Data</td>
+        <td>ego-centric interaction、exo-centric manipulation、action-free robot execution、natural dynamics</td>
+        <td>\(L_{obs}\) 和 \(L_{evt}\)</td>
+        <td>提供连续视觉状态变化和真实物理互动</td>
+      </tr>
+      <tr>
+        <td>B. Event Data</td>
+        <td>粗/细粒度事件分割和 caption</td>
+        <td>\(L_{evt}\)</td>
+        <td>把“下一状态”从邻近帧扩展到有语义意义的事件结果</td>
+      </tr>
+      <tr>
+        <td>C. VQA Data</td>
+        <td>基于语言和视频构造的问答</td>
+        <td>\(L_{vqa}\)</td>
+        <td>保留语言 readout 能力和常识/因果解释</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="insight">
+    <span class="insight-label">Data Insight</span>
+    <h3>为什么 action readout 能受益于无 action 预训练</h3>
+    <p>论文的关键证据是：pre-training 没有 action labels，但 action readout 随预训练 scale 变强。合理解释是，视频中的物体运动、局部接触、状态转移先验降低了 Action Expert 的学习难度。它不是让 Orca 直接会控制，而是给下游 action decoder 一个更接近“未来状态”的条件。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 7 · TRAIN / INFER GAP</span>
+  <h2 class="section-title">训练-推理对齐：<em>读出是 probing，也是约束</em></h2>
+  <div class="two-col">
+    <div class="insight">
+      <span class="insight-label">Aligned</span>
+      <h3>对齐的地方</h3>
+      <p>预训练和 readout 都围绕 latent state 展开：预训练要求 Query 预测未来/事件目标视觉 latent；readout 则从这个 latent 读出文本、图像、动作。论文用冻结 Orca backbone 减少了“readout 反过来改 backbone”的归因混乱。</p>
+      <p>Action readout 的条件也很明确：Orca latent \(q_1\)、noisy action + time embedding、proprioception。它输出 action horizon 30、action dimension 16 的动作 chunk，推理 timesteps 为 4。</p>
+    </div>
+    <div class="insight">
+      <span class="insight-label">Mismatch</span>
+      <h3>不一致的地方</h3>
+      <p>预训练目标是 frozen ViT latent，不是像素、三维状态或真实动力学变量。图像 readout 依赖 SD3.5 的生成能力，动作 readout 依赖额外真实机器人数据。读出结果好，不代表世界 latent 已经是完整物理状态。</p>
+      <p>V1 论文没有公开官方训练代码和数据构造脚本，query 插入位置、token layout、目标帧采样、event segmentation 细节仍然需要等代码或数据文档确认。</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 8 · EXPERIMENTS</span>
+  <h2 class="section-title">实验复盘：<em>最强证据是 frozen readout scaling</em></h2>
+  <figure class="wide-figure">
+    <img src="../assets/orca/scaling_performance_01.png" alt="Orca downstream readout scaling performance">
+    <figcaption>项目页 scaling 图：文本、图像、动作 readout 都随预训练数据和模型规模提升。注意这是 readout probing，不是端到端联合优化。</figcaption>
+  </figure>
+  <table class="cmp">
+    <thead>
+      <tr><th>评测</th><th>关键结果</th><th>批判性解读</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Text generation</td>
+        <td>Orca-4B avg 51.8；Qwen3.5-4B avg 46.7；Orca-0.8B avg 40.8</td>
+        <td>提升主要来自 TemporalBench、3DSRBench、SWITCH；但 V-JEPA 2.1 部分结果来自原论文，且不是所有 benchmark 都可比。</td>
+      </tr>
+      <tr>
+        <td>PRICE-V0.1 image prediction</td>
+        <td>Orca 4+2 avg 59.8±10.9；Flux.2 [klein] 56.1±18.1；FLUX.1-Kontext 40.9±13.5</td>
+        <td>PRICE 聚焦真实互动后的目标状态，符合论文问题；但 judge 包括多个闭源模型，分数受 prompt 和 judge 偏好影响。</td>
+      </tr>
+      <tr>
+        <td>Real-robot action readout</td>
+        <td>Overall rule-based：Orca 32.4，pi0.5 29.4，V-JEPA 2.1 17.0，Qwen3.5 10.5</td>
+        <td>这是最贴近具身价值的证据；但成功率本身很低，任务只有 5 个，且比较的是冻结 latent + 各自 action expert / official pi0.5 post-training。</td>
+      </tr>
+      <tr class="best">
+        <td>Ablation</td>
+        <td>三项 loss 全开：Text 51.8、Image 59.8、Action 32.4、Average 48.0</td>
+        <td>支持“三目标互补”的主张。尤其 \(L_{obs}\) 对 action readout 重要，\(L_{evt}\) 对 image prediction 重要，\(L_{vqa}\) 保语言接口。</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="body-text">
+    <p>
+      我认为这篇最可信的证据不是某个单点 SOTA，而是两个趋势：第一，pre-training loss 随数据和模型规模下降；第二，冻结 backbone 后，文本、图像、动作 readout 都随预训练 scale 提升。这比“某个 decoder 调得好”更能说明 latent 在变强。
+    </p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 9 · IMPLEMENTATION</span>
+  <h2 class="section-title">可复现清单：<em>论文写得细，但代码未公开</em></h2>
+  <table class="cmp">
+    <thead>
+      <tr><th>模块</th><th>论文给出的细节</th><th>复现缺口</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Backbone</td>
+        <td>Qwen3.5-4B / 0.8B；vision encoder frozen，LLM trainable</td>
+        <td>项目页没有代码仓库；Qwen3.5 具体 checkpoint 和接口需确认</td>
+      </tr>
+      <tr>
+        <td>Queries</td>
+        <td>256 learnable queries；Query 1 做 observation-only，Query 2 做 event-conditioned</td>
+        <td>query token 插入位置、attention mask、视觉 token layout 需代码确认</td>
+      </tr>
+      <tr>
+        <td>Pre-training</td>
+        <td>32 nodes / 256 GPUs；10,844 steps；12.5K hours；AdamW；warmup 200；\(L_{pre}=0.1L_{obs}+0.5L_{evt}+0.4L_{vqa}\)</td>
+        <td>数据采样、event segmentation、过滤和去重策略未公开</td>
+      </tr>
+      <tr>
+        <td>Vision readout</td>
+        <td>SD3.5 frozen VAE/MMDiT；MLP adaptor 556.9M；LoRA rank 32；768x768；batch 512；200K steps</td>
+        <td>训练数据规模、prompt 格式、negative/CFG 细节不完整</td>
+      </tr>
+      <tr class="best">
+        <td>Action readout</td>
+        <td>8-block DiT；hidden 1024；action/state dim 16；horizon 30；inference timesteps 4；20K steps；200 trajectories/task</td>
+        <td>真实机器人控制频率、action normalization、proprioception schema 和 safety controller 未给出</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="insight">
+    <span class="insight-label">Uncertainty</span>
+    <h3>【不确定】world latent 具体是哪一个张量</h3>
+    <p>论文语义上说 world latent，但实现里至少有三类候选：1. VLM 最后层 hidden states；2. Query 1/Query 2 的 predictive hidden states；3. MLP 后预测的 visual latent。图像和动作 readout 里更像使用 Query latent 或其 MLP adaptor 输出。验证方式：等官方代码，看 readout 模块 forward 的 condition tensor 来源、shape 和 layer index。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 10 · FASTWAM</span>
+  <h2 class="section-title">对 FastWAM / 具身操作的启发</h2>
+  <div class="body-text">
+    <p>
+      Orca 对 FastWAM 最有启发的地方是 <strong>predictive query state</strong>。FastWAM 里如果只用当前视觉 token 或最终 hidden state 做 action condition，可能缺少“下一状态应该是什么”的结构化中间变量。Orca 的 Query 1/2 设计提供了一个简单模板：用专门 query token 承载未来状态预测，再把这个 token 作为 action decoder 的条件。
+    </p>
+    <p>
+      第二个启发是预训练不一定要等 action labels。Orca 的 action readout 结果说明，大规模视频 state transition 预训练可以降低少量机器人轨迹下 action expert 的学习难度。对 FastWAM 来说，可以先用互联网/ego/robot video 做 latent transition，再用少量动作数据接 action head。
+    </p>
+    <p>
+      但别把它理解成“无动作数据也能直接控制机器人”。Orca 仍然用 200 trajectories/task 训练 Action Expert；真实控制能力来自 world latent 和 action-labeled post-training 的组合。
+    </p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 11 · IMPROVEMENTS</span>
+  <h2 class="section-title">可能改进方向</h2>
+  <table class="cmp">
+    <thead>
+      <tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>把 proprioception / tactile / force 加入 pre-training state</td>
+        <td>让 world latent 不只依赖视觉和语言，更接近真实物理状态</td>
+        <td>多传感器同步、尺度归一化和缺失模态处理复杂</td>
+        <td>接触类任务上比较 vision-only vs force-aware latent 的 action readout</td>
+      </tr>
+      <tr>
+        <td>从 ViT-space teacher 转向 native world latent</td>
+        <td>减少冻结视觉 encoder 对状态空间的限制</td>
+        <td>训练不稳定，缺少可靠 teacher</td>
+        <td>同等数据下比较 ViT latent、VAE latent、object-centric latent 的 readout scaling</td>
+      </tr>
+      <tr>
+        <td>长 horizon event chain 预测</td>
+        <td>让模型学习分钟级之外的计划和状态演化</td>
+        <td>event annotation 噪声和 compounding error 更重</td>
+        <td>多事件预测 benchmark：给起点和目标，要求预测中间状态序列</td>
+      </tr>
+      <tr>
+        <td>把 Action Expert 和 world latent 做闭环 rollout training</td>
+        <td>减少 action readout 只看单步 latent 的 mismatch</td>
+        <td>真实机器人数据成本高，仿真到真实偏差明显</td>
+        <td>RoboTwin / real robot 上比较 open-loop chunk vs latent rollout policy</td>
+      </tr>
+      <tr class="best">
+        <td>建立 state-transition eval，而不是只用生成或成功率</td>
+        <td>更直接评估“状态是否按物理和因果变化”</td>
+        <td>需要标注状态变量、接触关系和反事实结果</td>
+        <td>PRICE 扩展为视频/3D/robot state benchmark，加入人工和自动指标一致性分析</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 12 · MEMORY CARD</span>
+  <h2 class="section-title">速读备忘卡</h2>
+  <ul class="note-list">
+    <li>Orca 的中心主张是 next-state prediction，不是单纯多任务输出。</li>
+    <li>它先训练 world latent，再冻结 backbone，用不同 readout 检验 latent。</li>
+    <li>Unconscious learning：当前帧 + Query 1 预测下一帧 frozen ViT latent。</li>
+    <li>Conscious learning：当前帧 + 事件文本 + Query 2 预测前/后事件目标 latent。</li>
+    <li>VQA response generation 保留语言接口和常识 grounding。</li>
+    <li>latent matching loss 是 0.1 MSE + 0.9 cosine。</li>
+    <li>总预训练损失是 \(0.1L_{obs}+0.5L_{evt}+0.4L_{vqa}\)，transition:VQA 采样约 5:1。</li>
+    <li>Orca-4B 基于 Qwen3.5-4B，训练用 32 nodes / 256 GPUs，当前只用 12.5K hours 视频。</li>
+    <li>图像 readout 用 frozen SD3.5 + MLP adaptor + LoRA；动作 readout 用 DiT Action Expert。</li>
+    <li>真实机器人结果证明 world latent 对 action decoder 有帮助，但成功率仍低，任务范围有限。</li>
+    <li>最大弱点是 ViT-space supervision、代码/数据未公开、world latent 张量定义需要代码确认。</li>
+  </ul>
+</section>
+
+<section class="sources">
+  <span class="section-num">SOURCES</span>
+  <h2 class="section-title">资料来源</h2>
+  <div class="body-text">
+    <p><a href="https://arxiv.org/pdf/2606.30534v1">arXiv PDF v1: Orca: The World is in Your Mind</a></p>
+    <p><a href="https://arxiv.org/abs/2606.30534">arXiv abstract page</a></p>
+    <p><a href="https://orca-wm.github.io/">Project Page</a></p>
+  </div>
+</section>
+
+<footer class="footer">
+  <div>Paper Reading Notes</div>
+  <div class="footer-right">Orca · 2026.07.02</div>
+</footer>
+</body>
+</html>
