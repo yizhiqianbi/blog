@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="PhysisForcing 论文精读：在 Wan/Cosmos 视频 DiT 上加入区域聚焦的像素轨迹对齐和语义关系对齐，让机器人操作视频生成更符合物理，并作为 WAM backbone 提升闭环规划。">
+<title>PhysisForcing：把物理监督塞进机器人 World Simulator</title>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;0,9..144,800;1,9..144,400&family=JetBrains+Mono:wght@300;400;500;700&family=Noto+Serif+SC:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script>
+window.MathJax = {
+  tex: {inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']]},
+  svg: {fontCache: 'global'}
+};
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+<script type="application/json" id="paper-metadata">
+{
+  "title": "PhysisForcing：把物理监督塞进机器人 World Simulator",
+  "paper": "https://arxiv.org/abs/2606.28128",
+  "pdf": "https://arxiv.org/pdf/2606.28128v1",
+  "project": "https://dagroup-pku.github.io/PhysisForcing.github.io/",
+  "repository": "https://github.com/DAGroup-PKU/PhysisForcing",
+  "parent_file": "index.html",
+  "remix_prompt": "深入解读 https://arxiv.org/pdf/2606.28128v1，并撰写中文技术博客。",
+  "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+  "authors": ["Peiwen Zhang", "Yufan Deng", "Shangkun Sun", "Juncheng Ma", "Duomin Wang", "Jonas Du", "Zilin Pan", "Ye Huang", "Hao Liang", "Songyan Huang", "Ruihua Zhang", "Enze Xie", "Ming-Yu Liu", "Daquan Zhou"],
+  "date": "2026-07-02",
+  "paper_date": "2026-06-26",
+  "category": "robotics-world-models",
+  "tags": ["physisforcing", "robotic-manipulation", "embodied-video-generation", "world-simulator", "physics-alignment", "trajectory-alignment", "relational-alignment", "dit", "wan2.2", "cosmos3", "fastwam", "worldarena", "rovid-x"],
+  "systems": ["PhysisForcing", "PF-Wan", "PF-Cosmos", "Wan2.2-I2V-A14B", "Wan2.2-TI2V-5B", "Cosmos3-Nano", "Fast-WAM", "WorldArena", "CoTracker3", "Depth-Anything-V2", "V-JEPA 2"],
+  "datasets": ["RoVid-X filtered subset", "R-Bench", "PAI-Bench robot domain", "EZS-Bench", "RoboTwin 2.0", "WorldArena"],
+  "methods": ["physics-informative region extraction", "pixel-level trajectory alignment", "semantic-level relational alignment", "flow matching", "frozen video encoder teacher", "point tracking", "depth-aware foreground weighting", "middle-layer DiT supervision", "LoRA finetuning"],
+  "code": "As of 2026-07-02, the GitHub repository contains README, license, preliminary requirements, demo assets, and project images. Inference code, training code, checkpoints, and auxiliary checkpoints are marked coming soon in the README.",
+  "related_posts": ["posts/cosmos3-omnimodal-world-models-physical-ai.html", "posts/rise-of-world-action-models.html", "posts/wam-data-cleaning-qwen-cosmos-roadmap.html", "posts/qwen-robotworld-language-conditioned-world-model.html", "posts/qwen-vla-unified-embodied-action-model.html", "posts/demo-jepa-cross-embodiment-imitation.html", "posts/prowl-regret-driven-world-model-learning.html"],
+  "graph_nodes": ["PhysisForcing", "physics-informative mask", "pixel trajectory alignment", "semantic relational alignment", "V-JEPA 2", "CoTracker3", "Depth-Anything-V2", "Wan2.2", "Cosmos3-Nano", "Fast-WAM", "WorldArena", "R-Bench", "PAI-Bench", "EZS-Bench"],
+  "graph_edges": [
+    "PhysisForcing -> adds_training_loss_to -> DiT video backbones",
+    "CoTracker3 -> extracts -> reference point trajectories",
+    "Depth-Anything-V2 -> weights -> foreground moving tracks",
+    "physics-informative mask -> selects -> interaction-critical regions",
+    "pixel trajectory alignment -> constrains -> local motion continuity",
+    "V-JEPA 2 -> provides -> semantic relational teacher",
+    "semantic relational alignment -> constrains -> robot-object interaction consistency",
+    "PhysisForcing -> improves -> R-Bench / PAI-Bench / EZS-Bench",
+    "PhysisForcing -> plugs_into -> Fast-WAM backbone",
+    "WorldArena -> evaluates -> closed-loop action planning utility"
+  ]
+}
+</script>
+<style>
+:root{
+  --ink:#1a1614;
+  --paper:#f4f0e8;
+  --paper-2:#ebe4d4;
+  --accent:#c8421f;
+  --accent-soft:#e8b89c;
+  --blue:#2d4a6e;
+  --green:#5a6b3a;
+  --gold:#b8924a;
+  --line:rgba(26,22,20,0.18);
+  --muted:rgba(26,22,20,0.55);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  font-family:'Noto Serif SC','Fraunces',Georgia,serif;
+  background:var(--paper);
+  color:var(--ink);
+  line-height:1.75;
+  font-size:16px;
+  background-image:
+    radial-gradient(circle at 20% 10%, rgba(184,146,74,0.06) 0, transparent 40%),
+    radial-gradient(circle at 80% 70%, rgba(200,66,31,0.04) 0, transparent 50%);
+  overflow-x:hidden;
+}
+.masthead{
+  border-bottom:3px double var(--ink);
+  padding:56px 60px 32px;
+}
+.masthead-top{
+  display:flex;
+  justify-content:space-between;
+  align-items:baseline;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.15em;
+  text-transform:uppercase;
+  color:var(--muted);
+  margin-bottom:28px;
+  border-bottom:1px solid var(--line);
+  padding-bottom:14px;
+}
+.masthead-top a{color:inherit;text-decoration:none}
+.masthead-top a:hover{color:var(--accent)}
+.masthead h1{
+  font-family:'Fraunces',serif;
+  font-weight:300;
+  font-size:clamp(40px,5.8vw,76px);
+  line-height:1.02;
+  letter-spacing:-0.025em;
+  margin-bottom:20px;
+  overflow-wrap:anywhere;
+}
+.masthead h1 em{font-style:italic;color:var(--accent);font-weight:400}
+.byline{
+  font-family:'Fraunces',serif;
+  font-style:italic;
+  font-size:18px;
+  color:var(--muted);
+  margin-bottom:24px;
+}
+.subtitle{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:15.5px;
+  max-width:880px;
+  line-height:1.7;
+}
+.tags{margin-top:28px;display:flex;gap:10px;flex-wrap:wrap}
+.tag{
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  padding:5px 11px;
+  border:1px solid var(--ink);
+}
+.tag.filled{background:var(--ink);color:var(--paper)}
+section{
+  padding:60px;
+  border-bottom:1px solid var(--line);
+}
+.section-num{
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.2em;
+  color:var(--accent);
+  margin-bottom:12px;
+  display:block;
+}
+.section-title{
+  font-family:'Fraunces',serif;
+  font-weight:400;
+  font-size:clamp(30px,3.8vw,46px);
+  line-height:1.1;
+  letter-spacing:-0.015em;
+  margin-bottom:34px;
+  max-width:960px;
+}
+.section-title em{font-style:italic;color:var(--accent)}
+.body-text{max-width:900px;font-size:16.3px;line-height:1.9}
+.body-text p{margin-bottom:18px}
+.body-text strong{font-weight:600;color:var(--accent)}
+.body-text em{color:var(--blue);font-style:italic}
+.tldr{
+  background:var(--ink);
+  color:var(--paper);
+  padding:52px 60px;
+  display:grid;
+  grid-template-columns:1fr 2fr;
+  gap:60px;
+  position:relative;
+}
+.tldr::before{
+  content:'OVERVIEW';
+  position:absolute;
+  top:18px;
+  right:30px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.3em;
+  color:var(--accent-soft);
+}
+.tldr h2{
+  font-family:'Fraunces',serif;
+  font-weight:300;
+  font-size:36px;
+  line-height:1.15;
+  font-style:italic;
+}
+.tldr h2 strong{
+  display:block;
+  color:var(--accent-soft);
+  font-style:normal;
+  font-size:52px;
+  line-height:1;
+  margin-bottom:10px;
+}
+.tldr-content{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:15px;
+  line-height:1.85;
+}
+.tldr-content p{margin-bottom:16px}
+.tldr-content strong{color:var(--accent-soft)}
+.pullquote{
+  margin:40px 0;
+  padding:36px 44px;
+  border-left:4px solid var(--accent);
+  background:var(--paper-2);
+  font-family:'Fraunces',serif;
+  font-style:italic;
+  font-size:22px;
+  line-height:1.55;
+  font-weight:300;
+  max-width:980px;
+}
+.insight{
+  margin:32px 0;
+  padding:34px 38px;
+  border:1px solid var(--ink);
+  position:relative;
+  background:var(--paper);
+  max-width:980px;
+}
+.insight-label{
+  position:absolute;
+  top:-12px;
+  left:22px;
+  background:var(--paper);
+  padding:0 12px;
+  font-family:'JetBrains Mono',monospace;
+  font-size:10.5px;
+  letter-spacing:0.2em;
+  color:var(--accent);
+  text-transform:uppercase;
+}
+.insight h3{
+  font-family:'Fraunces',serif;
+  font-size:24px;
+  font-weight:500;
+  margin-bottom:16px;
+  font-style:italic;
+  line-height:1.3;
+}
+.insight p{
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:14.5px;
+  line-height:1.9;
+  margin-bottom:12px;
+}
+.formula,.code-block{
+  margin:22px 0;
+  padding:18px 22px;
+  background:var(--paper-2);
+  border-left:3px solid var(--ink);
+  font-family:'JetBrains Mono',monospace;
+  font-size:13px;
+  line-height:1.7;
+  overflow-x:auto;
+}
+.formula{font-family:'Noto Serif SC',serif}
+.wide-figure{
+  margin:34px 0;
+  padding:18px;
+  background:var(--paper-2);
+  border:1px solid var(--line);
+}
+.wide-figure img{
+  width:100%;
+  display:block;
+  background:white;
+}
+.wide-figure figcaption{
+  margin-top:12px;
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:13px;
+  color:var(--muted);
+}
+table.cmp{
+  width:100%;
+  border-collapse:collapse;
+  margin:28px 0;
+  font-family:'Noto Sans SC',sans-serif;
+  font-size:13.5px;
+}
+table.cmp th,table.cmp td{
+  padding:13px 14px;
+  text-align:left;
+  vertical-align:top;
+  border-bottom:1px solid var(--line);
+}
+table.cmp th{
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.1em;
+  text-transform:uppercase;
+  color:var(--muted);
+  background:var(--paper-2);
+  border-bottom:2px solid var(--ink);
+}
+table.cmp tr.best td{background:rgba(200,66,31,0.06);font-weight:600}
+table.cmp td.num{font-family:'JetBrains Mono',monospace;text-align:right;white-space:nowrap}
+.two-col{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:26px;
+  max-width:1100px;
+}
+.note-list{
+  max-width:940px;
+  margin:18px 0 0 20px;
+}
+.note-list li{margin:10px 0;padding-left:4px}
+.sources a{color:var(--blue);text-decoration:none;border-bottom:1px solid rgba(45,74,110,0.35)}
+.sources a:hover{color:var(--accent);border-color:var(--accent)}
+.footer{
+  padding:40px 60px;
+  background:var(--ink);
+  color:var(--paper);
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  font-family:'JetBrains Mono',monospace;
+  font-size:11px;
+  letter-spacing:0.15em;
+  text-transform:uppercase;
+}
+.footer-right{text-align:right;color:rgba(244,240,232,0.6)}
+@media (max-width:900px){
+  .masthead,section,.tldr{padding:38px 20px}
+  .masthead-top{flex-wrap:wrap;gap:8px 14px;align-items:flex-start}
+  .masthead h1{font-size:clamp(34px,12vw,48px);letter-spacing:0}
+  .tldr{grid-template-columns:1fr;gap:32px}
+  .two-col{grid-template-columns:1fr}
+  table.cmp{display:block;max-width:100%;overflow-x:auto;white-space:nowrap;-webkit-overflow-scrolling:touch}
+  .formula,.code-block,.insight{max-width:100%;overflow-x:auto}
+  .pullquote{padding:26px 24px;font-size:19px}
+  .footer{padding:30px 20px;flex-direction:column;align-items:flex-start;gap:10px}
+  .footer-right{text-align:left}
+}
+</style>
+</head>
+<body>
+<header class="masthead">
+  <div class="masthead-top">
+    <a href="../index.html#paper-reading">← Paper Reading</a>
+    <span>Paper Notes · 2026</span>
+  </div>
+  <h1>PhysisForcing：<em>把物理监督塞进机器人 World Simulator</em></h1>
+  <p class="byline">Physics Alignment · Robotic Video Generation · World Action Models</p>
+  <p class="subtitle">
+    这篇的核心不是又造了一个视频大模型，而是给已有 Wan / Cosmos 这类 DiT 视频 backbone 加一套训练时物理约束：只盯住机器人、物体、接触和运动区域，同时约束点轨迹和区域关系。它证明“视频更像物理过程”不只是观感指标，也能让 WAM / action planner 的闭环成功率变高。
+  </p>
+  <div class="tags">
+    <span class="tag filled">Robotics World Model</span>
+    <span class="tag">Physics Alignment</span>
+    <span class="tag">Wan / Cosmos</span>
+    <span class="tag">Fast-WAM</span>
+  </div>
+</header>
+
+<section class="tldr">
+  <div>
+    <h2><strong>0</strong>一句话结论</h2>
+  </div>
+  <div class="tldr-content">
+    <p><strong>痛点。</strong> 现有视频生成模型能生成“看起来像机器人”的视频，但在接触、抓取、推动、放置时常出现轨迹断裂、物体漂移、穿模、非接触吸附等物理错误，导致它们作为 world simulator 不可靠。</p>
+    <p><strong>核心招。</strong> PhysisForcing 不换 backbone，而是在微调时提取物理信息区域，对 DiT 中间层同时施加像素级轨迹对齐 \(L^{phy}_{pix}\) 和语义级关系对齐 \(L^{phy}_{sem}\)。</p>
+    <p><strong>效果。</strong> 在 R-Bench、PAI-Bench robot domain、EZS-Bench 上均提升 Wan2.2 和 Cosmos3-Nano；WorldArena action planner 闭环成功率从 16.0% 提到 24.0%；作为 Fast-WAM 视频 backbone，在 RoboTwin 2.0 平均成功率从 68.2% 到 72.8%。</p>
+    <p><strong>代价。</strong> 训练时要跑 CoTracker3、Depth-Anything-V2、V-JEPA 2 等冻结辅助模型，数据和显存成本高；推理阶段零额外成本，但能力上限仍受底层视频 backbone 限制。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 1 · POSITIONING</span>
+  <h2 class="section-title">论文定位：<em>它不是新 world model，而是物理对齐 recipe</em></h2>
+  <div class="body-text">
+    <p>
+      PhysisForcing 的任务设定是 <strong>embodied video generation / robotic world simulation</strong>：给定初始图像或视频条件和文本动作描述，预测后续机器人操作视频。论文主要把它接到 Wan2.2-I2V-A14B、Wan2.2-TI2V-5B 和 Cosmos3-Nano 上做训练时增强。
+    </p>
+    <p>
+      和普通视频生成相比，它不只问“画面像不像”，而是问“这个未来是否像真实物理后果”。和 Fast-WAM / WorldArena 这类 world-action 模型相比，它本身不直接输出低层 action；它提供的是更物理一致的视频 backbone，让下游 inverse dynamics 或 action planner 从更可信的 rollout 中读动作。
+    </p>
+  </div>
+  <table class="cmp">
+    <thead>
+      <tr><th>路线</th><th>训练信号</th><th>主要问题</th><th>PhysisForcing 的差异</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Vanilla finetuning</td>
+        <td>视频重建 / flow matching</td>
+        <td>背景像素和关键接触区域权重相近，物理信号被稀释</td>
+        <td>只在物理信息区域加强监督</td>
+      </tr>
+      <tr>
+        <td>几何/跟踪约束</td>
+        <td>depth、keypoint、3D structure</td>
+        <td>局部运动更稳，但不一定懂“抓住后应一起移动”</td>
+        <td>额外对齐区域间 token relation</td>
+      </tr>
+      <tr>
+        <td>偏好/RL 对齐</td>
+        <td>DPO、reward、judge</td>
+        <td>反馈稀疏，通常是事后压制坏样本</td>
+        <td>训练中直接在 DiT 表征层施加局部和全局物理约束</td>
+      </tr>
+      <tr class="best">
+        <td>PhysisForcing</td>
+        <td>\(L_{FM}+ \lambda_{pix}L^{phy}_{pix}+ \lambda_{sem}L^{phy}_{sem}\)</td>
+        <td>需要辅助感知模型和高质量机器人视频</td>
+        <td>不增加推理成本，适配 Wan / Cosmos 等现有 DiT backbone</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="pullquote">
+    最值得记住的一点：它把“物理一致性”拆成两个层次，点轨迹负责局部连续，token relation 负责机器人和物体之间的因果耦合。
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 2 · PIPELINE</span>
+  <h2 class="section-title">方法总览：<em>区域选择，然后双层对齐</em></h2>
+  <figure class="wide-figure">
+    <img src="../assets/physisforcing/method.png" alt="PhysisForcing method overview">
+    <figcaption>官方仓库方法图：左侧从 CoTracker3 和 Depth-Anything-V2 得到物理信息 mask；下方分别做像素轨迹对齐和 V-JEPA 关系对齐；右侧把两个损失加到视频 DiT 微调中。</figcaption>
+  </figure>
+  <div class="code-block">
+input video V, text prompt c<br>
+  -> CoTracker3(V): reference trajectories P_gt<br>
+  -> Depth-Anything-V2(first frame): depth-aware foreground weights<br>
+  -> physics-informative mask M_phy<br>
+  -> video VAE + noise schedule: noisy latent z_t<br>
+  -> DiT middle-layer hidden feature H_l<br>
+  -> pixel alignment: track locations from feature matching, compare with P_gt<br>
+  -> semantic alignment: compare DiT token relation matrix with frozen V-JEPA 2 relation matrix<br>
+  -> optimize flow matching + physics losses<br>
+  -> inference: discard all auxiliary models, use the finetuned video generator only
+  </div>
+  <div class="body-text">
+    <p>
+      关键张量可以这样记：视频 \(V \in \mathbb{R}^{T \times C \times H \times W}\)，点轨迹 \(P=\{p_i^t\}\)，每个点位置 \(p_i^t \in \mathbb{R}^2\)。DiT 中间层特征 \(H_l\) 被 MLP 投影成帧级特征图 \(\hat{F}\in\mathbb{R}^{T\times C\times H\times W}\)。语义对齐侧把 DiT token 和 V-JEPA 2 token 对齐到同一个时空 token grid，选出 \(K\) 个 mask token 后比较 \(K\times K\) 的关系矩阵。
+    </p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 3 · INNOVATIONS</span>
+  <h2 class="section-title">关键创新点：<em>旧瓶颈、改法、机制和代价</em></h2>
+  <div class="insight">
+    <span class="insight-label">Innovation 1</span>
+    <h3>Physics-informative region extraction：先找物理证据在哪里</h3>
+    <p><strong>旧方法瓶颈。</strong> 如果对整帧做均匀监督，背景、桌面、墙面这些静态区域会占掉大部分 loss；真正决定任务成败的抓手、物体、接触点反而信号弱。</p>
+    <p><strong>它怎么改。</strong> 先用 CoTracker3 得到每个点的跨帧运动量 \(a_i\)，再用第一帧 Depth-Anything-V2 的深度估计给前景运动加权，得到 \(q_i=a_i r_i\)。分数高的轨迹被栅格化成时空 mask \(M^{phy}\)。</p>
+    <p><strong>为什么有效。</strong> 接触丰富的操作任务里，物理错误通常集中在运动物体、机械臂末端和接触区域；把监督集中到这些地方，相当于提高关键状态变量的梯度权重。</p>
+    <p><strong>代价/限制。</strong> mask 质量依赖 tracker 和 depth estimator。透明物体、反光工具、遮挡、相机抖动会把错误轨迹送进 loss；论文主文用均值阈值，附录又提到 top-K 前景轨迹，具体选择策略的工程细节仍需看开源代码确认。</p>
+  </div>
+  <div class="formula">
+    \[
+    a_i=\sum_{t=1}^{T-1}\|p_i^{t+1}-p_i^t\|_2,\qquad
+    r_i=\frac{1}{D_0(p_i^0)+\epsilon},\qquad
+    q_i=a_i\cdot r_i
+    \]
+    \[
+    M_i^{phy}=\mathbb{I}\left(q_i \geq \frac{1}{N}\sum_{j=1}^{N}q_j\right),\qquad
+    M_t^{phy}(\lfloor p_i^t \rceil)=1
+    \]
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">Innovation 2</span>
+    <h3>Pixel-level physics alignment：让 DiT 中间层自己能“追踪点”</h3>
+    <p><strong>旧方法瓶颈。</strong> 视频模型可能生成每帧都合理的图像，但跨帧点对应关系断掉，表现为抓手跳变、杯子瞬移、物体形变。</p>
+    <p><strong>它怎么改。</strong> 从 DiT 中间层取特征，第一帧点特征当 query，后续帧所有空间位置当 key，用相似度 softmax 的坐标期望得到预测点位置 \(\hat{p}_i^t\)，再和 CoTracker3 提供的参考轨迹做 masked MSE。</p>
+    <p><strong>为什么有效。</strong> 它不是在像素 RGB 上追踪，而是在 DiT 表征里要求“同一个物理点”的表征可匹配。这样约束会直接影响后续 denoising 表征，逼模型把连续运动写进内部特征。</p>
+    <p><strong>代价/限制。</strong> 轨迹 loss 更像局部几何正则，能减少 discontinuity，但无法单独判断推动、抓取、放置这些交互结果是否语义正确。</p>
+  </div>
+  <div class="formula">
+    \[
+    s_i^t(x)=\frac{Q(p_i^0)^\top K_t(x)}{\sqrt{C}},\qquad
+    \hat{p}_i^t=\sum_{x\in\Omega}\mathrm{Softmax}_x(s_i^t(x))x
+    \]
+    \[
+    L_{pix}^{phy}=\frac{1}{|M^{phy}|}\left\|M^{phy}\odot(P_{pred}-P_{gt})\right\|_2^2
+    \]
+  </div>
+
+  <div class="insight">
+    <span class="insight-label">Innovation 3</span>
+    <h3>Semantic-level relational alignment：约束区域之间的相互关系</h3>
+    <p><strong>旧方法瓶颈。</strong> 点轨迹连续不代表交互正确。一个杯子可以平滑地漂走，但这仍然不符合“被夹爪抓住后随夹爪移动”的关系。</p>
+    <p><strong>它怎么改。</strong> 用冻结 V-JEPA 2 作为 video understanding teacher，抽取同一视频的 token 表征；DiT 中间层经过 MLP 和 resize 对齐到同一 token grid。只在 \(M^{phy}\) 选中的 token 上，比较 DiT token 的 pairwise cosine relation matrix 和 V-JEPA token 的 relation matrix。</p>
+    <p><strong>为什么有效。</strong> 绝对 feature 不同模型间很难对齐，但 token-to-token 相似度矩阵表达的是关系结构：哪些区域同动、哪些区域接触、哪些区域语义上属于同一交互。这个设计借鉴了 representation alignment 的思路，把 teacher 的关系几何迁移到生成模型内部。</p>
+    <p><strong>代价/限制。</strong> \(K\times K\) 关系矩阵会带来二次复杂度，论文在附录中提到 mask-selected tokens 上限可到 \(K=512\)。此外，V-JEPA 2 学到的是视觉关系，不是真正的刚体动力学或力学约束。</p>
+  </div>
+  <div class="formula">
+    \[
+    F_u=\Phi_u(V),\qquad \hat{F}_u=\mathrm{Resize}(\psi(H_l))
+    \]
+    \[
+    \hat{R}(i,j)=\frac{\hat{F}_i^M\cdot \hat{F}_j^M}{\|\hat{F}_i^M\|_2\|\hat{F}_j^M\|_2},\qquad
+    R(i,j)=\frac{F_i^M\cdot F_j^M}{\|F_i^M\|_2\|F_j^M\|_2}
+    \]
+    \[
+    L_{sem}^{phy}=\frac{1}{K^2}\sum_{i=1}^{K}\sum_{j=1}^{K}|\hat{R}(i,j)-R(i,j)|
+    \]
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 4 · TRAINING</span>
+  <h2 class="section-title">训练和推理：<em>重训练时感知，轻推理时生成</em></h2>
+  <div class="body-text">
+    <p>
+      总目标很直接：在标准 flow matching loss 外加两个物理 loss。
+    </p>
+  </div>
+  <div class="formula">
+    \[
+    L = L_{FM}+\lambda_{pix}L_{pix}^{phy}+\lambda_{sem}L_{sem}^{phy}
+    \]
+  </div>
+  <table class="cmp">
+    <thead>
+      <tr><th>Backbone</th><th>训练设置</th><th>物理监督位置</th><th>备注</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Wan2.2-I2V-A14B</td>
+        <td>640x480，最多 81 帧；20K steps；global batch 128；AdamW；lr \(1\times10^{-5}\)</td>
+        <td>中间 DiT block；附录以 block 20、width 5120 为参考</td>
+        <td>只微调 high-noise expert，并在训练中让 high-noise expert 覆盖完整 diffusion schedule</td>
+      </tr>
+      <tr>
+        <td>Wan2.2-TI2V-5B</td>
+        <td>同样 20K steps / batch 128 / lr \(1\times10^{-5}\)</td>
+        <td>单 expert denoiser 的中间层</td>
+        <td>用于 WorldArena 和 Fast-WAM 下游实验</td>
+      </tr>
+      <tr>
+        <td>Cosmos3-Nano</td>
+        <td>官方 image-to-video post-training 设置，720p，最多 189 帧</td>
+        <td>中间 MoT block</td>
+        <td>LoRA 微调；与 Wan2.2-TI2V-5B 共享 Wan2.2-VAE 的压缩设定</td>
+      </tr>
+      <tr class="best">
+        <td>推理阶段</td>
+        <td>不运行 CoTracker / Depth / V-JEPA</td>
+        <td>只用微调后的视频生成器</td>
+        <td>论文强调 zero extra inference cost</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="insight">
+    <span class="insight-label">Training Detail</span>
+    <h3>为什么监督放在中间层</h3>
+    <p>论文做了 layer ablation：Wan2.2-TI2V-5B 在 PAI-Bench robot domain 上，layer 15 得到 85.2，高于 layer 10 的 83.9、layer 20 的 84.1、layer 25 的 83.2。直觉是早层偏外观，晚层已服务于最终 noise prediction，中间层更适合承载运动和关系结构。</p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 5 · FORMULAS</span>
+  <h2 class="section-title">公式逐行讲解：<em>实现里对应哪些张量操作</em></h2>
+  <table class="cmp">
+    <thead>
+      <tr><th>公式</th><th>符号和维度</th><th>实现对应</th><th>容易踩坑</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>\(q_i=a_i r_i\)</td>
+        <td>\(a_i\) 是第 \(i\) 个点的累计 2D 运动量；\(r_i\) 是由第一帧深度得到的前景权重</td>
+        <td>CoTracker3 输出 \(625\) 个规则网格点轨迹；Depth-Anything-V2 输出归一化深度图</td>
+        <td>单目深度是相对深度；如果相机或背景运动明显，需要额外过滤</td>
+      </tr>
+      <tr>
+        <td>\(\hat{p}_i^t=\sum_x \mathrm{softmax}(s_i^t(x))x\)</td>
+        <td>\(s_i^t\in\mathbb{R}^{H\times W}\)，输出 \(\hat{p}_i^t\in\mathbb{R}^2\)</td>
+        <td>query feature 与 key feature 做点积相似度，再用 spatial soft-argmax 得到可微坐标</td>
+        <td>特征 grid 和原图坐标需要对齐；resize / patchify 后的尺度换算必须一致</td>
+      </tr>
+      <tr>
+        <td>\(L_{pix}^{phy}\)</td>
+        <td>\(P_{pred},P_{gt}\in\mathbb{R}^{K\times T\times 2}\)</td>
+        <td>只对 mask 选中的轨迹和时间位置做 MSE</td>
+        <td>CoTracker visibility 应该参与过滤；论文主文没有完整展开 visibility handling</td>
+      </tr>
+      <tr>
+        <td>\(\hat{R},R\in\mathbb{R}^{K\times K}\)</td>
+        <td>\(K\) 是 physics mask 选出的 spatio-temporal tokens 数量，附录提到最多 \(K=512\)</td>
+        <td>normalize 后做 cosine similarity matrix，比较 student/teacher relation</td>
+        <td>\(K^2\) 内存成本明显；需要 token sampling 或上限裁剪</td>
+      </tr>
+      <tr class="best">
+        <td>\(L=L_{FM}+\lambda_{pix}L_{pix}^{phy}+\lambda_{sem}L_{sem}^{phy}\)</td>
+        <td>\(\lambda_{pix},\lambda_{sem}\) 控制两个辅助损失权重</td>
+        <td>和标准 video diffusion / rectified flow objective 同步优化</td>
+        <td>论文没有在主文给出两个 \(\lambda\) 的具体值；复现时必须等代码或自己扫参</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 6 · TRAIN / TEST GAP</span>
+  <h2 class="section-title">训练与推理对齐：<em>哪里一致，哪里不一致</em></h2>
+  <div class="two-col">
+    <div class="insight">
+      <span class="insight-label">Aligned</span>
+      <h3>一致的部分</h3>
+      <p>最终推理仍然是原来的视频生成器：输入图像/文本条件和 noise schedule，输出未来视频。两个物理 loss 只改变 backbone 表征，不改变部署接口，因此可以直接替换 Fast-WAM 或 action planner 的视频 backbone。</p>
+      <p>这也是论文强调的工程价值：训练时用昂贵 teacher 和 tracker，推理时不付额外计算。</p>
+    </div>
+    <div class="insight">
+      <span class="insight-label">Mismatch</span>
+      <h3>不一致的部分</h3>
+      <p>训练时 physics target 来自真实参考视频，推理时没有参考轨迹或 V-JEPA teacher。这意味着模型学到的是分布上的物理偏置，不是在线约束。长 horizon rollout 中仍可能累计错误。</p>
+      <p>Wan2.2-I2V-A14B 的 high-noise expert 训练覆盖完整 timestep，但推理时原模型仍有高/低噪 expert 分工；这种专家路由和训练覆盖方式的细节需要代码进一步确认。</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 7 · EXPERIMENTS</span>
+  <h2 class="section-title">实验复盘：<em>结果强，但要看清评测假设</em></h2>
+  <table class="cmp">
+    <thead>
+      <tr><th>实验</th><th>指标和结论</th><th>我怎么看</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>R-Bench</td>
+        <td>PF-Cosmos 63.8，Cosmos3-Nano ft 61.5；PF-Wan 62.0，Wan2.2-I2V-A14B ft 57.9</td>
+        <td>提升稳定，尤其 task-oriented 维度明显；但 R-Bench 依赖 MLLM-as-judge，需要关注 judge 对物理错误的覆盖边界</td>
+      </tr>
+      <tr>
+        <td>PAI-Bench robot domain</td>
+        <td>PF-Cosmos 85.17，Cosmos3-Nano ft 84.03；PF-Wan 81.73，Wan ft 79.90</td>
+        <td>Domain Score 提升比 Quality 更关键，说明物理语义比纯视觉质量受益更多</td>
+      </tr>
+      <tr>
+        <td>EZS-Bench</td>
+        <td>PF-Cosmos 81.08，PF-Wan 80.54，均超过对应 vanilla ft</td>
+        <td>zero-shot benchmark 证明不是简单记训练任务；但仍是生成评测，不等于真实机器人成功率</td>
+      </tr>
+      <tr class="best">
+        <td>WorldArena / Fast-WAM</td>
+        <td>WorldArena 16.0% 到 24.0%；Fast-WAM RoboTwin 2.0 平均 68.2% 到 72.8%</td>
+        <td>这部分最有价值：视频物理一致性转化成 action planner / policy 成功率。不过个别任务下降，例如 shake_bottle 和 stack_bowls_two，说明物理对齐不是全任务无脑增益</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="insight">
+    <span class="insight-label">Ablation</span>
+    <h3>消融基本支撑了主张</h3>
+    <p>component ablation 显示 \(L_{pix}^{phy}\) 和 \(L_{sem}^{phy}\) 单独都提升，合用最好；region focus ablation 显示全 token 监督也有帮助，但聚焦物理区域更好；layer ablation 显示中间层最优。这三组消融分别对应“两个层次是否有用”“区域聚焦是否必要”“表征层监督是否合理”。</p>
+  </div>
+  <div class="body-text">
+    <p>
+      隐藏 confound 主要有三个：第一，R-Bench、PAI、EZS 都大量依赖视觉或 MLLM judge，可能偏向可观察的物理错误；第二，PF-Cosmos 走的是 Cosmos 官方 post-training / LoRA 设定，和 Wan 的完整微调设置不完全同构；第三，WorldArena 只评两个任务的闭环 success，能说明方向有效，但还不足以证明通用 WAM planner 已经解决。
+    </p>
+  </div>
+</section>
+
+<section>
+  <span class="section-num">§ 8 · CODE</span>
+  <h2 class="section-title">代码和复现清单：<em>现在还不能完整复现</em></h2>
+  <div class="body-text">
+    <p>
+      我查看了官方 GitHub 仓库。截至 2026-07-02，本地 clone 的仓库包含 README、MIT license、preliminary requirements、demo 视频、method/teaser 图片；README 的 todo 里仍写着 inference code、checkpoints、training code、auxiliary checkpoints coming soon。也就是说，目前只能复现环境轮廓，不能复现训练或推理。
+    </p>
+  </div>
+  <table class="cmp">
+    <thead>
+      <tr><th>复现项</th><th>论文/仓库给出的信息</th><th>缺口</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>环境</td>
+        <td>Python 3.10；PyTorch 2.5.1；torchvision 0.20.1；requirements 里有 diffusers、transformers、accelerate、safetensors</td>
+        <td>CUDA、xFormers/FlashAttention、分布式训练脚本未给出</td>
+      </tr>
+      <tr>
+        <td>数据</td>
+        <td>RoVid-X 4M 中过滤出约 500K high-quality clips</td>
+        <td>motion-score、dedup、clip-text alignment 的具体阈值未公开</td>
+      </tr>
+      <tr>
+        <td>辅助模型</td>
+        <td>CoTracker3 offline；Depth-Anything-V2 ViT-L；V-JEPA 2 ViT-L/16 vitl-fpc64-256</td>
+        <td>辅助模型 checkpoint 路径、batching、缓存策略未公开</td>
+      </tr>
+      <tr>
+        <td>损失权重</td>
+        <td>总目标给出 \(\lambda_{pix},\lambda_{sem}\)</td>
+        <td>具体数值、schedule、loss normalization 需要代码确认</td>
+      </tr>
+      <tr class="best">
+        <td>评测</td>
+        <td>R-Bench official scripts；PAI-Bench robot domain；EZS-Bench；WorldArena；RoboTwin 2.0</td>
+        <td>商业模型结果不可完全复跑；MLLM judge 的版本和 prompt 需要严格锁定</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 9 · IMPROVEMENTS</span>
+  <h2 class="section-title">可能改进方向：<em>从视觉物理走向可控物理</em></h2>
+  <table class="cmp">
+    <thead>
+      <tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>把 action tokens / proprioception 加入物理 mask</td>
+        <td>让模型知道末端执行器速度、夹爪状态、接触动作，而不只看视频</td>
+        <td>跨具身 action schema 很难统一</td>
+        <td>在 Fast-WAM 中比较 video-only PF 与 action-aware PF</td>
+      </tr>
+      <tr>
+        <td>引入 3D/scene flow teacher</td>
+        <td>减少 2D tracking 在遮挡和视角变化下的错误</td>
+        <td>3D 重建成本高，动态物体不稳定</td>
+        <td>对比 CoTracker-only 与 3D flow 对 contact-rich tasks 的提升</td>
+      </tr>
+      <tr>
+        <td>做 closed-loop rollout consistency loss</td>
+        <td>缓解推理阶段长 horizon 累积误差</td>
+        <td>训练成本大幅上升，可能牺牲单步画质</td>
+        <td>WorldArena 多步 planning success 与 video degradation 曲线</td>
+      </tr>
+      <tr>
+        <td>对 semantic relation 做稀疏图而非全 \(K^2\)</td>
+        <td>降低显存，聚焦接触边和同动边</td>
+        <td>图构建错误会漏掉关键关系</td>
+        <td>比较 full relation、top-k relation、contact graph relation</td>
+      </tr>
+      <tr class="best">
+        <td>和真实机器人失败回放闭环</td>
+        <td>把“视频物理 plausibility”对齐到真实 policy failure mode</td>
+        <td>需要真实硬件数据和失败标注</td>
+        <td>用失败轨迹做 hard negative，评估真实/仿真成功率是否同步提升</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <span class="section-num">§ 10 · MEMORY CARD</span>
+  <h2 class="section-title">速读备忘卡</h2>
+  <ul class="note-list">
+    <li>PhysisForcing 是训练时 recipe，不是新视频 backbone。</li>
+    <li>核心问题：机器人操作视频的物理错误集中在接触和运动区域，普通重建 loss 会稀释这些区域。</li>
+    <li>第一步用 CoTracker3 估计轨迹运动量，用 Depth-Anything-V2 给前景运动加权，得到 \(M^{phy}\)。</li>
+    <li>\(L_{pix}^{phy}\) 让 DiT 中间层通过 feature matching 预测点轨迹，并对齐 CoTracker 参考轨迹。</li>
+    <li>\(L_{sem}^{phy}\) 用 V-JEPA 2 的 token relation matrix 监督 DiT token relation matrix。</li>
+    <li>两个 loss 分别管局部运动连续性和全局交互关系，消融显示合用最好。</li>
+    <li>训练时需要 tracker、depth、video encoder；推理时全部丢掉，所以没有额外推理成本。</li>
+    <li>Wan2.2-I2V-A14B 只微调 high-noise expert；Cosmos3-Nano 走 LoRA post-training。</li>
+    <li>PF-Cosmos 在 R-Bench、PAI-Bench、EZS-Bench 都是最强结果之一。</li>
+    <li>WorldArena 从 16.0% 到 24.0%，说明物理更一致的视频 backbone 能改善 action planning。</li>
+    <li>最大复现缺口：代码和 checkpoints 尚未开放，loss 权重、数据过滤、辅助模型缓存策略都需要等仓库更新。</li>
+  </ul>
+</section>
+
+<section class="sources">
+  <span class="section-num">SOURCES</span>
+  <h2 class="section-title">资料来源</h2>
+  <div class="body-text">
+    <p><a href="https://arxiv.org/pdf/2606.28128v1">arXiv PDF: PhysisForcing: Physics Reinforced World Simulator for Robotic Manipulation</a></p>
+    <p><a href="https://dagroup-pku.github.io/PhysisForcing.github.io/">Project Page</a></p>
+    <p><a href="https://github.com/DAGroup-PKU/PhysisForcing">GitHub Repository</a></p>
+  </div>
+</section>
+
+<footer class="footer">
+  <div>Paper Reading Notes</div>
+  <div class="footer-right">PhysisForcing · 2026.07.02</div>
+</footer>
+</body>
+</html>
