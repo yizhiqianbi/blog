@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Xiaomi-Robotics-U0 深度解读：统一自回归具身生成、IBQ visual tokens、结构化多视角 transfer、subtask-subgoal world modeling、FlashAR+ 与机器人数据增强。">
+    <title>Xiaomi-Robotics-U0：把 World Model 做成具身数据引擎</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260717c">
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script type="application/json" id="paper-metadata">
+      {
+        "title": "Xiaomi-Robotics-U0：把 World Model 做成具身数据引擎",
+        "paper": "https://arxiv.org/abs/2607.11643",
+        "project": "https://robotics.xiaomi.com/xiaomi-robotics-u0.html",
+        "repository": "https://github.com/XiaomiRobotics/Xiaomi-Robotics-U0",
+        "model": "https://huggingface.co/collections/XiaomiRobotics/xiaomi-robotics-u0",
+        "parent_file": "index.html",
+        "remix_prompt": "同样处理 arXiv 2607.11643v1：深入解读、写入博客并推送。",
+        "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+        "authors": ["Xinghang Li", "Jun Guo", "Qiwei Li", "Long Qian", "Hang Lai", "Yueze Wang", "Hongyu Yan", "Jiahang Cao", "Xi Chen", "Jingen Qu", "Jiaxi Song", "Nan Sun", "Hanye Zhao", "Futeng Liu", "Wanli Peng", "Heyun Wang", "Yunhong Wang", "Caoyu Xia", "Jack Zhao", "Diyun Xiang", "Hangjun Ye", "Heng Qu", "Huaping Liu", "Jason Li"],
+        "date": "2026-07-17",
+        "paper_date": "2026-07-13",
+        "category": "robotics-world-models",
+        "tags": ["xiaomi-robotics-u0", "embodied-world-model", "data-engine", "multiview-generation", "embodied-transfer", "visual-tokenizer", "autoregressive-generation", "flashar", "synthetic-data", "robot-policy-augmentation"],
+        "systems": ["Xiaomi-Robotics-U0", "EMU3.5", "Qwen3-32B", "Qwen3-VL-235B", "IBQ Tokenizer", "FlashAR+", "vLLM", "pi0.5"],
+        "datasets": ["ShareGPT4V", "AgiBotWorld-Beta", "Open X-Embodiment", "MiBot", "RoboTwin2.0", "GenieSim", "InternData-A1", "Cosmos-Drive-Dreams", "EgoWalk", "ScanNet++ v2", "DL3DV-10K", "Open-P2P", "RoboCOIN", "RoboMIND", "WorldArena"],
+        "methods": ["unified next-token prediction", "IBQ visual tokenization", "structured scene annotation", "depth-conditioned embodied transfer", "interleaved subtask-subgoal prediction", "multi-FPS video modeling", "anti-diagonal decoding", "step-causal attention", "policy data augmentation"],
+        "code": "Official inference code and 34B/38B-class image-model checkpoints are released. Scene generation, transfer, T2I and X2I are runnable; as of 2026-07-17 the README says the video checkpoint is still coming soon. Training code and the full training recipe are not released.",
+        "related_posts": ["posts/xiaomi-robotics-1-scaling-vla-100k-hours.html", "posts/qwen-robotworld-language-conditioned-world-model.html", "posts/cosmos3-omnimodal-world-models-physical-ai.html", "posts/wam-data-cleaning-qwen-cosmos-roadmap.html", "posts/rise-of-world-action-models.html"],
+        "graph_nodes": ["Xiaomi-Robotics-U0", "EMU3.5", "IBQ Tokenizer", "structured embodied transfer", "FlashAR+", "WorldArena", "pi0.5", "synthetic trajectory augmentation", "Xiaomi-Robotics-1"],
+        "graph_edges": [
+          "EMU3.5 -> initializes -> Xiaomi-Robotics-U0",
+          "IBQ Tokenizer -> discretizes -> robot observations",
+          "Qwen3-VL-235B -> annotates -> structured scenes and subtasks",
+          "structured embodied transfer -> preserves -> geometry and action labels",
+          "FlashAR+ -> accelerates -> Xiaomi-Robotics-U0 image decoding",
+          "Xiaomi-Robotics-U0 -> augments_training_data_for -> pi0.5",
+          "Xiaomi-Robotics-U0 -> evaluates_on -> WorldArena",
+          "Xiaomi-Robotics-U0 -> complements -> Xiaomi-Robotics-1",
+          "Xiaomi-Robotics-U0 -> differs_from -> inference-time WAM policy"
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#core">Insight</a>
+        <a href="#method">Method</a>
+        <a href="#experiments">Evidence</a>
+      </nav>
+    </header>
+
+    <main class="article-shell" id="top">
+      <article>
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+          <p class="kicker">Paper Deep Dive · World Model · Data Engine</p>
+          <h1>Xiaomi-Robotics-U0：把 World Model 做成具身数据引擎</h1>
+          <p class="article-dek">U0 的核心不是在机器人执行时“先生成视频再行动”，而是把通用图像生成、多视角机器人场景、可控 scene transfer 和视频 rollout 统一成离散 token 序列，再用它批量改写真实轨迹的视觉外观，为策略制造保留动作标签的 OOD 训练数据。</p>
+          <div class="article-meta">
+            <span>2026.07.17</span>
+            <span>分类：robotics-world-models</span>
+            <span>论文：2026.07.13</span>
+            <a href="https://arxiv.org/pdf/2607.11643v1">PDF</a>
+            <a href="https://robotics.xiaomi.com/xiaomi-robotics-u0.html">Project</a>
+            <a href="https://github.com/XiaomiRobotics/Xiaomi-Robotics-U0">Code</a>
+          </div>
+        </header>
+
+        <figure class="note-figure wide-figure">
+          <img src="../assets/xiaomi-robotics-u0/hero.jpg" alt="Xiaomi-Robotics-U0 统一具身生成能力概览">
+          <figcaption>U0 同时覆盖通用图像生成、multi-view scene generation、embodied transfer 与视频 rollout。真正连接机器人学习的是 transfer 后的数据增强路径。</figcaption>
+        </figure>
+
+        <section class="article-section" id="core">
+          <h2>0. 一句话结论 <a class="heading-anchor" href="#core">#</a></h2>
+          <blockquote>
+            <p>Xiaomi-Robotics-U0 从 EMU3.5 继续训练一个 38B 离散自回归模型，用统一 NTP 学习 T2I、X2I、多视角机器人场景、结构化 transfer 和视频未来；它能把真实轨迹改造成几何与动作不变、背景和光照变化的新轨迹，使 $\pi_0.5$ 在干扰场景中的平均任务进度从 36.9% 提升到 63.2%，但生成仍依赖 depth 中间表示，视频 checkpoint 尚未公开，且真机证据只有三个任务和较少 trial。</p>
+          </blockquote>
+          <p class="insight"><strong>核心 insight：</strong>机器人合成数据最难的不是“生成一张看起来真实的图”，而是改变 nuisance factors 时不破坏机器人位姿、相机几何、接触状态与原动作标签。U0 用多视角 depth 锁住结构，用五维 scene description 控制外观，再让同一个 foundation generator 完成重渲染。</p>
+          <p><strong>先纠正一个口径：</strong>摘要把 36.9%→63.2% 写成 success rate，但实验节定义的唯一指标是按有序 milestones 计算的 <em>task completion progress</em>。它允许部分完成获得分数，因此不等价于 full-task success rate。</p>
+        </section>
+
+        <section class="article-section" id="positioning">
+          <h2>1. 论文定位：生成式 World Model，主要作为离线数据引擎 <a class="heading-anchor" href="#positioning">#</a></h2>
+          <p>U0 建模的是条件视觉序列分布，而不是连续动作策略：</p>
+          <div class="math-block">$$
+            P_\theta(Y\mid C)=\prod_{t=1}^{T}P_\theta(y_t\mid y_{&lt;t},C),
+            \qquad C=\{x_1,\ldots,x_n\}.
+          $$</div>
+          <p>$C$ 可以包含文本、参考图、depth、机器人 mask 或其他控制 token；$Y$ 是一个或多个待生成图像/视频帧的离散 visual tokens。所有任务共用 decoder-only Transformer 和 next-token loss，没有为每项任务单独装 diffusion head。</p>
+          <table class="data-table">
+            <thead><tr><th>路线</th><th>world model 在哪里工作</th><th>输出</th><th>策略如何使用</th></tr></thead>
+            <tbody>
+              <tr><td>U0 data engine</td><td>策略训练之前</td><td>重渲染轨迹 / 未来视频</td><td>把合成 episode 混入 SFT</td></tr>
+              <tr><td>Inference-time WAM</td><td>每次 action query</td><td>未来 latent/video + action</td><td>在线读取想象结果</td></tr>
+              <tr><td>普通 visual augmentation</td><td>dataset loader</td><td>颜色、裁剪、噪声</td><td>低成本增强，但缺少语义控制</td></tr>
+            </tbody>
+          </table>
+          <p>论文的真机实验明确说明：部署时只运行 post-trained $\pi_0.5$，没有 U0 模块。因而它证明的是<strong>生成数据对 policy robustness 有用</strong>，而不是 world model 能在线规划。</p>
+        </section>
+
+        <section class="article-section" id="method">
+          <h2>2. 方法总览：一套 token 空间，两阶段 continual training <a class="heading-anchor" href="#method">#</a></h2>
+          <pre class="code-block"><code>raw multi-domain corpus
+  -> filtering: blur / quality / timestamp / gripper-action alignment
+  -> Qwen3-VL-235B structured annotation
+       scene = workspace + target + distractor + lighting + background
+       trajectory = HDBSCAN boundaries + keyframes + subtask labels
+  -> IBQ tokenizer: RGB [B,3,H,W] -> codes [B,H/16,W/16]
+  -> multimodal serialization: text / visual / control tokens
+  -> EMU3.5 initialized decoder-only Transformer
+       Stage A: T2I + X2I + Scene Gen + Embodied Transfer
+       Stage B: subtask-subgoal sequences + videos at 1/3/5 FPS
+  -> AR or FlashAR+ decoding
+  -> generated multi-view scenes / transferred episodes / video rollout</code></pre>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/xiaomi-robotics-u0/architecture.png" alt="Xiaomi-Robotics-U0 自回归架构与 FlashAR 加速">
+            <figcaption>官方架构图。标准路径按 raster order 逐 token 生成；FlashAR+ 只对最终 target image 使用 anti-diagonal 并行解码，文本、参考图和控制条件仍作为完整 prefix。</figcaption>
+          </figure>
+          <p>初始化模型 EMU3.5 基于 Qwen3-32B decoder-only Transformer。IBQ tokenizer 采用 $16\times16$ 空间压缩：一张 $1024\times1024$ 图像对应约 $64\times64=4096$ 个 visual tokens；三视图如果拼成一个 canvas，依然作为二维 token grid 统一预测。</p>
+        </section>
+
+        <section class="article-section" id="innovations">
+          <h2>3. 四个关键设计 <a class="heading-anchor" href="#innovations">#</a></h2>
+
+          <h3>3.1 保留通用生成任务，避免 robot-only continual training 抹掉先验</h3>
+          <p><strong>旧方法为什么不行：</strong>机器人轨迹规模更小、画面更重复。如果只在 robot video 上继续训练，基础模型原有的开放世界对象、材质和编辑能力会被窄分布覆盖。</p>
+          <p><strong>它怎么改：</strong>single-step 阶段同时训练 T2I、Any-to-Image、multi-view scene generation 与 embodied transfer。前两项持续 rehearsal 通用视觉能力，后两项注入机器人本体、相机和交互几何。</p>
+          <p><strong>为什么有效：</strong>通用图像数据提供“可以变成什么”，机器人数据提供“什么必须保持不变”。多任务 NTP 让两类知识位于同一 token 空间，transfer 可以调用基础模型的长尾外观先验，而不用从有限机器人数据里重新学材质与场景。</p>
+          <p><strong>代价/限制：</strong>任务间会争夺容量。论文没有公开每类数据量、sampling ratio、训练 token 数、optimizer、learning rate 和算力，无法判断能力保留来自任务配比还是模型规模，标记为<strong>【不确定】</strong>。</p>
+
+          <figure class="note-figure wide-figure">
+            <img src="../assets/xiaomi-robotics-u0/single-step-data.png" alt="U0 single-step generation 训练数据组成">
+            <figcaption>Single-step 数据不仅包括机器人任务，还包含 T2I/X2I、camera/time control、depth、edge、skeleton 与 semantic mask 等结构条件。</figcaption>
+          </figure>
+
+          <h3>3.2 Structured Embodied Transfer：把场景拆成五个可控因素</h3>
+          <p>每个机器人场景被拆成五个字段：</p>
+          <div class="math-block">$$
+            d=(d_{workspace},d_{target},d_{irrelevant},d_{light},d_{background}).
+          $$</div>
+          <p>给定原多视角图像估计的 inverse-depth $D^{1:V}$ 与新描述 $d'$，模型生成新 RGB views：</p>
+          <div class="math-block">$$
+            \hat I^{1:V}\sim P_\theta(I^{1:V}\mid D^{1:V},d').
+          $$</div>
+          <p><strong>机制：</strong>$D^{1:V}$ 固定机器人轮廓、物体位置、遮挡和每台相机的投影；$d'$ 独立修改工作台、干扰物、光照和背景。只要 target object 与 interaction state 不变，原动作 $a_{1:T}$ 可以直接复用，于是 $(\hat I_{1:T},a_{1:T})$ 成为新 demonstration。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/xiaomi-robotics-u0/transfer-pipeline.png" alt="Xiaomi-Robotics-U0 结构化 embodied transfer pipeline">
+            <figcaption>官方 transfer pipeline：从原图提取 geometry condition，再用结构化文本重写外观。论文的政策增强主要修改 background、workspace 与 lighting，不修改任务对象。</figcaption>
+          </figure>
+          <p><strong>限制：</strong>depth 不是完整 3D scene。单目估计误差、透明/反光表面和细小夹爪接触都可能让新图与 action label 不一致；模型也没有显式保证同一轨迹各帧采用相同材质身份。论文自己承认 depth 中间表示会引入 artifact。</p>
+
+          <h3>3.3 Subtask-subgoal 序列：用稀疏状态学习 progress，用密集帧学习 dynamics</h3>
+          <p>轨迹先根据末端位姿和 gripper signal 做 HDBSCAN segmentation，在交互边界采 keyframes，再由 VLM 生成时序对齐的 subtask。训练序列近似：</p>
+          <pre class="code-block"><code>[task]
+  -> [subtask_1] [multi-view subgoal_1]
+  -> [subtask_2] [multi-view subgoal_2]
+  -> ...
+  -> [subtask_K] [multi-view subgoal_K]</code></pre>
+          <p>这相当于显式建模离散 progress state。另一路视频按 1、3、5 FPS 采样：1 FPS 扩大时间跨度，学习“接下来到哪个状态”；3/5 FPS 保留接触和物体运动细节，学习“状态如何发生”。</p>
+          <p><strong>限制：</strong>它依然是 observation prediction，没有显式 belief state、reward 或可查询的 symbolic progress variable。32K context 限制了分钟级 rollout；scene generation 和 video generation 分开运行，也会在长链路中累积误差。</p>
+
+          <h3>3.4 FlashAR+：把二维图像的串行长度从面积降到边长</h3>
+          <p>标准 AR 以 raster order 生成 $H_vW_v$ 个 visual tokens。FlashAR+ 定义每个网格位置的并行步：</p>
+          <div class="math-block">$$
+            s(r,c)=r+c,
+            \qquad
+            M(q,k)=\mathbb 1[s(r_k,c_k)&lt;s(r_q,c_q)].
+          $$</div>
+          <p>同一反对角线上的 token 同时生成且互相不可见，只能看完整 prefix 和更早 diagonal。因此串行 step 数从 $H_vW_v$ 下降到 $H_v+W_v-1$。水平 head 与垂直 head 的 logits 由 gate 融合：</p>
+          <div class="math-block">$$
+            z_{fuse}=g\,z_h+(1-g)z_v,
+          $$</div>
+          <div class="math-block">$$
+            \mathcal L=\mathcal L_{fuse}+0.05\mathcal L_h+0.05\mathcal L_v+0.2\mathcal L_{distill}.
+          $$</div>
+          <p>$\mathcal L_{distill}$ 让并行 student 接近原 AR teacher；两个 directional auxiliary loss 防止 gate 偏向没有训练好的分支。配合 vLLM paged KV cache 和 continuous batching，论文在单张 H20、$1024^2$ T2I 上从 450.77 s/image 降到 5.44 s/image。</p>
+        </section>
+
+        <section class="article-section" id="train-infer">
+          <h2>4. 训练与推理流程 <a class="heading-anchor" href="#train-infer">#</a></h2>
+          <h3>训练输入与输出</h3>
+          <table class="data-table">
+            <thead><tr><th>任务</th><th>条件输入</th><th>预测目标</th><th>学到的能力</th></tr></thead>
+            <tbody>
+              <tr><td>T2I / X2I</td><td>文本；1–3 张参考图 + 指令</td><td>目标图 visual tokens</td><td>开放世界生成与编辑</td></tr>
+              <tr><td>Scene Gen</td><td>robot type + structured scene</td><td>拼接的多视角初始观测</td><td>本体与跨视角一致性</td></tr>
+              <tr><td>Transfer</td><td>多视角 depth + 新 scene description</td><td>多视角 RGB</td><td>geometry-preserving 重渲染</td></tr>
+              <tr><td>Subtask-subgoal</td><td>task + 历史 subtask/image</td><td>下一 subtask 与 subgoal views</td><td>任务进度和长时状态转移</td></tr>
+              <tr><td>Video</td><td>初始观测 + instruction + control</td><td>交错未来帧</td><td>动作条件 dynamics</td></tr>
+            </tbody>
+          </table>
+          <h3>推理</h3>
+          <p>标准 AR 将文本、参考图和 target header 编入 KV cache，逐 token 采样目标图。FlashAR+ 保持 prefix 不变，只把 target grid 改成 anti-diagonal schedule；conditional/unconditional 两条请求同步执行 CFG。视频生成则使用独立 checkpoint 按交错序列 rollout。</p>
+          <p><strong>代码实况：</strong>官方仓库已提供 AR/FlashAR eager 与 vLLM inference、任务 config、Depth Anything 3 预处理和 Gradio demo。默认图像面积为 $1024^2$，visual top-k 为 5120，temperature 为 1；Scene Gen 的 CFG 为 2，Transfer 为 3。FlashAR 的 Scene Gen grid 配置为 $32\times128$，对应上方一张主视图、下方两张半宽视图的拼图格式。当前 README 仍标注 video checkpoint “coming soon”，因此论文视频结果暂时不能由公开权重完整复验。</p>
+        </section>
+
+        <section class="article-section" id="formulas">
+          <h2>5. 关键公式与张量映射 <a class="heading-anchor" href="#formulas">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>对象</th><th>典型形状</th><th>代码/操作</th></tr></thead>
+            <tbody>
+              <tr><td>RGB</td><td>$[B,3,H,W]$</td><td>归一化后送 IBQ encoder</td></tr>
+              <tr><td>IBQ codes</td><td>$[B,H/16,W/16]$</td><td>映射为扩展 vocabulary IDs</td></tr>
+              <tr><td>multimodal sequence</td><td>$[B,L]$</td><td>text/image/control 特殊 token 串联</td></tr>
+              <tr><td>AR logits</td><td>$[B,L,|\mathcal V|]$</td><td>cross entropy / next-token prediction</td></tr>
+              <tr><td>FlashAR step IDs</td><td>$[H_vW_v]$</td><td>`row + col`，构造 2D step-causal mask</td></tr>
+              <tr><td>multi-view canvas</td><td>Scene Gen: $32\times128$ tokens</td><td>一张大视图 + 两张半宽视图</td></tr>
+              <tr><td>inverse depth</td><td>$[V,H,W]$</td><td>DA3/Video Depth Anything，归一化后拼图</td></tr>
+            </tbody>
+          </table>
+          <p>注意 $V$ 个视角并没有独立 3D latent；它们被排列成一张二维 canvas，再由 Transformer 在 token 序列中建立跨视角联系。这种方案接口简单，但 consistency 是从数据中学出来的，并非几何上严格保证。</p>
+        </section>
+
+        <section class="article-section" id="alignment">
+          <h2>6. 训练—推理对齐检查 <a class="heading-anchor" href="#alignment">#</a></h2>
+          <ul>
+            <li><strong>AR→FlashAR mismatch：</strong>FlashAR+ 通过单独 post-training 和 AR distillation 适配并行条件分布，并非零训练替换解码器。</li>
+            <li><strong>Depth source mismatch：</strong>训练使用 Video Depth Anything，公开 RGB transfer 代码默认使用 Depth Anything 3。两者的尺度和 artifact 分布可能不同。</li>
+            <li><strong>Teacher-forced video→rollout：</strong>训练可看到真实历史帧，长时推理只能看到自己生成的帧，误差会自回归累积；论文未报告 scheduled sampling 或 self-forcing。</li>
+            <li><strong>Scene→video 串联：</strong>初始场景先由 scene generator 合成，再交给 video model；第二阶段未必见过第一阶段的全部 artifact。</li>
+            <li><strong>合成→真实策略：</strong>policy 训练看到 clean + synthetic，真机只看到真实相机；收益依赖 synthetic variation 覆盖测试 nuisance，而非生成图本身逼真。</li>
+            <li><strong>动作条件：</strong>WorldArena 使用由 robot action、camera 与 URDF 渲染的 robot mask 作 guidance，不能理解为仅凭语言预测受控未来。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="experiments">
+          <h2>7. 实验复盘：证据支持什么，不支持什么 <a class="heading-anchor" href="#experiments">#</a></h2>
+          <h3>Embodied Transfer</h3>
+          <p>benchmark 共 300 个样本，Easy/Hard 各 150。输入为 scene description + 多视角 depth，GPT-Image-2 还获得原 RGB 参考。U0 在 depth、Canny 与 segmentation 指标上明显领先，例如 Hard split 的 depth $\delta_1$ 为 0.7846，对比 0.5340；segmentation mIoU 为 0.7436，对比 0.4098。</p>
+          <p><strong>批判：</strong>depth 来自训练同域，真正 OOD 的主要是编辑后的文字内容；U0 又专门在 depth-conditioned transfer 上训练，而 GPT-Image-2 不是机器人多视角模型。这个比较能说明 domain-specific geometry conditioning 有用，不能单独证明 U0 的通用生成模型全面更强。</p>
+
+          <h3>Scene Generation 与 WorldArena</h3>
+          <p>Scene Gen 使用 400 个 LLM prompts，Easy/Hard 各 200，通过匿名左右随机的人类 pairwise preference 对比 GPT-Image-2；官方报告 U0 win rate 为 62.0%/68.5%。视频方面，U0 在 2026-07-13 的 WorldArena 排名第一，EWMScore 73.64。</p>
+          <p><strong>批判：</strong>Scene Gen 没有披露标注人数、一致性或显著性区间；WorldArena 总分只比第二名 73.06 高 0.58，而且 U0 并非每个子指标最佳：trajectory accuracy 和 depth accuracy 都低于若干对手。第一名说明综合均衡，不代表动作因果或精确轨迹控制最强。</p>
+
+          <h3>真机 policy augmentation</h3>
+          <p>三个任务各采约 40 小时真机数据，再生成约 40 小时 style-transferred episode。Original 只用 clean；Aug 使用 clean + synthetic。两者都从 `pi05_base` 独立 post-train，其他设置相同。测试包含 base 与 interference 两组，每组 3 个 layout、每 layout 3 次，即每个 policy-task 共 18 次。</p>
+          <table class="data-table">
+            <thead><tr><th>平均 progress</th><th>Original</th><th>U0-Aug</th><th>变化</th></tr></thead>
+            <tbody>
+              <tr><td>Base</td><td>81.0%</td><td>82.1%</td><td>+1.1 pp</td></tr>
+              <tr><td>Interference</td><td>36.9%</td><td>63.2%</td><td>+26.3 pp</td></tr>
+              <tr><td>Base→Interference drop</td><td>−44.1 pp</td><td>−18.9 pp</td><td>gap 缩小 25.2 pp</td></tr>
+            </tbody>
+          </table>
+          <figure class="note-figure">
+            <img src="../assets/xiaomi-robotics-u0/interference.png" alt="U0 真机实验中的复杂桌布和光照干扰场景">
+            <figcaption>干扰组加入未见桌布、低照度、彩色光和动态投影。增强针对的就是视觉 nuisance robustness，而非新技能学习。</figcaption>
+          </figure>
+          <p><strong>证据成立：</strong>在这三个任务上，语义可控的重渲染显著降低了视觉分布变化导致的 progress drop。</p>
+          <p><strong>证据不足：</strong>每个 group-task 只有 9 次 rollout；没有只用传统 color jitter、domain randomization、diffusion editor 或等量重复 clean data 的 baseline；也没有按合成比例、五种控制维度、depth 质量做消融。因此不能确认收益究竟来自 U0 特有能力、样本翻倍，还是更强的外观 augmentation。</p>
+        </section>
+
+        <section class="article-section" id="reproduction">
+          <h2>8. 可复现清单 <a class="heading-anchor" href="#reproduction">#</a></h2>
+          <ul>
+            <li>公开权重约 75 GB，单卡 H20 的速度数字不代表消费级 GPU 可直接运行；需要 BF16、足够显存或 tensor parallel。</li>
+            <li>AR 与 FlashAR vLLM patch 要分环境，仓库固定检查 `vLLM==0.11.0`。</li>
+            <li>Transfer 默认吃拼接 depth 图；RGB 输入需额外安装 Depth Anything 3，并逐视角估 depth 后重新横向拼接。</li>
+            <li>图像尺寸需是 16 的倍数；IBQ token grid 形状必须和 header、FlashAR height/width 严格一致。</li>
+            <li>公开默认值：$1024^2$ image area、top-k 5120、temperature 1.0；Scene Gen CFG 2，Transfer CFG 3。</li>
+            <li>FlashAR vLLM 默认关闭 prefix caching；CFG 需要成对同步 conditional/unconditional requests。</li>
+            <li>训练复现仍缺数据量与比例、learning rate、batch/token budget、warmup、weight decay、训练硬件、过滤阈值和合成数据 mixture ratio。</li>
+            <li>视频 checkpoint 尚未放出，WorldArena 与长时 rollout 结果暂时无法完整复验。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="improvements">
+          <h2>9. 可能的改进方向 <a class="heading-anchor" href="#improvements">#</a></h2>
+          <p><strong>3D latent 替代逐视角 depth</strong> → 更严格的跨视角/跨时间身份一致性 → 代价是重建误差和更复杂的数据预处理 → 对比 depth canvas、point/gaussian latent 在 action-label preservation 上的误差。</p>
+          <p><strong>联合 scene-to-video 训练</strong> → 减少两个生成器串联的 domain gap → 风险是 context 与显存激增 → 在自生成初始场景上测长时 FVD、contact accuracy 与 rollout drift。</p>
+          <p><strong>合成数据质量门控</strong> → 用多视角 geometry、robot-mask IoU、接触点与 optical flow 筛掉 label-corrupt samples → 风险是过滤器偏差 → 比较无筛选、规则筛选和 learned verifier 下的真实 policy progress。</p>
+          <p><strong>从外观增强扩展到语义 progress 增强</strong> → 保留动作片段但组合新的 subtask/subgoal context → 风险是动作与新前置条件不相容 → 用 milestone transition classifier 验证每段 synthetic trajectory 的前后状态合法性。</p>
+          <p><strong>补齐公平 augmentation baseline</strong> → 区分 world-model value 与普通 domain randomization → 风险低 → 固定总样本量，对比 clean repeat、RandAugment、diffusion edit、U0 transfer 和 U0+verifier。</p>
+        </section>
+
+        <section class="article-section" id="relationship">
+          <h2>U0 与 Xiaomi-Robotics-1 的关系 <a class="heading-anchor" href="#relationship">#</a></h2>
+          <p>两篇工作解决数据 scaling 的不同轴：</p>
+          <ul>
+            <li><strong>Xiaomi-Robotics-1：</strong>用 100K 小时 UMI 扩大动作经验，再把 action space 和指令对齐到机器人。</li>
+            <li><strong>Xiaomi-Robotics-U0：</strong>用 foundation generator 扩大同一动作轨迹的视觉环境覆盖，减少 background/lighting shift。</li>
+          </ul>
+          <p>前者主要扩展“机器人见过哪些动作变化”，后者主要扩展“同一动作可以发生在哪些视觉世界里”。理想组合是：UMI/robot trajectory 提供可信动作，U0 提供结构不变的多视角重渲染，质量 verifier 保证新图没有破坏动作标签。</p>
+        </section>
+
+        <section class="article-section" id="memo">
+          <h2>10. 速读备忘卡 <a class="heading-anchor" href="#memo">#</a></h2>
+          <ul>
+            <li>U0 是 38B multimodal autoregressive generator，不是 VLA action policy。</li>
+            <li>基础模型是 EMU3.5/Qwen3-32B，图像由 IBQ 压缩 16 倍后成为离散 token。</li>
+            <li>所有任务共享 next-token objective，没有 task-specific diffusion head。</li>
+            <li>Single-step：T2I、X2I、Scene Gen、Embodied Transfer。</li>
+            <li>Sequential：subtask-subgoal 交错序列 + 1/3/5 FPS robot video。</li>
+            <li>Transfer 用 depth 锁几何，用五维描述控制 workspace、对象、干扰物、光照和背景。</li>
+            <li>FlashAR+ 按反对角线并行生成，$1024^2$ latency 从 450.77 s 降到 5.44 s。</li>
+            <li>真机执行时不运行 U0；U0 只负责离线制造 policy post-training 数据。</li>
+            <li>36.9%→63.2% 是 interference group 的平均 milestone progress，不是严格 full success。</li>
+            <li>最大证据缺口是 trial 少、没有公平的传统 augmentation baseline、训练 recipe 未公开。</li>
+            <li>公开 image checkpoints 与 inference code已可用；video checkpoint 尚未发布。</li>
+          </ul>
+        </section>
+
+        <section class="article-section references" id="references">
+          <h2>资料 <a class="heading-anchor" href="#references">#</a></h2>
+          <ul>
+            <li><a href="https://arxiv.org/abs/2607.11643">Technical Report</a></li>
+            <li><a href="https://robotics.xiaomi.com/xiaomi-robotics-u0.html">Official Project Page</a></li>
+            <li><a href="https://github.com/XiaomiRobotics/Xiaomi-Robotics-U0">Official Code</a></li>
+            <li><a href="https://huggingface.co/collections/XiaomiRobotics/xiaomi-robotics-u0">Models and Vision Tokenizer</a></li>
+          </ul>
+        </section>
+      </article>
+    </main>
+  </body>
+</html>
