@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="LingBot-VLA 2.0 深度解读：60K 小时跨本体数据、55D 全身动作接口、稀疏 MoE Action Expert、双查询深度与 DINO-Video 蒸馏、训练推理和真机实验。">
+    <title>LingBot-VLA 2.0：VLA 从预训练走向真机，真正缺的是什么</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260717a">
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script type="application/json" id="paper-metadata">
+      {
+        "title": "LingBot-VLA 2.0：VLA 从预训练走向真机，真正缺的是什么",
+        "paper": "https://arxiv.org/pdf/2607.06403",
+        "project": "https://technology.robbyant.com/lingbot-vla-v2",
+        "repository": "https://github.com/Robbyant/lingbot-vla-v2",
+        "model": "https://huggingface.co/collections/robbyant/lingbot-vla-v2",
+        "parent_file": "index.html",
+        "remix_prompt": "同样处理 https://arxiv.org/pdf/2607.06403 这个",
+        "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+        "authors": ["Wei Wu", "Fangjing Wang", "Fan Lu", "He Sun", "Shi Liu", "Yunnan Wang", "Yibin Yan", "Yong Wang", "Shuailei Ma", "Xinyang Wang", "Yibin Liu", "Shuai Yang", "Tianxiang Zhou", "Kejia Zhang", "Lei Zhou", "Cheng Su", "Nan Xue", "Bin Tan", "Han Zhang", "Youchao Zhang", "Fei Liao", "Xing Zhu", "Yujun Shen", "Kecheng Zheng"],
+        "date": "2026-07-18",
+        "paper_date": "2026-07-07",
+        "category": "robotics-world-models",
+        "tags": ["lingbot-vla-2", "vla", "cross-embodiment", "whole-body-action", "mixture-of-experts", "flow-matching", "dino-video", "depth-distillation", "predictive-dynamics", "egocentric-video", "gm-100", "mobile-manipulation"],
+        "systems": ["LingBot-VLA 2.0", "LingBot-VLA 1.0", "Qwen3-VL-4B-Instruct", "DINO-Video", "LingBot-Depth", "GR00T N1.7", "pi0.5"],
+        "datasets": ["50K-hour robot corpus", "10K-hour egocentric corpus", "GM-100", "LARYBench", "RoboTwin 2.0"],
+        "methods": ["55D canonical action interface", "relative joint action", "sparse MoE action expert", "auxiliary-loss-free routing", "dual-query perceptual distillation", "flow matching", "future latent prediction", "world-frame hand reconstruction", "atomic action annotation"],
+        "code": "The official Apache-2.0 repository releases training, post-training and deployment code, a 6B native-depth checkpoint, robot configurations and RoboTwin 2.0 recipes. Public real-robot post-training config uses Qwen3-VL-4B-Instruct, a 36-layer action expert, 55D state/action, 50-step action chunks, 32 routed experts with top-4 routing, and 10 flow denoising steps.",
+        "related_posts": ["posts/xiaomi-robotics-1-scaling-vla-100k-hours.html", "posts/qwen-vla-unified-embodied-action-model.html", "posts/qwen-robotmanip-alignment-unlocks-scale.html", "posts/rise-of-world-action-models.html", "posts/wam-data-cleaning-qwen-cosmos-roadmap.html"],
+        "graph_nodes": ["LingBot-VLA 2.0", "Qwen3-VL", "Action Expert", "sparse MoE", "55D action interface", "DINO-Video", "LingBot-Depth", "dual-query distillation", "predictive dynamics", "egocentric hand trajectory", "GM-100", "flow matching"],
+        "graph_edges": [
+          "50K-hour robot corpus -> pretrains -> LingBot-VLA 2.0",
+          "10K-hour egocentric corpus -> supplies -> world-frame hand trajectories",
+          "55D action interface -> aligns -> heterogeneous embodiments",
+          "Qwen3-VL -> shares_attention_with -> Action Expert",
+          "Action Expert -> replaces_FFN_with -> sparse MoE",
+          "DINO-Video -> distills -> current and future semantic query",
+          "LingBot-Depth -> distills -> current and future geometric query",
+          "dual-query distillation -> regularizes -> predictive dynamics",
+          "predictive dynamics -> differs_from -> explicit action-conditioned world model",
+          "flow matching -> generates -> continuous action chunks",
+          "LingBot-VLA 2.0 -> evaluates_on -> GM-100",
+          "relative joint action -> reduces -> target variance"
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#core">Insight</a>
+        <a href="#method">Method</a>
+        <a href="#experiments">Experiments</a>
+      </nav>
+    </header>
+
+    <main class="article-shell" id="top">
+      <article>
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+          <p class="kicker">Paper Deep Dive · VLA · Cross-Embodiment</p>
+          <h1>LingBot-VLA 2.0：VLA 从预训练走向真机，真正缺的是什么</h1>
+          <p class="article-dek">这不是靠一个新模块取胜的论文，而是一套 VLA 工程闭环：先把机器人和第一视角视频清成 6 万小时可学习数据，再统一 55 维全身动作，用稀疏 MoE 扩大动作容量，最后用当前/未来的深度与视频特征迫使表征理解“下一步世界会怎样”。</p>
+          <div class="article-meta">
+            <span>2026.07.18</span>
+            <span>分类：robotics-world-models</span>
+            <span>论文日期：2026.07.07</span>
+            <a href="https://arxiv.org/pdf/2607.06403">PDF</a>
+            <a href="https://technology.robbyant.com/lingbot-vla-v2">Project</a>
+            <a href="https://github.com/Robbyant/lingbot-vla-v2">Code</a>
+            <a href="https://huggingface.co/collections/robbyant/lingbot-vla-v2">Model</a>
+          </div>
+        </header>
+
+        <section class="article-section" id="core">
+          <h2>0. 一句话结论 <a class="heading-anchor" href="#core">#</a></h2>
+          <blockquote>
+            <p>LingBot-VLA 2.0 用 50K 小时跨本体机器人数据与 10K 小时第一视角视频预训练，把异构执行器统一成 55D 全身动作接口，以稀疏 MoE 扩大 action expert 容量，并用 DINO-Video/深度的当前与未来特征做辅助蒸馏；它提升了混合任务和移动操作表现，但收益来自数据、backbone、动作设计和蒸馏的共同升级，论文没有把每一项贡献完全拆开。</p>
+          </blockquote>
+          <p class="insight"><strong>核心 insight：</strong>VLA 的“最后一公里”不是再加一个更大的动作头，而是同时解决三种错配：不同机器人动作语义不一致、视觉表征对几何和未来变化不敏感、dense action expert 容量随计算一起增长。LingBot-VLA 2.0 分别用 canonical 55D 接口、双查询蒸馏和 sparse MoE 处理它们。</p>
+        </section>
+
+        <section class="article-section" id="positioning">
+          <h2>1. 论文定位：带预测监督的 VLA，不是显式 World Model <a class="heading-anchor" href="#positioning">#</a></h2>
+          <p>任务仍是语言条件连续控制。给定当前多视角图像 $I_t$、指令 $l$ 和本体状态 $s_t$，策略生成长度为 $H$ 的动作 chunk：</p>
+          <div class="math-block">$$
+            a_{t:t+H-1}\sim\pi_\theta(\cdot\mid I_t,l,s_t).
+          $$</div>
+          <p>与 $\pi_0/\pi_{0.5}$、GR00T 一类 VLA 相同，最终输出是动作，不是未来视频。不同点是它在训练时增加 $Q_t$ 与 $Q_{t+H}$ 两组 perceptual query，让当前上下文预测当前和未来帧的深度、DINO-Video patch feature。</p>
+          <table class="data-table">
+            <thead><tr><th>系统</th><th>训练中的未来对象</th><th>推理时如何出动作</th><th>是否显式 roll out 世界</th></tr></thead>
+            <tbody>
+              <tr><td>LingBot-VLA 2.0</td><td>未来深度与 teacher latent</td><td>flow-matching action expert</td><td>否</td></tr>
+              <tr><td>典型 VLA</td><td>通常没有，或只做 auxiliary feature</td><td>action tokenizer / diffusion / flow</td><td>否</td></tr>
+              <tr><td>显式 WAM</td><td>未来视频、world latent 或状态转移</td><td>从 imagined future 读出/规划动作</td><td>是</td></tr>
+            </tbody>
+          </table>
+          <p>更严格地说，它学习的是<strong>指令与当前观测条件下的预期未来表征</strong>。公开配置明确屏蔽 action suffix 读取 future query，future query 也不读取待生成动作，因此它不是 $p(z_{t+H}\mid z_t,a_{t:t+H})$ 这种 action-conditioned dynamics，而是用未来监督塑造 policy representation。</p>
+        </section>
+
+        <section class="article-section" id="method">
+          <h2>2. 方法总览：数据、表征、动作三条流在一套 MoT 中汇合 <a class="heading-anchor" href="#method">#</a></h2>
+          <pre class="code-block"><code>Robot pool 90K h -> motion/state/video quality filters -> 50K h
+Ego pool 20K h -> VLM filter + SLAM/MANO reconstruction -> 10K h
+                         |
+3 camera images + instruction + perceptual queries
+                         v
+                  Qwen3-VL prefix stream
+                         |
+state s_t + noisy action x_tau + flow time tau
+                         v
+              36-layer Qwen2 Action Expert
+              shared attention / separate FFN
+              every expert FFN -> sparse MoE
+                         |
+                velocity v_theta -> action chunk
+
+Training only: Q_t, Q_t+H -> depth/DINO projections -> teacher losses
+Inference only: cache prefix KV -> 10 Euler denoising steps -> 55D actions</code></pre>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/lingbot-vla2/lingbot_vla2_framework.png" alt="LingBot-VLA 2.0 整体架构">
+            <figcaption>官方架构图。视觉语言流和 action expert 在每层做联合 self-attention，但保留各自参数；动作侧 FFN 进一步替换为稀疏 MoE。深度和视频 teacher 只在训练阶段提供目标。</figcaption>
+          </figure>
+          <table class="data-table">
+            <thead><tr><th>模块</th><th>公开实现中的形状/配置</th><th>数据流</th></tr></thead>
+            <tbody>
+              <tr><td>VLM</td><td>Qwen3-VL-4B-Instruct，36 层</td><td>3 视角图像 + 最多 72 text tokens + query tokens</td></tr>
+              <tr><td>Action Expert</td><td>36 层，hidden 768，32 Q heads / 8 KV heads</td><td>state token + $[B,50,55]$ noisy action</td></tr>
+              <tr><td>Action MoE</td><td>32 routed experts，top-4；所有 36 层启用</td><td>每个 action token 经过 shared expert 与 4 个 routed experts</td></tr>
+              <tr><td>Perceptual query</td><td>每组 8 tokens；current/future 两类</td><td>cross-attention projection 到 1024D teacher patch space</td></tr>
+              <tr><td>Flow sampler</td><td>默认 10 steps；action chunk 50</td><td>高斯噪声 $\rightarrow$ 连续 55D 动作</td></tr>
+            </tbody>
+          </table>
+          <p>这些数字来自公开的 real-robot post-training 配置和模型代码，而不是论文中所有实验的统一超参。不同 checkpoint 可以覆盖配置，因此复现时应以对应 checkpoint 的 `config.json` 为准。</p>
+        </section>
+
+        <section class="article-section" id="innovations">
+          <h2>3. 关键创新点 <a class="heading-anchor" href="#innovations">#</a></h2>
+
+          <h3>3.1 先把 110K 小时原始池变成 60K 小时可学习数据</h3>
+          <p><strong>旧方法的瓶颈：</strong>跨本体数据不是拼在一起就能训练。机器人日志会有状态漂移、视频掉帧、控制静止、视角不同步；第一视角视频更没有机器人 action，还混入走路、旁观视角和无交互片段。</p>
+          <p><strong>机器人数据：</strong>团队从 20 种本体的 90K 小时原始池中过滤到 50K 小时。数值侧检查三阶有限差分 jerk，并对速度、加速度做 Z-score；全状态/动作近乎静止超过 95% 的 episode 被丢弃。几何侧根据 URDF 和 state replay，把机器人投影回图像并人工确认视频-状态同步。画面模糊、严重遮挡、掉帧和多视角错位再由人工过滤。</p>
+          <p><strong>第一视角数据：</strong>20K 小时先经 VLM 去除非 ego、纯走路、无手物交互和他人手部画面，再通过 egocentric SLAM 与 MANO hand pose 重建轨迹。至少 20% 帧需要有效手姿，异常位移、速度、加速度、jerk 和不合理人体运动会被拒绝，最终保留 10K 小时。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/lingbot-vla2/lingbot_vla2_data_process.png" alt="LingBot-VLA 2.0 机器人和第一视角数据清洗流程">
+            <figcaption>机器人数据保留原生状态/动作；无 action 的 ego 视频先在世界坐标系恢复手轨迹，训练时再把未来手点转换到当前相机坐标系，避免把头部相机运动误当成手的操作。</figcaption>
+          </figure>
+          <div class="math-block">$$
+            p_{\tau}^{C_t}=T_{C_t\leftarrow W}\,p_{\tau}^{W},\qquad \tau\in[t,t+H].
+          $$</div>
+          <p>这里 $p_\tau^W\in\mathbb R^3$ 是世界系中的未来手点，$T_{C_t\leftarrow W}\in SE(3)$ 固定使用当前时刻相机位姿。这样得到的是“从当前视角看，手接下来要去哪里”，而不是相机和手一起移动后的表观轨迹。</p>
+
+          <h3>3.2 55D 动作接口：统一维度只是表面，mask 与相对目标才是关键</h3>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/lingbot-vla2/lingbot_vla2_data_dimension.png" alt="LingBot-VLA 2.0 的 55 维全身动作接口">
+            <figcaption>55D = 14 arm joints + 14 EEF pose + 2 gripper + 12 hand joints + 4 waist + 2 head + 3 mobile base + 4 reserved。每种本体只监督实际存在的维度。</figcaption>
+          </figure>
+          <p><strong>旧方法的瓶颈：</strong>双臂、灵巧手、人形、移动底盘拥有不同控制接口。简单 padding 会让缺失维度产生伪监督，绝对关节角又把不同初始姿态和任务混进回归目标。</p>
+          <p><strong>它怎么改：</strong>所有样本进入固定 55D state/action tensor，缺失执行器通过 embodiment mask 从 loss 和执行中移除。论文消融进一步选择 relative joint target 与 MeanStd normalization。相对动作把目标从“预测全局姿态”改成“预测当前位置附近的修正量”。</p>
+          <p><strong>为什么有效：</strong>四个 GM-100 任务中，relative joint action 的 pooled 标准差由绝对动作的约 0.80 降至 0.28，平均成功率从 33.7% 提升到 55.0%。MeanStd 保留长尾纠偏动作，成功率 55.0%；MinMax 与 Q01-Q99 将大部分值压到窄区间，只得到 47.5% 和 47.4%。</p>
+          <p><strong>限制：</strong>joint 与 EEF 平均表现接近，55.0% 对 56.0%，但不同任务差异很大。接触丰富的挤番茄酱更偏好 EEF，扫码与从微波炉取碗更偏好 joint。不存在一个对所有运动学结构都最优的坐标系。</p>
+
+          <h3>3.3 Sparse MoE Action Expert：扩大容量，不让每个 token 支付全部计算</h3>
+          <p><strong>旧方法的瓶颈：</strong>跨 20 种本体、全身 55D 控制和大量任务时，一个 dense FFN 必须同时容纳相互冲突的运动模式；直接加宽每层会让每个 token 的 FLOPs 一起上升。</p>
+          <p><strong>它怎么改：</strong>action expert 每层 FFN 由一个 shared expert 和 $N_r$ 个 routed experts 组成，每个 token 只激活 top-$K$ routed experts：</p>
+          <div class="math-block">$$
+            m_\ell(u)=E_\ell^{(s)}(u)+\lambda
+            \sum_{j\in\mathcal R(u)}g_{\ell,j}(u)E_{\ell,j}^{(r)}(u),
+          $$
+          $$
+            E(u)=W_{down}\left(\operatorname{SiLU}(W_{gate}u)\odot W_{up}u\right).
+          $$</div>
+          <p>论文的路由先在 FP32 中算 $s_j=\sigma(u^\top e_j)$。选择专家时使用 $s_j+b_j$，混合权重却只用未加偏置的 $s_j$ 归一化。负载偏差只改变“谁被选中”，不污染实际专家输出权重：</p>
+          <div class="math-block">$$
+            \mathcal R(u)=\operatorname{TopK}_j(s_j+b_j,K),\qquad
+            g_j=\frac{s_j}{\sum_{k\in\mathcal R(u)}s_k},
+          $$
+          $$
+            b_j\leftarrow b_j-\gamma\,\operatorname{sign}(n_j-\bar n).
+          $$</div>
+          <p><strong>为什么有效：</strong>shared expert 吸收通用控制模式，routed experts 可以按本体、动作阶段或接触模式形成条件容量。论文在 active-parameter matched 对比中观察到 MoE 更低的预训练 loss 与 GM-100 action error，但没有给出专家究竟学成了何种语义的分析。</p>
+          <p><strong>实现差异：</strong>论文主推 auxiliary-loss-free balancing；公开 real-robot recipe 却设置 `bias_update_speed: 0`，并启用 `sequence_wise_loss_coeff: 1e-3`、`router_z_loss_coeff: 1e-4`。也就是说，论文方法与默认后训练配方是两种可选平衡机制，复现者不能把它们当成同一件事。</p>
+
+          <h3>3.4 双查询蒸馏：预测未来，但不生成未来</h3>
+          <p><strong>旧方法的瓶颈：</strong>图文预训练擅长物体语义，却不必精确编码深度、接触关系和“执行指令后下一帧应该发生什么”。只靠 action loss，视觉特征容易学习到能拟合动作但不稳定的捷径。</p>
+          <p><strong>它怎么改：</strong>在 VLM prefix 中加入 current/future query。LingBot-Depth 提供像素几何目标，DINO-Video 提供 patch-level 时空语义目标：</p>
+          <div class="math-block">$$
+            \mathcal L_{depth}=\left\|P_d(Q_t)-D_t\right\|_1+
+            \left\|P_d(Q_{t+H})-D_{t+H}\right\|_1,
+          $$
+          $$
+            \mathcal L_{video}=\left\|P_v(Q_t)-Z_t\right\|_F^2+
+            \left\|P_v(Q_{t+H})-Z_{t+H}\right\|_F^2.
+          $$</div>
+          <p>DINO-Video 从 DINOv3 初始化，在 5M 段互联网、ego 与机器人视频上加入 block-wise causal temporal attention 和 3D RoPE 训练。LARYBench 上，它在 Robot 分数达到 71.97，高于 DINOv3 的 69.06 和 V-JEPA2 的 70.43；在 RoboCOIN/AgiBot 的特征变化误差也最低。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/lingbot-vla2/lingbot_vla2_vis_distillation.png" alt="LingBot-VLA 2.0 双查询深度和 DINO-Video 蒸馏">
+            <figcaption>当前 query 重建当前几何/语义，未来 query 从当前可见上下文预测 $t+H$ 的 teacher feature。推理时 teacher 与真实未来帧都被移除，query 仅作为已训练好的内部表征。</figcaption>
+          </figure>
+          <p><strong>限制：</strong>论文只展示蒸馏后的可视化，没有给出“去掉 current/future depth/video loss 后真机成功率变化”的完整 action ablation。因此它证明了 query 能预测 teacher feature，却没有单独证明这些 feature 是主表中策略提升的原因。</p>
+        </section>
+
+        <section class="article-section" id="train-infer">
+          <h2>4. 训练和推理流程 <a class="heading-anchor" href="#train-infer">#</a></h2>
+          <h3>训练输入与输出</h3>
+          <p>每个样本包含三视角图像、语言指令、55D state、$[H,55]$ action 及有效维度 mask。若开启蒸馏，还需要当前/未来图像生成 depth 和 DINO-Video teacher targets。公开配置使用 $H=50$、三路相机和 8 个 task-query tokens。</p>
+          <ol>
+            <li>Qwen3-VL 将图像、指令、current/future queries 编成 prefix tokens。</li>
+            <li>从 $\epsilon\sim\mathcal N(0,I)$ 和时间 $\tau$ 构造 noisy action $x_\tau$。</li>
+            <li>state、$x_\tau$ 与 time embedding 进入 action expert suffix。</li>
+            <li>两个 token stream 逐层联合 attention，各自通过独立 FFN；action FFN 使用 MoE。</li>
+            <li>action head 回归 flow velocity；query projections 回归 depth/video teacher feature。</li>
+            <li>mask 后的 flow loss、蒸馏 loss 与可选路由 loss 联合反向传播。</li>
+          </ol>
+
+          <h3>推理输入与输出</h3>
+          <ol>
+            <li>只输入当前三视角图像、指令和 state，不需要未来帧、深度模型或 DINO-Video。</li>
+            <li>VLM prefix 前向一次并缓存 36 层 KV。</li>
+            <li>初始化 $x_1\sim\mathcal N(0,I)$，重复 10 次 action-expert 前向；每次只计算 suffix，复用 prefix KV。</li>
+            <li>得到 $[B,50,55]$ 动作，按本体配置反归一化并裁出有效维度；控制端可只执行前若干步，再重规划。</li>
+          </ol>
+          <p>官方 README 报告 RTX 4090D、10 个 denoising steps 时约 130 ms/次。这是模型调用延迟，不等于完整传感、网络、反归一化和机器人控制闭环的端到端延迟。</p>
+        </section>
+
+        <section class="article-section" id="formulas">
+          <h2>5. 公式与代码逐项对齐 <a class="heading-anchor" href="#formulas">#</a></h2>
+          <h3>5.1 Flow matching 的方向别看反</h3>
+          <div class="math-block">$$
+            x_\tau=\tau\epsilon+(1-\tau)a,\qquad
+            u_\tau=\epsilon-a,
+          $$
+          $$
+            \mathcal L_{FM}=\|v_\theta(x_\tau,I_t,l,s_t,\tau)-u_\tau\|_2^2.
+          $$</div>
+          <p>代码中 $\tau=0$ 是 clean action，$\tau=1$ 是 noise。训练预测从 action 指向 noise 的速度 $\epsilon-a$；推理却从 $\tau=1$ 往 0 积分，$\Delta\tau=-1/N$，因此 `x_t += dt * v_t` 实际沿反方向把噪声拉回动作。这与常见“0 是噪声、1 是数据”的记号相反，但计算一致。</p>
+
+          <h3>5.2 联合 attention 不是简单 cross-attention</h3>
+          <p>每层分别从 VLM stream 与 action stream 计算 $Q,K,V$，再沿 token 维拼接做一次 attention：</p>
+          <div class="math-block">$$
+            Q=[Q^{vlm};Q^{act}],\quad K=[K^{vlm};K^{act}],\quad V=[V^{vlm};V^{act}],
+          $$
+          $$
+            Y=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt d}+M\right)V.
+          $$</div>
+          <p>$M$ 是 block mask，决定 action token 能否读图文和 query。attention 输出切回两个 stream 后，再分别进入各自的 residual/FFN。这就是 Mixture-of-Transformers：交互发生在 attention，容量和模态归纳偏置留在各自参数中。</p>
+
+          <h3>5.3 Teacher target 的张量</h3>
+          <table class="data-table">
+            <thead><tr><th>张量</th><th>公开配置/推导形状</th><th>实现操作</th></tr></thead>
+            <tbody>
+              <tr><td>state</td><td>$[B,55]$</td><td>Linear(55, 768) 形成 suffix state token</td></tr>
+              <tr><td>noisy action</td><td>$[B,50,55]$</td><td>Linear(55, 768) 后与 time embedding 融合</td></tr>
+              <tr><td>current/future query</td><td>每组 $[B,8,d_{vlm}]$</td><td>cross-attention projector 对齐 teacher token</td></tr>
+              <tr><td>DINO patch target</td><td>$[B,N_p,1024]$</td><td>MSE/Frobenius loss</td></tr>
+              <tr><td>depth target</td><td>由 224 输入产生的 dense token/map</td><td>L1 loss</td></tr>
+              <tr><td>flow velocity</td><td>$[B,50,55]$</td><td>Linear(768, 55)，按 embodiment mask 求 loss</td></tr>
+            </tbody>
+          </table>
+          <p><strong>【不确定】</strong>论文正文没有完整给出采样频率、不同本体的 action execution horizon、机器人预训练时每类数据占比以及 6B 模型总训练 steps。公开 YAML 主要是 post-training 示例，不能反推出 foundation pretraining 的完整配方。</p>
+        </section>
+
+        <section class="article-section" id="alignment">
+          <h2>6. 训练与推理细节对齐 <a class="heading-anchor" href="#alignment">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>检查项</th><th>训练</th><th>推理</th><th>风险</th></tr></thead>
+            <tbody>
+              <tr><td>未来图像</td><td>作为 teacher target</td><td>不可见</td><td>蒸馏建立的是隐式预测能力，不能在线纠正错误未来</td></tr>
+              <tr><td>Teacher</td><td>LingBot-Depth + DINO-Video</td><td>全部移除</td><td>部署便宜，但 teacher bias 会进入 student</td></tr>
+              <tr><td>Action noise</td><td>随机 $\tau$，一次监督某个噪声层级</td><td>固定 10 步 Euler 全路径</td><td>标准 flow train-test discrepancy</td></tr>
+              <tr><td>Action context</td><td>ground-truth action 加噪</td><td>模型自己的中间 sample</td><td>误差会在 denoising 与 chunk execution 中累积</td></tr>
+              <tr><td>Prefix</td><td>每个 batch 完整计算</td><td>先算一次并缓存 KV</td><td>相机更新后 cache 必须失效，不能跨 observation 复用</td></tr>
+              <tr><td>Normalization</td><td>MeanStd 更优</td><td>必须用同一统计量反归一化</td><td>跨本体统计混用会放大执行尺度错误</td></tr>
+              <tr><td>Chunk</td><td>一次预测 50 步</td><td>可只执行前 $h&lt;50$ 步</td><td>$h$ 决定响应性与动作平滑的折中</td></tr>
+            </tbody>
+          </table>
+          <p>公开代码还有一个重要防泄漏设计：`block_future_depth_to_action` 与 `block_suffix_to_future_video` 默认开启。未来 query 不能直接把真实 future target 送给 action token；teacher target 只通过 loss 约束 query hidden state。这让训练/推理条件保持一致。</p>
+        </section>
+
+        <section class="article-section" id="experiments">
+          <h2>7. 实验复盘：结果有效，但因果归因不够干净 <a class="heading-anchor" href="#experiments">#</a></h2>
+          <h3>GM-100：同一策略混训 9 个双臂任务</h3>
+          <table class="data-table">
+            <thead><tr><th>平台</th><th>GR00T N1.7</th><th>$\pi_{0.5}$</th><th>LingBot 1.0</th><th>LingBot 2.0</th></tr></thead>
+            <tbody>
+              <tr><td>AgileX Cobot Magic<br>Progress / Success</td><td>36.3 / 17.8</td><td>59.1 / 32.2</td><td>58.2 / 30.0</td><td><strong>66.2 / 34.4</strong></td></tr>
+              <tr><td>Galaxea R1 Pro<br>Progress / Success</td><td>16.4 / 5.6</td><td>27.4 / 8.9</td><td>32.7 / 15.6</td><td><strong>34.6 / 15.6</strong></td></tr>
+            </tbody>
+          </table>
+          <p>AgileX 上相对 1.0 的 progress 提升 8.0 点，但 Galaxea 上只提升 1.9 点，success 仍是 15.6%。逐任务还出现回退：AgileX 的 block sorting、sort snacks、pack eggs、tool packing 并未全面超过强 baseline。论文自己的解释也承认，模型常能推进任务，却在最终精准放置、释放和收尾失败。</p>
+
+          <h3>长时移动操作：15 次试验，OOD 同时考位姿与物体变化</h3>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/lingbot-vla2/lingbot_vla2_mobile_robots.png" alt="LingBot-VLA 2.0 长时移动操作实验平台">
+            <figcaption>Astribot S1 执行冰箱物品整理，Cobot Magic-ARX X5 执行灶台清洁。每个 task-setting 运行 15 次。</figcaption>
+          </figure>
+          <table class="data-table">
+            <thead><tr><th>任务</th><th>设置</th><th>LingBot 2.0</th><th>$\pi_{0.5}$</th></tr></thead>
+            <tbody>
+              <tr><td>冰箱整理</td><td>ID</td><td><strong>77.1 / 60.0</strong></td><td>65.3 / 46.7</td></tr>
+              <tr><td>冰箱整理</td><td>OOD</td><td><strong>37.0 / 13.3</strong></td><td>30.3 / 6.7</td></tr>
+              <tr><td>灶台清洁</td><td>ID</td><td><strong>84.3 / 66.7</strong></td><td>79.9 / 60.0</td></tr>
+              <tr><td>灶台清洁</td><td>OOD</td><td><strong>67.5 / 40.0</strong></td><td>62.5 / 33.3</td></tr>
+            </tbody>
+          </table>
+          <p>OOD 冰箱任务既扰动初始位置 $\pm10$ cm，又替换水果和水瓶类别，因此比只扰动起点的灶台任务更难。15 次试验意味着 success 的一个样本就是 6.7 个百分点；表中多个 6.7 点差异实际上只相当于多成功一次，论文没有报告置信区间或显著性检验。</p>
+
+          <h3>消融真正证明了什么</h3>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/lingbot-vla2/lingbot_vla2_gm100_ablation_barplot.png" alt="LingBot-VLA 2.0 动作空间、归一化和损失消融">
+            <figcaption>动作工程结论比架构归因更扎实：relative target、MeanStd 和 L2 在这四个任务上的平均表现最好；joint/EEF 则应按任务选择。</figcaption>
+          </figure>
+          <ul>
+            <li><strong>有直接证据：</strong>relative 比 absolute 好；MeanStd 比 MinMax/Q01-Q99 好；L2 平均优于 L1；MoE 在 active-compute matched 下 loss/action error 更低。</li>
+            <li><strong>只有表征证据：</strong>双查询能重建 current/future depth 与 DINO feature，但没有完整真机 action ablation。</li>
+            <li><strong>没有被隔离：</strong>60K 小时数据、清洗、Qwen3-VL backbone、55D 动作、MoE、蒸馏从 1.0 到 2.0 一起变化，主表无法回答谁贡献最大。</li>
+            <li><strong>比较公平性【不确定】：</strong>论文没有充分披露 $\pi_{0.5}$/GR00T 的训练数据量、训练步数、调参预算与模型规模是否严格匹配。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="reproduce">
+          <h2>8. 可复现清单 <a class="heading-anchor" href="#reproduce">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>项目</th><th>公开内容</th><th>复现注意点</th></tr></thead>
+            <tbody>
+              <tr><td>基础模型</td><td>6B native-depth checkpoint；Qwen3-VL-4B-Instruct</td><td>确认 checkpoint config 覆盖默认 14D/50 chunk 配置</td></tr>
+              <tr><td>环境</td><td>Python 3.12、PyTorch 2.8、FlashAttention 2.8.3</td><td>FSDP2、FlexAttention、fused MoE 对 CUDA/torch 版本敏感</td></tr>
+              <tr><td>数据</td><td>LeRobot v2.1/v3.0、robot YAML、RoboTwin 2.0 示例</td><td>相机名、state/action key、频率和时间戳必须先对齐</td></tr>
+              <tr><td>动作</td><td>55D、MeanStd、50-step chunk</td><td>为每个本体生成有效维度 mask 与独立统计量</td></tr>
+              <tr><td>MoE</td><td>32 experts、top-4、36 layers</td><td>监控 dead expert、load ratio、router bias；不要同时误用两套平衡机制</td></tr>
+              <tr><td>蒸馏</td><td>depth/video 权重各 0.004，teacher target 1024D</td><td>需要额外 MoGe/LingBot-Depth 与 DINO-Video checkpoint；future frame 必须与 action horizon 对齐</td></tr>
+              <tr><td>优化</td><td>Muon 可选；示例 LR $5\times10^{-5}$，40K steps</td><td>README 称 Muon 更慢但收敛更好；AdamW 是兼容后备</td></tr>
+              <tr><td>推理</td><td>10 denoise steps，prefix KV cache</td><td>官方约 130 ms/call；执行窗口 `use_length` 示例为 25</td></tr>
+            </tbody>
+          </table>
+          <blockquote class="rich-callout rich-callout-uncertain">
+            <p><strong>论文没写清楚：</strong>60K 小时数据混采权重、foundation pretraining steps/算力、各本体 action frequency 重采样方法、future horizon 的物理时间、EMA/warmup/weight decay、真机安全限幅与重规划触发条件。合理猜测是按本体做 sampling balance、统一到固定 action rate，并在部署侧做 delta clipping；应通过训练配置、dataset transform 和 robot controller 三处交叉验证，而不是只看模型 YAML。</p>
+          </blockquote>
+        </section>
+
+        <section class="article-section" id="improvements">
+          <h2>9. 可以继续往哪里改 <a class="heading-anchor" href="#improvements">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr></thead>
+            <tbody>
+              <tr><td>让 future query 显式条件于候选 action</td><td>从 goal prior 升级为 action-conditioned dynamics，可做反事实比较</td><td>训练时 GT action 泄漏，推理时 sampled action distribution shift</td><td>同状态采多个 action，比较未来 latent 排序与 MPC 成功率</td></tr>
+              <tr><td>多时间尺度 queries：$t+8,t+25,t+50$</td><td>同时学习接触瞬间与子任务结果</td><td>query 竞争、teacher loss 过强</td><td>按 horizon 做 feature error 与长时成功率消融</td></tr>
+              <tr><td>按运动学结构进行层级 MoE routing</td><td>arm/base/hand 专家共享与专化更可控</td><td>先验错误会限制跨本体迁移</td><td>比较 token routing、embodiment routing、hybrid routing</td></tr>
+              <tr><td>joint + EEF 双头与可学习融合</td><td>适配姿态约束任务和接触任务</td><td>两种动作不一致，IK 可能不可解</td><td>增加 FK consistency loss，逐任务报告选择比例</td></tr>
+              <tr><td>失败段与收尾动作重采样</td><td>缩小 progress-success gap</td><td>数据分布被失败边界主导</td><td>按 milestone 末 20% 过采样，检查最终放置/释放成功率</td></tr>
+              <tr><td>不确定性驱动的短 chunk 重规划</td><td>OOD 与接触时更快纠错</td><td>推理频率和抖动增加</td><td>基于 flow sample variance 动态选择执行 5/15/25 步</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="card">
+          <h2>10. 速读备忘卡 <a class="heading-anchor" href="#card">#</a></h2>
+          <ul class="takeaway-list">
+            <li>LingBot-VLA 2.0 是 VLA system paper，不是单一架构 trick。</li>
+            <li>数据从 90K 小时机器人 + 20K 小时 ego 原始池清到 50K + 10K 小时。</li>
+            <li>ego 手轨迹先在世界系恢复，再变换到当前相机系，隔离相机自运动。</li>
+            <li>统一接口是 55D：arm、EEF、gripper、hand、waist、head、base 与 reserved。</li>
+            <li>relative joint target 显著降低方差，平均成功率 33.7% → 55.0%。</li>
+            <li>MeanStd 保留长尾纠偏动作，比 MinMax 与 Q01-Q99 更好。</li>
+            <li>action expert 每层 FFN 使用 sparse MoE；shared expert + top-K routed experts。</li>
+            <li>论文的 loss-free routing 与公开 post-training 默认辅助路由 loss 不是同一配方。</li>
+            <li>双查询预测 current/future depth 与 DINO-Video feature，不生成未来像素。</li>
+            <li>future query 不条件于待生成 action，因此它是 predictive representation，不是显式 dynamics model。</li>
+            <li>GM-100 的提升集中在部分任务，Galaxea success 对 1.0 没有提升。</li>
+            <li>代码、训练配方、部署脚本和 6B checkpoint 已公开，复现条件优于多数工业 VLA 报告。</li>
+          </ul>
+          <p class="insight">最后记住一句：<strong>它最有价值的不是“VLA 也能预测未来”，而是把数据质量、动作统计、条件容量和未来监督放进同一条可部署训练链路。</strong></p>
+        </section>
+
+        <footer class="article-footer">
+          <p>资料：<a href="https://arxiv.org/abs/2607.06403">arXiv</a> · <a href="https://technology.robbyant.com/lingbot-vla-v2">Project</a> · <a href="https://github.com/Robbyant/lingbot-vla-v2">GitHub</a> · <a href="https://huggingface.co/collections/robbyant/lingbot-vla-v2">Hugging Face</a></p>
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+        </footer>
+      </article>
+    </main>
+  </body>
+</html>
