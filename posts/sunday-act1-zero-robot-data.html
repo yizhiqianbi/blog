@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Sunday Robotics ACT-1 深度解读：Skill Capture Glove、Skill Transform、零机器人遥操作数据、跨具身视觉与运动对齐、地图条件导航。">
+    <title>ACT-1：所谓 Zero Robot Data，真正解决的是具身映射</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260717b">
+    <script>
+      window.MathJax = {
+        tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script type="application/json" id="paper-metadata">
+      {
+        "title": "ACT-1：所谓 Zero Robot Data，真正解决的是具身映射",
+        "paper": "https://www.sunday.ai/blog/no-robot-data",
+        "authors": ["Sunday Team"],
+        "date": "2026-07-17",
+        "source_date": "2025-11-19",
+        "category": "robotics-world-models",
+        "tags": ["act-1", "sunday-robotics", "human-video", "zero-robot-data", "skill-capture-glove", "skill-transform", "cross-embodiment", "dexterous-manipulation", "map-conditioned-navigation", "mobile-manipulation"],
+        "systems": ["ACT-1", "Memo", "Skill Capture Glove", "Skill Transform"],
+        "datasets": ["sensorized human demonstrations", "transformed robot-view trajectories", "unseen Airbnb homes"],
+        "methods": ["hardware embodiment co-design", "kinematic retargeting", "visual domain transformation", "map-conditioned navigation", "whole-body action modeling"],
+        "code": "No public code, model weights, dataset, architecture specification, training objective, or evaluation harness was linked from the official ACT-1 article as of 2026-07-17.",
+        "related_posts": ["posts/sunday-act2-generalizing-reliability.html", "posts/xiaomi-robotics-1-scaling-vla-100k-hours.html", "posts/qwen-robotmanip-alignment-unlocks-scale.html", "posts/wam-data-cleaning-qwen-cosmos-roadmap.html"],
+        "graph_nodes": ["ACT-1", "Memo", "Skill Capture Glove", "Skill Transform", "human demonstration", "robot trajectory", "embodiment mismatch", "visual domain gap", "3D map conditioning"],
+        "graph_edges": [
+          "Skill Capture Glove -> matches_geometry_with -> Memo hand",
+          "Skill Capture Glove -> records -> sensorized human demonstrations",
+          "Skill Transform -> maps -> human demonstrations to robot trajectories",
+          "Skill Transform -> aligns -> kinematics and visual observations",
+          "ACT-1 -> trains_on -> transformed human trajectories",
+          "ACT-1 -> conditions_on -> 3D maps",
+          "3D map conditioning -> enables -> navigation in unseen homes",
+          "ACT-1 -> precedes -> ACT-2"
+        ],
+        "parent_file": "index.html",
+        "remix_prompt": "解读 Sunday Robotics 的 no-robot-data 博客，写成中文技术博客并推送。",
+        "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md"
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#core">Insight</a>
+        <a href="#method">Method</a>
+        <a href="#evidence">Evidence</a>
+      </nav>
+    </header>
+
+    <main class="article-shell" id="top">
+      <article>
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+          <p class="kicker">Technical Blog · Human Data · Cross-Embodiment</p>
+          <h1>ACT-1：所谓 Zero Robot Data，真正解决的是具身映射</h1>
+          <p class="article-dek">Sunday Robotics 的路线不是让普通人类视频直接监督机器人，而是把采集硬件、机器人手和数据变换系统一起设计，使“人做出的动作”先变成几何、传感和视觉上都像机器人执行的轨迹，再训练 ACT-1。</p>
+          <div class="article-meta">
+            <span>2026.07.17</span>
+            <span>原文：2025.11.19</span>
+            <span>分类：robotics-world-models</span>
+            <a href="https://www.sunday.ai/blog/no-robot-data">Original</a>
+            <a href="sunday-act2-generalizing-reliability.html">ACT-2</a>
+          </div>
+        </header>
+
+        <figure class="note-figure wide-figure">
+          <img src="../assets/sunday-act1/hero.jpg" alt="Sunday Robotics 的 Memo 家庭机器人">
+          <figcaption>Memo 是 ACT-1 的执行本体。Sunday 把数据采集设备与机器人硬件共同设计，而不是事后用算法硬做跨具身迁移。</figcaption>
+        </figure>
+
+        <section class="article-section" id="core">
+          <h2>0. 一句话结论 <a class="heading-anchor" href="#core">#</a></h2>
+          <blockquote>
+            <p>ACT-1 试图绕开昂贵的机器人遥操作数据：用与机器人手共享几何和传感布局的 Skill Capture Glove 采人类操作，再用 Skill Transform 把人体运动与视觉外观转换到 Memo 的观测-动作域；收益是更快覆盖真实家庭的长尾，代价是必须把硬件设计、标定和视觉变换做成一套封闭系统，而且公开文章没有给出模型、数据规模或标准化评测。</p>
+          </blockquote>
+          <p class="insight">核心不是“人类数据比机器人数据多”，而是<strong>先让 source embodiment 和 target embodiment 接近到足以共享动作语义</strong>。Sunday 不是只训练一个更强的 retargeter，而是重新设计采集手套和机器人手，主动降低 retargeting 问题的难度。</p>
+        </section>
+
+        <section class="article-section" id="positioning">
+          <h2>1. 论文定位：这是数据系统发布，不是完整模型论文 <a class="heading-anchor" href="#positioning">#</a></h2>
+          <p>ACT-1 的公开材料主要证明三类系统能力：超长程移动操作、未见家庭泛化和精细灵巧操作。它没有披露网络结构、参数量、action representation、loss、训练步数或数据规模，所以不能像 VLA 技术报告那样复原模型。可确认的创新集中在数据入口：</p>
+          <table class="data-table">
+            <thead><tr><th>路线</th><th>采集对象</th><th>跨具身处理</th><th>瓶颈</th></tr></thead>
+            <tbody>
+              <tr><td>机器人遥操作</td><td>目标机器人动作</td><td>天然对齐</td><td>设备占用、采集慢、场景难扩展</td></tr>
+              <tr><td>普通人类视频</td><td>RGB 中的人手活动</td><td>需推断动作与机器人可达性</td><td>缺少控制量、视觉/动力学差距大</td></tr>
+              <tr><td>ACT-1</td><td>传感化手套 + 人类执行</td><td>硬件同构 + Skill Transform</td><td>专有采集设备和机器人共同设计成本高</td></tr>
+            </tbody>
+          </table>
+          <p>因此，“zero robot data”更精确的含义是：官方声称 ACT-1 的训练没有使用机器人 teleoperation trajectory。它并不意味着零机器人硬件、零机器人传感标定、零目标域视觉模型或零真机验证。</p>
+        </section>
+
+        <section class="article-section" id="method">
+          <h2>2. 方法总览：先缩小 embodiment gap，再学习 policy <a class="heading-anchor" href="#method">#</a></h2>
+          <pre class="code-block"><code>human performs household task
+  -> Skill Capture Glove records hand pose / sensors / egocentric observation
+  -> shared glove-hand geometry preserves grasp semantics
+  -> Skill Transform retargets body kinematics to Memo
+  -> Skill Transform removes human appearance from visual observations
+  -> robot-like observation-action trajectory
+  -> ACT-1 foundation-policy training
+  -> observation + task / map context
+  -> whole-body navigation and dexterous action</code></pre>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/sunday-act1/glove-hand.png" alt="Skill Capture Glove 与 Memo 机器人手的共同几何结构">
+            <figcaption>官方原图：Skill Capture Glove（左）与 Memo 手（右）。相同几何和传感布局使手指动作不需要在两套拓扑之间重新解释。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section" id="innovations">
+          <h2>3. 四个关键设计 <a class="heading-anchor" href="#innovations">#</a></h2>
+          <h3>3.1 Hardware co-design：把算法难题改成机械设计问题</h3>
+          <p><strong>旧方法为什么不行：</strong>人手自由度、关节布局、接触面和机器人手不同，即使恢复出准确人手姿态，也不保证存在语义等价的机器人动作。</p>
+          <p><strong>它怎么改：</strong>让手套和 Memo 手共享几何与传感器布局。采集者不是“假装自己是任意机器人”，而是在佩戴与目标末端结构一致的接口。</p>
+          <p><strong>为什么有效：</strong>抓杯柄、拉绳、扣住工具等接触模式能在 source/target 两端保持同样的手指拓扑。retargeting 主要剩下尺度、手臂长度和基座运动，而不是重新求解抓取语义。</p>
+          <p><strong>代价：</strong>数据价值绑定特定硬件家族；机器人手升级会改变数据接口。文章没有报告关节标定误差、触觉/力传感通道或手套自由度，均为<strong>【不确定】</strong>。</p>
+
+          <h3>3.2 Skill Transform：同时做 kinematic 与 visual alignment</h3>
+          <p>官方称 Skill Transform 会将原始人类观测转换成“看起来和运动起来都像机器人生成”的数据，并报告 90% 的转换成功率。可以用一个抽象映射描述：</p>
+          <div class="math-block">$$
+            \mathcal T:\;(I^h_{1:T},q^h_{1:T},c_{1:T})
+            \longrightarrow
+            (\tilde I^r_{1:T},\tilde a^r_{1:T},\tilde s^r_{1:T}),
+          $$</div>
+          <p>$I^h$ 是含人体外观的观测，$q^h$ 是手套/人体运动，$c$ 是传感信号；输出是 robot-view 图像、机器人动作和状态。这个公式是对文章机制的工程抽象，不是官方公布的训练公式。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/sunday-act1/skill-transform.webp" alt="人类通过 Skill Capture Glove 执行玻璃杯操作">
+            <figcaption>Skill Transform 演示视频帧：同一任务先由佩戴手套的人执行，再转换为 Memo 域数据。官方没有公开视觉替换是生成式重渲染、分割合成还是多阶段 pipeline。</figcaption>
+          </figure>
+          <p><strong>【不确定】</strong>“90% success”没有定义分母和通过标准。合理解释包括：轨迹可完成转换、视觉重建质量通过审核，或变换后机器人可重放。需要公开 failure taxonomy、人工验收协议和变换前后 action consistency 才能判断。</p>
+
+          <h3>3.3 Map-conditioned navigation：把未知房型变成已知输入</h3>
+          <p>ACT-1 在未见 Airbnb 家庭中并非完全无先验探索。部署时提供环境 3D map，训练中也让模型接触大量家庭布局，因此 policy 学的是“读地图去找桌子/洗碗机”，而不是记住训练房间：</p>
+          <div class="math-block">$$
+            a_t \sim \pi_\theta(a_t\mid o_{\le t},m_{3D},g),
+          $$</div>
+          <p>$m_{3D}$ 把全局几何从隐式记忆变成显式条件。这样能分离两个问题：地图负责 room-scale localization，视觉动作模型负责局部抓取和操作。文章没有说明地图如何构建、地标如何语义化以及全局/局部 planner 是否独立存在。</p>
+
+          <h3>3.4 Whole-body action：一个系统覆盖毫米到米</h3>
+          <p>Table-to-Dishwasher 同时需要毫米级杯具插入、双手协调、躯干伸展和超过 130 英尺的移动。Sunday 把它描述为单一 end-to-end foundation model，但没有披露是否存在分层 skill selector、导航 controller 或安全状态机。因此“single model”应理解为统一学习系统的产品边界，不能据此断言所有频率的 action 都由一个同频率 decoder 直接输出。</p>
+        </section>
+
+        <section class="article-section" id="training">
+          <h2>4. 训练与推理：能确认的边界 <a class="heading-anchor" href="#training">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>阶段</th><th>已公开</th><th>未公开</th></tr></thead>
+            <tbody>
+              <tr><td>采集</td><td>人佩戴 Skill Capture Glove，在真实家庭完成任务</td><td>数据小时数、场景数、采样频率、隐私过滤</td></tr>
+              <tr><td>转换</td><td>运动与视觉都映射到 Memo 域；声称 90% 成功</td><td>模型、loss、人工审核、失败处理</td></tr>
+              <tr><td>训练</td><td>ACT-1 使用转换后数据，未使用机器人遥操作轨迹</td><td>architecture、token、action chunk、optimizer</td></tr>
+              <tr><td>推理</td><td>任务可含 3D map，执行 whole-body mobile manipulation</td><td>history、memory、replan、控制频率、安全接管</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="tensor">
+          <h2>5. 从实现角度看，真正要对齐哪些张量 <a class="heading-anchor" href="#tensor">#</a></h2>
+          <p>虽然代码未公开，但任何同类系统至少要生成以下训练记录：</p>
+          <pre class="code-block"><code>trajectory = {
+  observation_rgb: [T, V, H, W, 3],
+  robot_state:     [T, D_state],
+  hand_action:     [T, D_hand],
+  arm_action:      [T, D_arm],
+  base_action:     [T, D_base],
+  map_context:     [N_map, D_map],
+  validity_mask:   [T, D_action],
+  transform_score: [T] or [1]
+}</code></pre>
+          <p>最容易被宣传语掩盖的是 $\text{validity\_mask}$ 与 $\text{transform\_score}$：变换失败、遮挡、人体穿模、机器人不可达和接触不一致的片段不能与高质量数据同权训练。ACT-1 是否显式保存这些字段，文章没有说明。</p>
+        </section>
+
+        <section class="article-section" id="mismatch">
+          <h2>6. 训练-推理不一致 <a class="heading-anchor" href="#mismatch">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>Mismatch</th><th>Sunday 的处理</th><th>剩余问题</th></tr></thead>
+            <tbody>
+              <tr><td>人类运动学 → Memo 运动学</td><td>同构手 + Skill Transform</td><td>手臂长度、基座、动力学与延迟仍不同</td></tr>
+              <tr><td>人类外观 → robot-view</td><td>视觉变换移除 human-specific details</td><td>生成伪影可能成为训练 shortcut</td></tr>
+              <tr><td>人类成功轨迹 → policy 自身状态</td><td>未说明</td><td>closed-loop compounding error 与恢复数据</td></tr>
+              <tr><td>训练房型 → 新家庭</td><td>3D map conditioning</td><td>地图误差、动态障碍、未知语义地标</td></tr>
+              <tr><td>示范分布 → 家庭长尾</td><td>便携采集扩大真实家庭覆盖</td><td>采集者行为偏差与安全过滤</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="evidence">
+          <h2>7. 证据复盘：能力演示很强，科学归因仍弱 <a class="heading-anchor" href="#evidence">#</a></h2>
+          <h3>Table-to-Dishwasher</h3>
+          <p>官方报告一次完整任务包含 33 种、68 次灵巧交互，涉及 21 个物体并导航超过 130 英尺。它证明系统可以长时间串联导航、抓取、倾倒、开关门和按键，但没有成功率、试验次数、干预规则或失败分布，因此应视为系统 capability demonstration，而不是统计 benchmark。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/sunday-act1/dishwasher.webp" alt="ACT-1 操作玻璃杯并装入洗碗机">
+            <figcaption>官方演示帧。玻璃杯操作体现了手型、力控制和精细定位的共同要求，但单个演示不能分离硬件、policy 与安全控制的贡献。</figcaption>
+          </figure>
+          <h3>未见家庭与灵巧任务</h3>
+          <p>Airbnb 演示说明 map-conditioned policy 能迁移到新房型；袜子折叠和意式咖啡展示了柔性物体、双手协调、工具使用与高扭矩动作。不过这些结果没有与 teleoperation、普通 human video 或 ablated Skill Transform 对照，也没有报告 transform 数据量。最关键的因果问题仍未回答：增益来自手套同构、视觉转换、数据规模，还是 Memo 硬件本身？</p>
+        </section>
+
+        <section class="article-section" id="reproduce">
+          <h2>8. 可复现清单 <a class="heading-anchor" href="#reproduce">#</a></h2>
+          <ul>
+            <li>公开 glove 与 robot hand 的 joint topology、range、sensor channels 和标定误差。</li>
+            <li>给出人体 arm/base 到 Memo whole-body action 的 retargeting objective。</li>
+            <li>说明视觉转换模型、遮挡处理、时序一致性和质量评分。</li>
+            <li>报告数据小时数、任务/家庭分布、采集者数量和 train/test split。</li>
+            <li>定义 90% transform success，并发布 failure taxonomy。</li>
+            <li>披露 ACT-1 architecture、action horizon、history、map encoder 与训练目标。</li>
+            <li>报告长程任务的成功率、人工干预、安全停止和平均完成时间。</li>
+            <li>做 raw human、kinematic-only、visual-only、full transform 四组消融。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="improve">
+          <h2>9. 可继续改进的方向 <a class="heading-anchor" href="#improve">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>改动</th><th>收益</th><th>风险</th><th>验证</th></tr></thead>
+            <tbody>
+              <tr><td>transform uncertainty 进入 loss</td><td>降低伪标签污染</td><td>过滤后数据多样性下降</td><td>硬阈值、soft weight、无权重对照</td></tr>
+              <tr><td>加入 robot closed-loop failure data</td><td>补足人类成功轨迹没有的恢复状态</td><td>破坏 zero-robot-data 叙事</td><td>不同失败数据比例的 OOD 成功率</td></tr>
+              <tr><td>学习 embodiment adapter</td><td>扩展到不同手型与机器人</td><td>重新引入跨拓扑映射难题</td><td>leave-one-hand-out transfer</td></tr>
+              <tr><td>map memory 与局部 policy 解耦</td><td>更清晰处理长程导航</td><td>系统复杂度与错误接口增加</td><td>地图噪声、地标缺失和动态障碍压力测试</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="card">
+          <h2>10. 速读备忘卡 <a class="heading-anchor" href="#card">#</a></h2>
+          <ul>
+            <li>ACT-1 的主要贡献是 data engine，不是已公开的新模型结构。</li>
+            <li>“Zero Robot Data”指没有机器人遥操作轨迹，不能扩写成零机器人先验。</li>
+            <li>Skill Capture Glove 与 Memo 手共享几何和传感布局。</li>
+            <li>硬件同构把手部 retargeting 从跨拓扑问题降成同接口映射。</li>
+            <li>Skill Transform 同时处理运动学与视觉域差距。</li>
+            <li>官方声称 90% transform success，但没有定义指标。</li>
+            <li>新家庭泛化依赖部署时提供的 3D map。</li>
+            <li>Table-to-Dishwasher 是长程系统演示，不是有置信区间的 benchmark。</li>
+            <li>文章没有公开数据规模、模型、loss、代码或权重。</li>
+            <li>最值得复用的 insight：先用硬件设计降低 embodiment gap，再谈数据规模。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="sources">
+          <h2>来源 <a class="heading-anchor" href="#sources">#</a></h2>
+          <ol class="source-list">
+            <li><a href="https://www.sunday.ai/blog/no-robot-data">ACT-1: A Robot Foundation Model Trained on Zero Robot Data</a></li>
+            <li><a href="https://www.sunday.ai/blog/act-2-preview">ACT-2 Preview: Generalizing Reliability</a></li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="next-links" aria-label="相关阅读">
+        <a href="sunday-act2-generalizing-reliability.html">下一篇：ACT-2</a>
+        <a href="xiaomi-robotics-1-scaling-vla-100k-hours.html">Xiaomi-Robotics-1</a>
+        <a href="../index.html">返回首页</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer"><p>一支铅笔 · Paper Reading</p><a href="#top">回到顶部</a></footer>
+  </body>
+</html>
