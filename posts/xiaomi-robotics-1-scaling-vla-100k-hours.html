@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Xiaomi-Robotics-1 深度解读：10 万小时 UMI 预训练、state-transition 自动标注、跨本体动作对齐、Choice Policy 辅助监督与 flow-matching action DiT。">
+    <title>Xiaomi-Robotics-1：10 万小时 UMI 数据如何变成可部署的 VLA</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260717a">
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script type="application/json" id="paper-metadata">
+      {
+        "title": "Xiaomi-Robotics-1：10 万小时 UMI 数据如何变成可部署的 VLA",
+        "paper": "https://robotics.xiaomi.com/robot-static-resource/xiaomi-robotics-1/xiaomi-robotics-1.pdf",
+        "project": "https://robotics.xiaomi.com/xiaomi-robotics-1.html",
+        "repository": "https://github.com/XiaomiRobotics/Xiaomi-Robotics-1",
+        "model": "https://huggingface.co/XiaomiRobotics",
+        "parent_file": "index.html",
+        "remix_prompt": "跟之前一样解读 Xiaomi-Robotics-1，并写入博客后推送。",
+        "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+        "authors": ["Xiaomi Robotics", "Jun Guo", "Piaopiao Jin", "Jason Li", "Peiyan Li", "Yingyan Li", "Futeng Liu", "Wanli Peng", "Optimus Qin", "Yifei Su", "Nan Sun", "Qiao Sun", "Runze Suo", "Heyun Wang", "Yunhong Wang", "Rujie Wu", "Caoyu Xia", "Lina Zhang", "Jack Zhao"],
+        "date": "2026-07-17",
+        "paper_date": "2026-07-16",
+        "category": "robotics-world-models",
+        "tags": ["xiaomi-robotics-1", "vla", "umi", "robot-foundation-model", "cross-embodiment", "state-transition-caption", "flow-matching", "mixture-of-transformers", "choice-policy", "action-chunk", "mobile-manipulation", "data-scaling"],
+        "systems": ["Xiaomi-Robotics-1", "Qwen3-VL", "Qwen3.5-27B", "Diffusion Transformer", "Choice Policies", "Xiaomi-Robotics-0", "pi0.5"],
+        "datasets": ["100K-hour UMI corpus", "in-house mobile-manipulator data", "in-house dual-arm data", "BridgeData V2", "RT-1", "DROID", "RoboCasa", "RoboCasa365", "VLABench", "RoboDojo"],
+        "methods": ["state-transition auto-labeling", "Mixture-of-Transformers", "flow matching action generation", "winner-takes-all choice policy", "relative delta end-effector action", "cross-embodiment action masking", "vision-language co-training", "two-stage pre-training and post-training"],
+        "code": "As of 2026-07-17, the official repository contains the report and README only. The README states that code and model weights will be released soon; implementation details beyond the paper are therefore not publicly verifiable.",
+        "related_posts": ["posts/qwen-robotmanip-alignment-unlocks-scale.html", "posts/qwen-vla-unified-embodied-action-model.html", "posts/wam-data-cleaning-qwen-cosmos-roadmap.html", "posts/rise-of-world-action-models.html"],
+        "graph_nodes": ["Xiaomi-Robotics-1", "UMI", "state-transition caption", "imperative instruction", "Qwen3-VL", "Choice Policy", "action DiT", "flow matching", "relative delta EE action", "cross-embodiment alignment", "RoboCasa365", "RoboDojo"],
+        "graph_edges": [
+          "UMI -> supplies -> 100K-hour pre-training corpus",
+          "Qwen3.5-27B -> generates -> state-transition captions",
+          "state-transition caption -> conditions -> embodiment-free action pre-training",
+          "cross-embodiment post-training -> aligns -> UMI action prior to robot embodiments",
+          "cross-embodiment post-training -> maps -> descriptive transitions to imperative instructions",
+          "Qwen3-VL -> provides_KV_cache_to -> action DiT",
+          "Choice Policy -> supervises -> action-aware VLM representations",
+          "Choice Policy action tokens -> are_masked_from -> action DiT attention",
+          "action DiT -> predicts -> action chunks with flow matching",
+          "relative delta EE action -> unifies -> arm motion across embodiments",
+          "Xiaomi-Robotics-1 -> evaluates_on -> RoboCasa365",
+          "Xiaomi-Robotics-1 -> differs_from -> world-action models without future video prediction"
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#core">Insight</a>
+        <a href="#method">Method</a>
+        <a href="#experiments">Experiments</a>
+      </nav>
+    </header>
+
+    <main class="article-shell" id="top">
+      <article>
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+          <p class="kicker">Paper Deep Dive · VLA · UMI Scaling</p>
+          <h1>Xiaomi-Robotics-1：10 万小时 UMI 数据如何变成可部署的 VLA</h1>
+          <p class="article-dek">这篇工作的重点不是发明一个更复杂的机器人 policy，而是验证一条可扩展的数据路线：先用不依赖具体机器人本体的 UMI 轨迹学习“如何让场景发生目标变化”，再用约 1 万小时跨本体数据，把这种动作先验对齐到真实机器人和人类指令。</p>
+          <div class="article-meta">
+            <span>2026.07.17</span>
+            <span>分类：robotics-world-models</span>
+            <span>论文日期：2026.07.16</span>
+            <a href="https://robotics.xiaomi.com/robot-static-resource/xiaomi-robotics-1/xiaomi-robotics-1.pdf">PDF</a>
+            <a href="https://robotics.xiaomi.com/xiaomi-robotics-1.html">Project</a>
+            <a href="https://github.com/XiaomiRobotics/Xiaomi-Robotics-1">Code</a>
+          </div>
+        </header>
+
+        <section class="article-section" id="core">
+          <h2>0. 一句话结论 <a class="heading-anchor" href="#core">#</a></h2>
+          <blockquote>
+            <p>Xiaomi-Robotics-1 用 10 万小时 UMI 轨迹加自动生成的 <strong>state-transition caption</strong> 做 embodiment-free 动作预训练，再用约 1 万小时跨本体数据完成动作空间与语言指令对齐；它证明了更大数据和模型能稳定降低 action error，并把收益迁移到真机成功率，但代价是巨大的私有数据与算力，且目前代码和权重尚未公开。</p>
+          </blockquote>
+          <p class="insight">核心不是“UMI 数据很多”这一句，而是把无边界、无任务标签的长轨迹改写成一个可监督问题：<strong>给定当前观测和一段场景状态变化描述，预测能实现该变化的动作 chunk</strong>。这使 UMI 数据从 demonstration collection 变成了 action pre-training corpus。</p>
+        </section>
+
+        <section class="article-section" id="positioning">
+          <h2>1. 论文定位：它是 VLA，不是显式 World Model <a class="heading-anchor" href="#positioning">#</a></h2>
+          <p>模型学习的是条件动作分布，而不是未来视频或显式状态转移模型：</p>
+          <div class="math-block">$$
+            \max_{\theta}\;\mathbb{E}_{(o_t,l,a_{t:t+H})\sim\mathcal D}
+            \log \pi_\theta(a_{t:t+H}\mid o_t,l).
+          $$</div>
+          <p>输入是当前多视角观测 $o_t$、语言 $l$ 和机器人本体状态 $s_t$，输出是长度为 $H$ 的连续动作 chunk。它不先预测未来图像，所以与 Fast-WAM、ABot-M0.5、Cosmos Policy 一类“视频/世界动力学参与 action readout”的路线不同；它更接近 $\pi_0/\pi_{0.5}$：用预训练 VLM 提供视觉语言表征，再让 flow policy 生成连续动作。</p>
+          <table class="data-table">
+            <thead><tr><th>路线</th><th>中间对象</th><th>主要数据优势</th><th>主要风险</th></tr></thead>
+            <tbody>
+              <tr><td>Xiaomi-Robotics-1</td><td>VLM KV cache + noisy action</td><td>UMI 轨迹直接监督动作生成</td><td>没有显式未来验证与长期记忆</td></tr>
+              <tr><td>典型 VLA</td><td>视觉语言 token + action head</td><td>可复用 VLM 语义知识</td><td>动作数据仍是瓶颈</td></tr>
+              <tr><td>典型 WAM</td><td>未来视频/latent state + action</td><td>可利用视频动力学先验</td><td>生成开销、未来误差和 train-test mismatch</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="method">
+          <h2>2. 方法总览：两阶段数据对齐，一套 MoT policy <a class="heading-anchor" href="#method">#</a></h2>
+          <pre class="code-block"><code>Pre-training
+100K h UMI video + gripper pose
+  -> fixed-length clip segmentation
+  -> Qwen3.5-27B captions scene-state transitions
+  -> Qwen3-VL encodes video + transition text
+  -> Choice Policy predicts K action candidates (auxiliary)
+  -> action DiT predicts UMI action chunk by flow matching
+
+Post-training
+7.2K h in-house robots + 1K h instruction-labeled UMI + open robot data
+  -> canonical end-effector frame + unified action vector + missing-dim mask
+  -> replace transition description with imperative instruction
+  -> same VLM + DiT objective
+  -> executable arm / gripper / base / waist action chunk</code></pre>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/xiaomi-robotics-1/architecture.png" alt="Xiaomi-Robotics-1 的 VLM、Choice Policy 与 Diffusion Transformer 架构">
+            <figcaption>论文 Figure 2。VLM 同时编码观测、语言和本体状态，并输出 K 个动作候选与分数；DiT 只读取观测和语言的 KV cache，不读取 VLM 的 action-related token。</figcaption>
+          </figure>
+          <p>模型提供 2B、5B、10B 三个规模。三者的 VLM/DiT 层数分别为 28/36/36；总参数量约 2.6B、5.1B、10.5B。DiT 与 VLM 层数一致，但 hidden size 更小，目的是把主要语义计算留在 VLM，把动作去噪控制在可部署成本内。</p>
+        </section>
+
+        <section class="article-section" id="innovations">
+          <h2>3. 三个真正重要的设计 <a class="heading-anchor" href="#innovations">#</a></h2>
+
+          <h3>3.1 State-transition caption：把“做什么”改写成“世界变成什么”</h3>
+          <p><strong>旧方法为什么不行：</strong>10 万小时长轨迹无法人工逐段切分、命名任务；直接用固定任务 ID 又会丢掉对象、方向和中间状态的细粒度信息。</p>
+          <p><strong>它怎么改：</strong>先等长切 clip，再用 Qwen3.5-27B 描述夹爪和交互物体在片段内发生的状态变化，例如“冰箱门被打开后关闭，塑料袋被移入冰箱”。生产者线程负责 CPU 切片并写入内存文件系统，消费者线程维持数百个 caption 请求并发；论文称整个 10 万小时语料约两周完成标注。</p>
+          <p><strong>为什么有效：</strong>transition caption 同时描述起点、终点和被操作对象，是 action chunk 的弱 goal specification。它不要求标注者知道高层任务边界，却能让策略学习“如何从当前场景走向目标变化”。</p>
+          <p><strong>代价与限制：</strong>固定长度切片可能把一个语义动作截断，也可能包含多个并行变化；VLM caption 的遗漏和幻觉会直接变成条件噪声。论文没有报告 caption 审核准确率、过滤阈值或不同 clip 长度的消融，均属于<strong>【不确定】</strong>。可通过抽样人工标注、动作可恢复率和 clip-length ablation 验证。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/xiaomi-robotics-1/pretrain-data.png" alt="Xiaomi-Robotics-1 的十万小时 UMI 预训练数据分布">
+            <figcaption>论文 Figure 3。官方统计为 100K 小时、1.7K 场景、2.4M episodes、260+ tasks，覆盖家庭、办公、工业、餐饮、商业和户外环境。</figcaption>
+          </figure>
+
+          <h3>3.2 动作对齐：统一的是坐标语义，不只是维度</h3>
+          <p>对手臂动作，论文使用相对当前末端位姿的 delta：</p>
+          <div class="math-block">$$
+            a_{t+i}=\left({}^{\mathrm{Base}}_{\mathrm{EE}}T_t\right)^{-1}
+            {}^{\mathrm{Base}}_{\mathrm{EE}}\hat T_{t+i}.
+          $$</div>
+          <p>这里 $T_t\in SE(3)$ 是当前末端在 base frame 下的位姿，$\hat T_{t+i}$ 是未来目标位姿。矩阵乘法先把未来位姿拉回当前末端局部坐标系，因此“沿夹爪前方移动”在不同机器人上拥有一致数值含义。团队进一步统一所有 UMI 与机器人末端坐标轴方向；base 用速度，waist 用位置相对增量。不同本体没有的 action dimension 用 loss mask 去掉。</p>
+          <p><strong>机制：</strong>一个统一向量解决张量接口，canonical EE frame 解决动作语义，missing-dimension mask 解决监督合法性。三者缺一不可。只 padding 维度而不统一 frame，会让相同数字对应不同物理方向，模型会在本体之间收到冲突梯度。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/xiaomi-robotics-1/posttrain-data.png" alt="Xiaomi-Robotics-1 跨本体后训练数据组成">
+            <figcaption>论文 Figure 4。约 10K 小时 post-training 数据包含 7.2K+ 小时自采移动操作/双臂真机、1K+ 小时人工 instruction UMI，以及 Bridge V2、RT-1、DROID。</figcaption>
+          </figure>
+
+          <h3>3.3 Choice Policy 是训练脚手架，不能成为 DiT 捷径</h3>
+          <p>VLM 末尾追加 state token、$K$ 个 action query 和 $K$ 个 score query。第 $k$ 个 action query 回归候选 chunk $\hat a^k$，score query 预测它与真值的 L1 距离：</p>
+          <div class="math-block">$$
+            k^*=\arg\min_k\|\hat a^k-a\|_1,\qquad
+            s_k=\|\hat a^k-a\|_1,
+          $$
+          $$
+            \mathcal L_{\mathrm{Regression}}
+            =\|\hat a^{k^*}-a\|_1+\sum_{k=1}^{K}\|\hat s_k-s_k\|_2^2.
+          $$</div>
+          <p>Winner-takes-all 允许多模态动作分布由多个候选分担，而 score head 学会判断哪个候选更接近 demonstration。这个辅助任务把 VLM 表征推向 action-relevant feature，帮助 DiT 收敛。</p>
+          <p>关键细节是：<strong>DiT 的 cross-attention 看不到 action query 和 score query 对应的 KV cache</strong>。论文观察到若保留这些 token，DiT 会复制 VLM 已经生成的动作，形成 shortcut，反而削弱视觉语言 grounding。训练辅助头提供 representation shaping，但不能泄漏答案给最终生成器。</p>
+        </section>
+
+        <section class="article-section" id="train-infer">
+          <h2>4. 训练与推理：一个 flow policy，两个语言分布 <a class="heading-anchor" href="#train-infer">#</a></h2>
+          <h3>动作 flow matching</h3>
+          <p>训练时把真值动作与高斯噪声线性插值：</p>
+          <div class="math-block">$$
+            \tilde a^\tau=\tau a+(1-\tau)\epsilon,\quad \epsilon\sim\mathcal N(0,I),
+          $$
+          $$
+            \mathcal L_{\mathrm{Flow}}=
+            \left\|v_\theta(o_t,l,s_t,\tilde a^\tau,\tau)
+            -u(\tilde a^\tau,a,\tau)\right\|_2^2.
+          $$</div>
+          <p>论文从 $u\sim\mathrm{Beta}(1.5,1)$ 采样，再令 $\tau=(1-u)\times0.999$，提高高噪声区域的采样权重。$	au$ 通过 adaLN 注入 DiT。推理从高斯噪声开始，用 5 次 Euler 更新恢复 clean action，步长固定为 $0.2$：</p>
+          <div class="math-block">$$
+            a^{\tau+\Delta\tau}=a^\tau+\Delta\tau\cdot
+            v_\theta(o_t,l,s_t,a^\tau,\tau),\qquad \Delta\tau=0.2.
+          $$</div>
+
+          <h3>两阶段总损失</h3>
+          <div class="math-block">$$
+            \mathcal L=\mathcal L_{\mathrm{Flow}}+
+            \mathcal L_{\mathrm{Regression}}+0.1\mathcal L_{\mathrm{NTP}}.
+          $$</div>
+          <p>$\mathcal L_{\mathrm{NTP}}$ 来自额外视觉语言数据，用于维持 Qwen3-VL 的通用能力。预训练时 VL:UMI 采样比为 1:9；post-training 时 VL、开源机器人、instruction-UMI、自采机器人比例为 0.5:0.5:0.5:8.5。也就是说，后训练仍保留 5% 视觉语言 rehearsal，但 85% batch 来自高质量自采真机数据。</p>
+
+          <h3>吞吐工程</h3>
+          <p>VLM token 在 batch 内 pack 成一条变长序列，只做一次前向。由于 VLM 比 DiT 贵，每个样本同时采 4 个 flow timestep；对应的 4 份 noisy action 被 pack 后一次通过 DiT，并共享已计算的 VLM KV cache。这是典型的“摊薄条件编码成本”：一次看图，训练四个噪声层级。</p>
+        </section>
+
+        <section class="article-section" id="formulas">
+          <h2>5. 关键张量与实现映射 <a class="heading-anchor" href="#formulas">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>符号</th><th>实现对象</th><th>典型形状</th><th>作用</th></tr></thead>
+            <tbody>
+              <tr><td>$o_t$</td><td>多视角图像/短视频 token</td><td>$[B,N_v,N_{img},d_{vlm}]$</td><td>当前视觉上下文</td></tr>
+              <tr><td>$l$</td><td>transition caption 或 instruction token</td><td>$[B,N_l,d_{vlm}]$</td><td>定义目标变化/任务</td></tr>
+              <tr><td>$s_t$</td><td>proprio MLP token</td><td>$[B,1,d_{vlm}]$</td><td>当前本体状态</td></tr>
+              <tr><td>$a_{t:t+H}$</td><td>统一连续动作 chunk</td><td>$[B,H+1,D_a]$</td><td>arm/gripper/base/waist 控制</td></tr>
+              <tr><td>$\tilde a^\tau$</td><td>加入 flow noise 的动作</td><td>$[B,H+1,D_a]$</td><td>DiT 输入</td></tr>
+              <tr><td>VLM KV cache</td><td>language + observation KV</td><td>每层 $[B,N_{ctx},d]$</td><td>为 DiT 提供条件</td></tr>
+              <tr><td>$\hat a^k,\hat s_k$</td><td>Choice Policy 输出</td><td>$[B,K,H+1,D_a]$ / $[B,K]$</td><td>训练期辅助动作监督</td></tr>
+              <tr><td>action mask</td><td>本体维度有效位</td><td>$[B,1,D_a]$</td><td>屏蔽不存在的执行器</td></tr>
+            </tbody>
+          </table>
+          <p><strong>【不确定】</strong>论文没有公布 $H$、控制频率、$D_a$、相机数量/分辨率、$K$、动作归一化范围和旋转参数化方式。上表形状是从公式推导出的接口，不是官方超参。验证方式有三种：等待配置公开；从 checkpoint config 读取；在推理代码中检查 action tokenizer、dataset transform 与 control loop。</p>
+        </section>
+
+        <section class="article-section" id="alignment">
+          <h2>6. 训练-推理对齐检查 <a class="heading-anchor" href="#alignment">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>不一致点</th><th>论文如何处理</th><th>仍然存在的风险</th></tr></thead>
+            <tbody>
+              <tr><td>transition 描述 → imperative instruction</td><td>1K+ 小时人工 instruction UMI + 7.2K+ 小时真机做 post-training</td><td>两种语言分布的语义粒度未必一致</td></tr>
+              <tr><td>UMI gripper → robot embodiment</td><td>canonical EE frame、统一 action vector、缺失维度 mask</td><td>动力学、延迟、夹爪结构差异仍未显式建模</td></tr>
+              <tr><td>训练真值 action → 推理噪声 ODE</td><td>flow matching 覆盖不同噪声强度，推理固定 5 步 Euler</td><td>5 步误差与 action chunk 闭环漂移缺少消融</td></tr>
+              <tr><td>单帧当前观测 → 长程任务</td><td>action chunk 与 post-training 长任务数据</td><td>RoboDojo 明确未使用 history，memory 维度较弱</td></tr>
+              <tr><td>VLM 辅助动作 → DiT 最终动作</td><td>屏蔽 action-related KV，避免直接复制</td><td>辅助头与 DiT 梯度竞争的权重消融未给出</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="experiments">
+          <h2>7. 实验复盘：证据很强，但“scaling law”仍应谨慎使用 <a class="heading-anchor" href="#experiments">#</a></h2>
+          <h3>7.1 真正被验证的是 20K 小时子集上的单调 scaling</h3>
+          <p>数据 scaling 用 5B 模型，在约 20K 小时 UMI 上取 12.5%、25%、50%、100%；模型 scaling 用 2B、5B、10B，都训练同一份 20K 小时数据。随着数据和参数增加，validation action MSE 下降；小数据设置后期过拟合，大数据设置仍持续下降。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/xiaomi-robotics-1/pretrain-scaling.png" alt="Xiaomi-Robotics-1 的预训练数据规模和模型规模曲线">
+            <figcaption>论文 Figure 5。数据规模带来的差距大于 2B→10B 的模型规模差距，说明当前区间的第一瓶颈更像数据覆盖，而不是参数容量。</figcaption>
+          </figure>
+          <p>重要限定：总语料是 100K+ 小时，但受算力预算限制，论文的可控 scaling 曲线只使用约 20K 小时。它证明“在这个区间单调变好”，还没有拟合出可外推的 power law，也没有给出 20K→100K 的严格同配方对照。因此更准确的表述是 <strong>scaling behavior</strong>，而不是已经建立完整 scaling law。</p>
+
+          <h3>7.2 预训练收益确实迁移到了真机</h3>
+          <p>同一 5B post-training 配方下，无 action pre-training 的 Qwen3-VL 初始化平均成功率为 26%；使用 20K UMI 的 12.5% 即升到 53%，100% 达到 75%。模型规模从 2B→5B→10B 时，平均成功率从 61%→75%→79%。测试任务在 post-training 中出现过，但环境和物体实例未见，因此它证明的是 object/environment OOD，而不是完全 novel-task zero-shot。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/xiaomi-robotics-1/posttrain-scaling.png" alt="预训练规模对真机后训练成功率的影响">
+            <figcaption>论文 Figure 8。鞋柜整理这类 contact-rich task 对预训练规模最敏感：无预训练为 0%，20K 全量预训练后达到 75%；10B 达到 92%。</figcaption>
+          </figure>
+
+          <h3>7.3 下游 few-hour adaptation 有说服力，但试验次数偏少</h3>
+          <p>四个全新任务合计只用 36 小时（平均每任务 &lt;10h）时，Xiaomi-Robotics-1 达到 75% success / 90% progress；$\pi_{0.5}$ 为 40% / 66%。144 小时设置达到 85% success。优点是任务包含双臂手机装箱、可变形纸张补充、长程洗衣和多物体装箱；不足是每任务只评估 10 次，置信区间会很宽。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/xiaomi-robotics-1/efficient-adaptation.png" alt="Xiaomi-Robotics-1 与 pi0.5 的少样本任务适配结果">
+            <figcaption>论文 Figure 10。低数据设置下最明显的差距来自 printer refilling 和 laundry loading，而 box packing 在高数据下各方法都趋近饱和。</figcaption>
+          </figure>
+
+          <h3>7.4 仿真 benchmark 很强，但不是纯 backbone 公平赛</h3>
+          <table class="data-table">
+            <thead><tr><th>Benchmark</th><th>Xiaomi-Robotics-1</th><th>第二名/关键对照</th><th>读法</th></tr></thead>
+            <tbody>
+              <tr><td>RoboCasa</td><td>74.5%</td><td>World2Act 72.6%</td><td>小幅领先</td></tr>
+              <tr><td>RoboCasa365</td><td>57.4%</td><td>ABot-M0.6 46.6%</td><td>Composite-Unseen 32.1% 是主要亮点</td></tr>
+              <tr><td>VLABench</td><td>SR 59.1 / PS 70.3 / IS 69.9</td><td>ERVLA 的 IS 70.4 更高</td><td>成功与进度第一，意图分数不是第一</td></tr>
+              <tr><td>RoboDojo</td><td>论文表中 avg score 20.07</td><td>第二名 13.07</td><td>未使用历史观测，memory 维度仍较弱</td></tr>
+            </tbody>
+          </table>
+          <p>VLABench 使用了 ERVLA 风格 CoT 标签，并以 50% 概率联合 next-token CoT loss；不同 benchmark 也各自 fine-tune 官方数据。因此这些结果证明 foundation initialization 对下游训练有价值，但不能简单归因于 UMI pre-training 一个变量。</p>
+          <p><strong>版本差异：</strong>2026-07-16 的项目页写 RoboCasa365 57.4、RoboDojo 13.93；PDF 摘要写 57.6、20.07，而 PDF Table 3 写 57.4。本文以 PDF 表格与正文为主。RoboDojo 项目本身发布时间晚于本文引用链，数字可能来自持续更新的 leaderboard；最终应以作者后续勘误或代码评测脚本为准。</p>
+        </section>
+
+        <section class="article-section" id="reproduce">
+          <h2>8. 可复现清单：现在能确定什么，缺什么 <a class="heading-anchor" href="#reproduce">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>部分</th><th>论文已给出</th><th>仍缺失</th></tr></thead>
+            <tbody>
+              <tr><td>Backbone</td><td>Qwen3-VL + 同层数小 hidden DiT；2.6B/5.1B/10.5B</td><td>具体 checkpoint、视觉帧采样与 projector</td></tr>
+              <tr><td>Flow</td><td>Beta(1.5,1)、$\tau\le0.999$、adaLN、5-step Euler</td><td>action normalization、rotation representation、CFG/EMA</td></tr>
+              <tr><td>Loss</td><td>Flow + Choice Regression + 0.1 NTP</td><td>$K$、各 action 维度权重、mask 细节</td></tr>
+              <tr><td>Pre-train mix</td><td>VL:UMI = 1:9；每样本 4 个 flow timestep</td><td>batch size、LR、optimizer、warmup、训练 compute</td></tr>
+              <tr><td>Post-train mix</td><td>0.5:0.5:0.5:8.5</td><td>每个来源的采样温度与重复率</td></tr>
+              <tr><td>Action interface</td><td>relative EE delta、base velocity、waist delta、missing-dim mask</td><td>控制频率、chunk horizon、执行窗口、replan 频率</td></tr>
+              <tr><td>Label pipeline</td><td>固定切片、Qwen3.5-27B、producer-consumer、约两周</td><td>prompt、clip length、质量过滤、人工审计结果</td></tr>
+            </tbody>
+          </table>
+          <blockquote class="rich-callout rich-callout-uncertain">
+            <p><strong>代码状态（核对日期 2026-07-17）：</strong>官方 GitHub 只有 README 与论文 PDF，README 明确写着 code/model weights “will be released soon”。因此当前无法用代码确认 tensor shape、训练超参、异步 fine-tuning 或真机 control loop；博客中未把论文外推断伪装成代码事实。</p>
+          </blockquote>
+        </section>
+
+        <section class="article-section" id="improvements">
+          <h2>9. 可以继续往哪里改 <a class="heading-anchor" href="#improvements">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr></thead>
+            <tbody>
+              <tr><td>固定切片改为 change-point segmentation</td><td>caption 与原子动作边界更一致</td><td>切分器误差造成数据偏置</td><td>固定长度 vs 光流/夹爪事件/语义边界</td></tr>
+              <tr><td>caption 加可验证结构槽位</td><td>减少 VLM 幻觉，支持对象/状态审计</td><td>语言表达变窄</td><td>自由文本 vs object-state JSON vs 双通道条件</td></tr>
+              <tr><td>加入短历史或压缩 memory</td><td>改善长程状态依赖与 RoboDojo memory</td><td>延迟与 context 成本上升</td><td>单帧、4帧、事件 memory 的同预算比较</td></tr>
+              <tr><td>canonical action + embodiment token</td><td>同时保留共享动作语义和硬件差异</td><td>模型可能走 embodiment shortcut</td><td>新机器人 leave-one-embodiment-out transfer</td></tr>
+              <tr><td>把 transition goal 接到 latent world state</td><td>在执行前检查动作是否能实现目标变化</td><td>引入 WAM 推理成本与误差</td><td>纯 VLA、latent goal critic、video rollout 三档闭环</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="wam-note">
+          <h2>对 WAM 数据设计最值得拿走的东西 <a class="heading-anchor" href="#wam-note">#</a></h2>
+          <p>这篇论文对 WAM 最有价值的不是 MoT 架构，而是 <strong>transition-centered data unit</strong>。如果数据清洗只保存“视频 + 原始动作 + 高层任务名”，一个 episode 内大量局部变化没有独立监督；Xiaomi-Robotics-1 的做法提醒我们，每个训练窗口都应尽量带有：</p>
+          <pre class="code-block"><code>start observation
++ state transition / local goal
++ canonicalized action chunk
++ embodiment-valid mask
++ quality / idle / contact flags
++ end observation (WAM 可额外使用)</code></pre>
+          <p>对于 WAM，还可以把 transition caption 同时作为 action 条件和未来 latent 的语义验收条件：未来预测不仅要视觉相似，还要真的完成“门打开、物体进入、夹爪释放”这些可验证状态变化。</p>
+        </section>
+
+        <section class="article-section" id="card">
+          <h2>10. 速读备忘卡 <a class="heading-anchor" href="#card">#</a></h2>
+          <ul>
+            <li>模型是 VLA flow policy，不显式预测未来视频。</li>
+            <li>预训练数据：100K+ 小时 UMI，1.7K 场景，2.4M episodes，260+ tasks。</li>
+            <li>自动标注把固定长度 clip 变成 state-transition conditioned action learning。</li>
+            <li>post-training 约 10K 小时，其中 7.2K+ 小时为自采真机，1K+ 为 instruction UMI。</li>
+            <li>动作跨本体对齐依赖 canonical EE frame、统一向量和 missing-dim mask。</li>
+            <li>Qwen3-VL 提供语义 KV cache，DiT 用 flow matching 生成 action chunk。</li>
+            <li>Choice Policy 用 K 个候选辅助训练 VLM，但其 action token 不给 DiT 看。</li>
+            <li>推理为 5-step Euler；训练每个样本共享 VLM cache 采 4 个 flow timestep。</li>
+            <li>可控 scaling 实验用约 20K 小时子集，不等于完整验证 100K scaling law。</li>
+            <li>真机收益主要证明未见环境/物体泛化，不是完全未见任务 zero-shot。</li>
+            <li>RoboCasa365 为 57.4%，Composite-Unseen 32.1%；VLABench 的 intention score 不是第一。</li>
+            <li>截至 2026-07-17，代码和权重尚未发布，完整复现仍需等待。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="sources">
+          <h2>来源 <a class="heading-anchor" href="#sources">#</a></h2>
+          <ol class="source-list">
+            <li><a href="https://robotics.xiaomi.com/robot-static-resource/xiaomi-robotics-1/xiaomi-robotics-1.pdf">Xiaomi-Robotics-1 Technical Report</a></li>
+            <li><a href="https://robotics.xiaomi.com/xiaomi-robotics-1.html">Xiaomi-Robotics-1 Project Page</a></li>
+            <li><a href="https://github.com/XiaomiRobotics/Xiaomi-Robotics-1">Official GitHub Repository</a></li>
+            <li><a href="https://huggingface.co/XiaomiRobotics">Xiaomi Robotics on Hugging Face</a></li>
+          </ol>
+        </section>
+      </article>
+
+      <nav class="next-links" aria-label="相关阅读">
+        <a href="qwen-robotmanip-alignment-unlocks-scale.html">Qwen-RobotManip</a>
+        <a href="qwen-vla-unified-embodied-action-model.html">Qwen-VLA</a>
+        <a href="wam-data-cleaning-qwen-cosmos-roadmap.html">WAM 数据清洗路线</a>
+        <a href="../index.html">返回首页</a>
+      </nav>
+    </main>
+
+    <footer class="site-footer">
+      <p>一支铅笔 · Paper Reading</p>
+      <a href="#top">回到顶部</a>
+    </footer>
+  </body>
+</html>
