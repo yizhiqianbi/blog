@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="EgoWAM 深度解读：用 Pixel、DINO 和相机稳定 3D Flow 比较人类第一视角视频向机器人策略迁移的世界表征，覆盖 HPT、flow matching、训练推理和 1800 次真机 rollout。">
+    <title>EgoWAM：人类视频如何通过“世界变化”迁移给机器人</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260717a">
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script type="application/json" id="paper-metadata">
+      {
+        "title": "EgoWAM：人类视频如何通过‘世界变化’迁移给机器人",
+        "paper": "https://arxiv.org/pdf/2607.08436",
+        "project": "https://gatech-rl2.github.io/egowam.github.io/",
+        "repository": "https://github.com/GaTech-RL2/egowam.github.io",
+        "parent_file": "index.html",
+        "remix_prompt": "同样处理 https://arxiv.org/html/2607.08436v1 这个",
+        "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+        "authors": ["Baoyu Li", "Xinchen Yin", "Mengying Lin", "Yixin Zhang", "Danfei Xu"],
+        "date": "2026-07-18",
+        "paper_date": "2026-07-08",
+        "category": "robotics-world-models",
+        "tags": ["egowam", "world-action-model", "egocentric-human-data", "cross-embodiment-transfer", "hpt", "dino-feature", "3d-motion-flow", "camera-stabilization", "flow-matching", "representation-shaping", "egoverse", "bimanual-manipulation"],
+        "systems": ["EgoWAM", "Heterogeneous Pretrained Transformer", "DINOv2-B", "Wan VAE", "VACE-1.3B", "Track4World", "Project Aria", "ARX5"],
+        "datasets": ["EgoVerse-A", "in-domain human demonstrations", "ARX5 robot demonstrations", "RoboTwin 2.0"],
+        "methods": ["human-robot co-training", "14D end-effector action alignment", "conditional flow matching", "pixel VAE prediction", "RAE DINO feature prediction", "camera-stabilized 3D motion flow", "future-token supervision", "action-only inference"],
+        "code": "As of 2026-07-18, the official project page marks policy code as coming soon. The public GitHub repository contains the project website and interactive result data, not the EgoWAM training or deployment implementation. The paper appendix provides detailed architecture and optimization hyperparameters.",
+        "related_posts": ["posts/lingbot-vla2-foundation-to-application.html", "posts/rise-of-world-action-models.html", "posts/rae-diffusion-transformers-representation-autoencoders.html", "posts/xiaomi-robotics-1-scaling-vla-100k-hours.html", "posts/wam-data-cleaning-qwen-cosmos-roadmap.html"],
+        "graph_nodes": ["EgoWAM", "EgoVerse", "HPT", "action channel", "world channel", "Pixel VAE", "DINO features", "camera-stabilized 3D flow", "ego-motion factoring", "human-robot transfer", "flow matching", "Fast-WAM"],
+        "graph_edges": [
+          "EgoVerse -> supplies -> in-the-wild egocentric human data",
+          "HPT -> unifies -> human and robot observation tokens",
+          "action channel -> transfers -> embodiment-aligned execution",
+          "world channel -> transfers -> task-relevant scene dynamics",
+          "Pixel VAE -> entangles -> appearance and ego motion",
+          "DINO features -> abstract -> appearance",
+          "camera-stabilized 3D flow -> factors_out -> ego motion",
+          "camera-stabilized 3D flow -> represents -> agent-invariant physical effect",
+          "EgoWAM -> trains_with -> action and world losses",
+          "EgoWAM -> drops_at_inference -> world-model head",
+          "EgoWAM -> resembles -> Fast-WAM representation shaping",
+          "EgoWAM -> differs_from -> action-conditioned rollout world model"
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#core">Insight</a>
+        <a href="#method">Method</a>
+        <a href="#experiments">Experiments</a>
+      </nav>
+    </header>
+
+    <main class="article-shell" id="top">
+      <article>
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+          <p class="kicker">Paper Deep Dive · WAM · Human-to-Robot Transfer</p>
+          <h1>EgoWAM：人类视频如何通过“世界变化”迁移给机器人</h1>
+          <p class="article-dek">动作是 embodiment-specific 的：人的手、头部相机和行为风格不能直接复制给机器人。场景变化却更容易共享。EgoWAM 的实验核心，是固定同一套策略骨干与动作头，只替换未来预测目标，回答 Pixel、DINO feature 与相机稳定 3D Flow 中谁更适合做人机迁移接口。</p>
+          <div class="article-meta">
+            <span>2026.07.18</span>
+            <span>分类：robotics-world-models</span>
+            <span>论文日期：2026.07.08</span>
+            <a href="https://arxiv.org/pdf/2607.08436">PDF</a>
+            <a href="https://arxiv.org/html/2607.08436v1">HTML</a>
+            <a href="https://gatech-rl2.github.io/egowam.github.io/">Project</a>
+          </div>
+        </header>
+
+        <section class="article-section" id="core">
+          <h2>0. 一句话结论 <a class="heading-anchor" href="#core">#</a></h2>
+          <blockquote>
+            <p>EgoWAM 发现，人类 ego 数据若只通过对齐后的 action loss 进入策略，动作风格和形态差异会造成负迁移；增加一个训练期未来预测通道后，人类数据可以通过场景动力学塑造共享 trunk，其中 DINO feature 最利于新物体/新场景泛化，相机稳定 3D Flow 最利于空间精度，代价是额外的 teacher、world head 和离线 3D tracking，而推理时 world head 可完全删除。</p>
+          </blockquote>
+          <p class="insight"><strong>核心 insight：</strong>人类数据不是“不够像机器人”所以没用，而是 action decoder 这个迁移接口选错了。动作描述“这个身体怎么动”，世界表征描述“环境发生了什么”；后者更接近 embodiment-invariant supervision。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/egowam/x1.png" alt="EgoWAM 的人机动作鸿沟与三种世界表征">
+            <figcaption>论文 Figure 1。BC 只有 action channel，容易把人类形态、头动和风格灌进机器人动作；WAM 增加 world channel。作者用 appearance abstraction、cross-embodiment consistency、ego-motion factoring 三条标准比较未来目标。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section" id="positioning">
+          <h2>1. 论文定位：研究 world target，而不是追求更强生成画质 <a class="heading-anchor" href="#positioning">#</a></h2>
+          <p>任务是双臂机器人策略的人机联合训练。数据有两种 embodiment：</p>
+          <div class="math-block">$$
+            \mathcal D_H=\{(o_t^H,a_t^H)\}_{t=1}^{N_H},\qquad
+            \mathcal D_R=\{(o_t^R,a_t^R)\}_{t=1}^{N_R}.
+          $$</div>
+          <p>BC baseline 已尽量把两者对齐到同一个 14D EEF action space，再共同训练 action flow head。EgoWAM 在此基础上增加未来预测头，但固定 trunk、action head 与数据 mixture，只改变 world target。</p>
+          <table class="data-table">
+            <thead><tr><th>方法</th><th>人类数据进入模型的通道</th><th>预测目标</th><th>部署成本</th></tr></thead>
+            <tbody>
+              <tr><td>BC co-train</td><td>action loss</td><td>14D EEF chunk</td><td>action policy</td></tr>
+              <tr><td>EgoWAM Pixel</td><td>action + future loss</td><td>future Wan-VAE latent</td><td>action policy</td></tr>
+              <tr><td>EgoWAM DINO</td><td>action + future loss</td><td>future DINO patch feature</td><td>action policy</td></tr>
+              <tr><td>EgoWAM 3D Flow</td><td>action + future loss</td><td>camera-stabilized 3D motion</td><td>action policy</td></tr>
+            </tbody>
+          </table>
+          <p>它与 Fast-WAM 的共同点是把世界预测当作<strong>训练期 representation shaping</strong>，而非部署时先想象未来再读出动作。更严格地看，它的联合分布被写成两个并行 readout：</p>
+          <div class="math-block">$$
+            p_{\theta,\psi}(a_{t:t+k},s_{t+T}\mid o_t)
+            =p_\psi(s_{t+T}\mid z_t)\,p_\theta(a_{t:t+k}\mid z_t),
+            \quad z_t=f_\phi(o_t).
+          $$</div>
+          <p>注意 $p_\psi(s_{t+T}\mid z_t)$ 没有显式条件于 $a$。因此它不是可回答“如果执行动作 A/B，未来分别怎样”的 action-conditioned simulator，而是共享当前表示上的 future-prediction auxiliary task。称为 WAM 没问题，但能力边界要分清。</p>
+        </section>
+
+        <section class="article-section" id="method">
+          <h2>2. 方法总览：一个共享 trunk，两个 readout <a class="heading-anchor" href="#method">#</a></h2>
+          <pre class="code-block"><code>Human batch: Aria ego RGB + reconstructed hand pose
+Robot batch: Aria ego RGB + 2 wrist RGB + proprioception
+       -> embodiment-specific stems
+       -> 256D HPT token space
+
+64 learnable action tokens + 16 learnable future tokens
+       -> 16-block shared Transformer trunk
+       -> action-token states -> 6-block flow head -> [B, 100, 14]
+       -> future-token states -> swappable world head
+            Pixel: Wan-VAE latent [B, 16, 16, 16]
+            DINO: patch feature [B, 768, 16, 16]
+            3D Flow: motion field [B, 100, 1120, 3]
+
+Training: L_action^R + L_action^H + L_world^R + L_world^H
+Inference: discard world head -> trunk + action flow head at 30 Hz</code></pre>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/egowam/x2.png" alt="EgoWAM 的 HPT 主干、动作头和可替换世界模型头">
+            <figcaption>论文 Figure 2。future tokens 和 action tokens 在共享 HPT trunk 中共同吸收观测信息，但由不同 decoder 读出。三种 target 对应不同 head，比较并非只换 loss。</figcaption>
+          </figure>
+          <table class="data-table">
+            <thead><tr><th>模块</th><th>配置</th><th>输出</th></tr></thead>
+            <tbody>
+              <tr><td>Ego / wrist stem</td><td>ResNet-18，16 latent queries，8 heads</td><td>256D observation tokens</td></tr>
+              <tr><td>Proprio stem</td><td>per-embodiment MLP，14→256</td><td>state token</td></tr>
+              <tr><td>HPT trunk</td><td>16 blocks，256D，8 heads，drop path 0.1</td><td>obs/action/future token states</td></tr>
+              <tr><td>Action head</td><td>6-block CrossTransformer，128D，4 heads</td><td>100×14 action chunk</td></tr>
+              <tr><td>Future bank</td><td>16 learnable tokens</td><td>world-head conditioning</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="innovations">
+          <h2>3. 关键创新点 <a class="heading-anchor" href="#innovations">#</a></h2>
+
+          <h3>3.1 先把 action channel 对齐到足够强，再证明它仍然不够</h3>
+          <p><strong>旧方法为什么不行：</strong>如果 human action 与 robot action 连坐标系都不同，那么 BC 输给 WAM 没有意义。作者先构造尽可能强的 action-level baseline。</p>
+          <p>每条轨迹都写成双臂 14D：每臂 6-DoF EEF pose 加 1D gripper。机器人由 joint angle 经 FK 得到 EEF，并放到静态 ego camera frame；人手位姿原本在移动 Aria device frame 中，重新表达为当前时刻 $t$ 的相机坐标：</p>
+          <div class="math-block">$$
+            a^H_{t:t+k}=left[
+            (T_t^{device})^{-1}T_{t+i}^{device}p^H_{t+i}
+            \right]_{i=1}^{k}.
+          $$</div>
+          <p>这样头部转动不会直接变成手部动作。速度仍不同：人类用 1.0 s 窗口，机器人用 1.5 s 窗口，但都重采样成 $k=100$ 步，按“任务进度”而不是物理时间对齐。每维 1%/99% 分位映射到 $[-1,1]$，降低手部追踪 outlier 的影响。</p>
+          <p><strong>结果：</strong>即便做完坐标、速度与数值范围对齐，自然 human action 仍可能来自不同抓法、不同身体形态和不同风格。BC 仍会学到机器人不可执行的动作。这说明 residual embodiment gap 不是简单归一化可以消掉的。</p>
+
+          <h3>3.2 World channel：让人类数据通过“effect”监督 trunk</h3>
+          <p>BC 目标是：</p>
+          <div class="math-block">$$
+            \mathcal L_{BC}=\mathcal L_{CFM}^{robot}+\mathcal L_{CFM}^{human}.
+          $$</div>
+          <p>EgoWAM 增加两种 embodiment 的 world loss：</p>
+          <div class="math-block">$$
+            \mathcal L_{EgoWAM}=
+            \underbrace{\mathcal L_{action}^{robot}+\mathcal L_{action}^{human}}_{\mathcal L_{action}}
+            +\lambda\underbrace{(\mathcal L_{world}^{robot}+\mathcal L_{world}^{human})}_{\mathcal L_{world}},
+            \qquad \lambda=1.
+          $$</div>
+          <p><strong>为什么有效：</strong>人手与夹爪打开同一个袋子的动作轨迹不同，但“袋口从闭合变为打开”相同。world loss 给共享 trunk 一条不经过 action decoder 的梯度路径，迫使人类与机器人观测围绕共同物理 effect 聚合。UMAP 中 BC 的人机 embedding 分离，而 3D-Flow WAM 更接近共享空间。</p>
+          <p><strong>重要边界：</strong>full EgoWAM 并没有丢掉 human action label。附录的 `Flow-only` 消融表明，仅 world supervision 已优于仅 action supervision；但 Action + Flow 在所有 split 上最好，且 flow loss 从 human/robot 的 0.23/0.20 降到 0.22/0.19。动作梯度仍能提供 task relevance，只是不再是唯一接口。</p>
+
+          <h3>3.3 三种 future target：Pixel、DINO、3D Flow</h3>
+          <table class="data-table">
+            <thead><tr><th>Target</th><th>保留什么</th><th>丢掉什么</th><th>主要问题</th></tr></thead>
+            <tbody>
+              <tr><td>Pixel VAE</td><td>纹理、颜色、布局、运动</td><td>很少</td><td>把手/机器人外观、背景和 ego-motion 一起监督</td></tr>
+              <tr><td>DINO feature</td><td>物体语义、形状与 patch correspondence</td><td>部分低层纹理</td><td>仍在 image grid 上，头动会改变空间位置</td></tr>
+              <tr><td>3D Flow</td><td>相机稳定后的物理位移</td><td>外观和静态背景</td><td>依赖 3D tracker/VIO，语义弱、预处理重</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Pixel：画面越真，不等于物理状态越对</h3>
+          <p>Pixel 将未来 ego frame 编进冻结 Wan VAE，得到 $16\times16\times16$ latent。轻量 Pixel head 是 6-block 384D DiT；Pixel-PT 则用预训练 VACE-1.3B，30 层、1536D。两者都做噪声/速度预测。</p>
+          <p>Pixel-PT 在 bag-grocery 上出现一个典型失败：预训练视频先验倾向于“袋子通常是打开的”，于是尚未抓袋口就生成已打开的未来，policy 提前进入放物阶段。它生成更清晰，却比从头训练的模糊 Pixel 更不 faithful。world representation 的标准应是<strong>因果状态保真</strong>，不是感知画质。</p>
+
+          <h3>DINO：语义抽象带来 OOD 泛化</h3>
+          <p>DINO target 是冻结 DINOv2-B 的 future patch map，去掉 CLS/register token 并逐 token LayerNorm，形状为 $768\times16\times16$。head 使用 RAE 的 $\mathrm{DiT}^{DH}$ 思路：6-block 384D backbone 加 2-block 2048D wide head。宽 head 是必要的，因为 semantic latent channel 768 已远大于普通 VAE latent。</p>
+          <p>DINO 抑制颜色和纹理差异，又保留物体身份和结构，因此在 unseen object / unseen scene 上最好；但 patch 仍绑定图像坐标，人类头部转动会使同一物体落在不同位置，D3 只部分满足。</p>
+
+          <h3>3D Flow：把头动从世界变化里减掉</h3>
+          <p>Track4World 估计每像素 3D point track。若直接做 $X_{t+T}-X_t$，静止背景也会因人头转动产生巨大 flow。作者使用 Aria VIO pose，把未来点先变回时刻 $t$ 的相机坐标：</p>
+          <div class="math-block">$$
+            \widetilde X_{t+T}=(T_t^{cam})^{-1}T_{t+T}^{cam}X_{t+T},
+            \qquad F_{[t,t+T]}=\widetilde X_{t+T}-X_t.
+          $$</div>
+          <p>稳定后，静态背景接近零，物体被移动才产生非零位移。head 在当前图像均匀取 $28\times40=1120$ 个 anchor，预测 $100\times1120\times3$ flow tensor；小于 2 mm（机器人）或 10 mm（人类）的位移被过滤，人类 clip 还跳过头尾各 20 帧。</p>
+          <p><strong>为什么有效：</strong>它同时满足 appearance abstraction、cross-embodiment consistency、ego-motion factoring。代价是离线数据管线需要可靠相机姿态和 dense 3D tracking，tracker 的深度/遮挡误差会直接成为监督噪声。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/egowam/x7.png" alt="Pixel DINO 和 3D Flow 的世界预测比较">
+            <figcaption>论文 Figure 7。加入 human co-training 后，Pixel prediction error 几乎不变，DINO 有中等改善，3D Flow MSE 从 0.85579 降至 0.47261，下降约 45%。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section" id="train-infer">
+          <h2>4. 训练和推理流程 <a class="heading-anchor" href="#train-infer">#</a></h2>
+          <h3>训练输入</h3>
+          <ul>
+            <li>Human：当前 Aria ego RGB、14D 手部 action chunk、对应 future ego frame 或 3D tracks。</li>
+            <li>Robot：当前 Aria ego RGB、两路 wrist RGB、14D proprio、14D EEF action chunk、future target。</li>
+            <li>每步同时采 32 个 robot 与 32 个 human 样本；observation horizon 只有 1 帧。</li>
+          </ul>
+          <h3>单步训练</h3>
+          <ol>
+            <li>模态/本体专属 stem 把输入投到共享 256D token space。</li>
+            <li>64 action tokens 与 16 future tokens 和 observation tokens 一起经过 HPT trunk。</li>
+            <li>action CrossTransformer 对 $[B,100,14]$ noisy chunk 做 conditional flow matching。</li>
+            <li>world head 对 Pixel/DINO/3D Flow target 做 diffusion/flow objective。</li>
+            <li>四项人机 loss 以 $\lambda=1$ 联合更新 stems、trunk 与对应 heads。</li>
+          </ol>
+          <h3>推理</h3>
+          <ol>
+            <li>只读取当前一帧 ego/wrist image 与 14D proprio。</li>
+            <li>world head 不运行，future target、Track4World、DINO 与 VAE 都不需要。</li>
+            <li>action head 用 50 个 v-prediction Euler steps 解码 100×14 chunk。</li>
+            <li>策略在单张 RTX 4090 上以 30 Hz 对接 ARX5 控制环。</li>
+          </ol>
+          <p>因此 3D Flow 的 100×1120×3 大张量只增加训练与数据预处理成本，不增加真机 inference footprint。</p>
+        </section>
+
+        <section class="article-section" id="formulas">
+          <h2>5. 关键公式与张量实现 <a class="heading-anchor" href="#formulas">#</a></h2>
+          <h3>5.1 Action flow matching</h3>
+          <div class="math-block">$$
+            a^\tau=(1-\tau)\epsilon+\tau a,\qquad
+            \epsilon\sim\mathcal N(0,I),\quad
+            \tau\sim\mathrm{Beta}(1.5,1.0).
+          $$</div>
+          <p>$a\in\mathbb R^{B\times100\times14}$ 是 clean action，$\epsilon$ 同形状。这里 $\tau=0$ 为 noise，$\tau=1$ 为 data；Beta(1.5,1.0) 更偏向 clean 端。CrossTransformer 交替 self-attention 和对 trunk 的 cross-attention，预测 velocity，50 步积分恢复 action。</p>
+
+          <h3>5.2 Pixel / DINO 共用线性噪声路径</h3>
+          <div class="math-block">$$
+            s^\tau=(1-\tau)\epsilon+\tau s,\qquad
+            \mathcal L_{world}=\mathbb E\|\epsilon-\epsilon_\psi(s^\tau,\tau,f_\phi(o))\|_2^2.
+          $$</div>
+          <p>Pixel 的 $s\in\mathbb R^{B\times16\times16\times16}$；DINO 的 $s\in\mathbb R^{B\times768\times16\times16}$。公式相同，target geometry 与 decoder capacity 完全不同，因此“只换表征”的说法应理解为只改变 world branch，不能理解为同一个 head 输入不同 target。<strong>【不确定】</strong>正文公式写的是 $\epsilon$-prediction，附录却称 Pixel/DINO 使用 $v$-prediction；在 policy code 发布前无法确认实现采用哪种 parameterization，复现时应以训练 target 构造函数和 sampler 更新式交叉核对。</p>
+
+          <h3>5.3 3D Flow velocity</h3>
+          <div class="math-block">$$
+            \mathcal L_{world}^{Flow}=\mathbb E\left\|
+            u_\psi(s^\tau,\tau,f_\phi(o),q)-(s_q-\epsilon_q)
+            \right\|_2^2.
+          $$</div>
+          <p>$q\in\mathbb R^{1120\times3}$ 表示当前 frame 的 anchor 3D 位置，$s_q\in\mathbb R^{100\times1120\times3}$ 是这些 anchor 在 horizon 内的相机稳定位移。4-block、256D decoder 同时条件于 $q$ 和 trunk features。</p>
+
+          <h3>5.4 训练超参</h3>
+          <table class="data-table">
+            <thead><tr><th>项目</th><th>值</th><th>实现含义</th></tr></thead>
+            <tbody>
+              <tr><td>Optimizer</td><td>AdamW，lr/WD 均 $10^{-4}$</td><td>cosine，$T_{max}=1400$，$\eta_{min}=10^{-5}$</td></tr>
+              <tr><td>Batch</td><td>32 robot + 32 human</td><td>严格平衡两种 embodiment gradient</td></tr>
+              <tr><td>Training</td><td>100 steps/epoch，最多 2000 epochs</td><td>除 Pixel-PT 外单张 L40S，约 2 天/任务/方法</td></tr>
+              <tr><td>Pixel-PT</td><td>2×L40S，1000 epochs</td><td>1.3B head 的显存/计算特例</td></tr>
+              <tr><td>Precision</td><td>bf16</td><td>训练；图像统一 ImageNet normalize</td></tr>
+              <tr><td>Augmentation</td><td>color jitter 0.1/0.1/0.1/0.05</td><td>仅训练时</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="alignment">
+          <h2>6. 训练与推理细节对齐 <a class="heading-anchor" href="#alignment">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>检查项</th><th>训练</th><th>推理</th><th>影响</th></tr></thead>
+            <tbody>
+              <tr><td>World head</td><td>参与 loss 和反传</td><td>完全删除</td><td>零部署开销，但不能在线验证 imagined future</td></tr>
+              <tr><td>Future observation</td><td>生成 target</td><td>不可见</td><td>标准 auxiliary prediction，不存在 future leakage 到输入</td></tr>
+              <tr><td>Human action</td><td>与 robot action 一起监督</td><td>只执行 robot action</td><td>残余动作错配仍存在，由 world channel 缓冲而非消除</td></tr>
+              <tr><td>时间窗口</td><td>human 1.0 s / robot 1.5 s，都重采样 100</td><td>机器人 30 Hz</td><td>相同 token index 不对应相同物理时间</td></tr>
+              <tr><td>Flow denoising</td><td>随机 $\tau$ 单点监督</td><td>50-step 完整积分</td><td>存在 flow-matching 的路径误差</td></tr>
+              <tr><td>Camera stabilization</td><td>Aria VIO + Track4World 离线生成</td><td>不需要</td><td>target quality 依赖外部 estimator</td></tr>
+              <tr><td>Observation history</td><td>1 frame</td><td>1 frame</td><td>时间信息主要被压入动作/future supervision，不显式保留历史</td></tr>
+            </tbody>
+          </table>
+          <p>最大的训练-推理不一致不是删除 world head，而是 action denoiser：训练看到 GT action 的加噪点，推理看到自己的逐步 sample。world head 只塑造 trunk，不负责纠正 action rollout error。</p>
+        </section>
+
+        <section class="article-section" id="experiments">
+          <h2>7. 实验复盘：world target 的差异确实比 pixel 画质更重要 <a class="heading-anchor" href="#experiments">#</a></h2>
+          <h3>数据与评测</h3>
+          <table class="data-table">
+            <thead><tr><th>任务</th><th>Robot demos / hours</th><th>In-domain human</th><th>EgoVerse</th></tr></thead>
+            <tbody>
+              <tr><td>Cup on saucer</td><td>300 / 2.5 h</td><td>2 h</td><td>20.5 h</td></tr>
+              <tr><td>Fold clothes</td><td>360 / 3.0 h</td><td>2 h</td><td>21 h</td></tr>
+              <tr><td>Bag grocery</td><td>300 / 2.5 h</td><td>2 h</td><td>7 h</td></tr>
+            </tbody>
+          </table>
+          <p>每个方法在每个任务上单独训练。ID 做 20 次 rollout；OOD 做 10 次 unseen-object 加 10 次 novel-scene，共 1800 次真机 rollout。指标是 success rate 与按子任务归一化的 score，图中给出 finite-sample-valid 95% confidence interval。</p>
+
+          <h3>代表性 success rate：Robot-only → +EgoVerse</h3>
+          <table class="data-table">
+            <thead><tr><th>任务 / split</th><th>BC</th><th>Pixel</th><th>DINO</th><th>3D Flow</th></tr></thead>
+            <tbody>
+              <tr><td>Cup ID</td><td>25→15</td><td>25→50</td><td>25→70</td><td><strong>70→90</strong></td></tr>
+              <tr><td>Cup OOD</td><td>5.6→5.6</td><td>11.1→5.6</td><td><strong>11.1→53.9</strong></td><td>22.2→53.9</td></tr>
+              <tr><td>Bag ID</td><td>40→50</td><td>45→65</td><td>40→85</td><td><strong>60→90</strong></td></tr>
+              <tr><td>Bag OOD</td><td>5→10</td><td>10→15</td><td>10→50</td><td><strong>10→55</strong></td></tr>
+              <tr><td>Fold OOD</td><td>5→0</td><td>20→10</td><td><strong>15→85</strong></td><td>25→40</td></tr>
+            </tbody>
+          </table>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/egowam/x3.png" alt="EgoWAM 三个真机任务的 ID 和 OOD 定量结果">
+            <figcaption>论文 Figure 3。DINO 在新物体/新场景上通常最强，3D Flow 在 ID 空间精度上最稳。Pixel 与 Pixel-PT 并没有因更强图像生成先验稳定获益。</figcaption>
+          </figure>
+
+          <h3>最有说服力的反事实：故意把 human action 搞得不可执行</h3>
+          <p>在 bag-grocery 中，作者另采一批故意使用异常抓法、头动更大的 human demonstrations。BC 从 robot-only 的 40% 掉到 20%；3D Flow WAM 在 misaligned data 下仍达到 75%。这比只比较平均分更直接地支持论文机制：action channel 会传递风格错配，world channel 对这种错配更鲁棒。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/egowam/x8.png" alt="EgoWAM 对非对齐人类数据的消融">
+            <figcaption>论文 Figure 8。自然对齐的数据能让 BC 受益，但故意错配后 BC 低于 robot-only；3D Flow 仍保持收益。</figcaption>
+          </figure>
+
+          <h3>证据强弱</h3>
+          <ul>
+            <li><strong>强证据：</strong>同 backbone/action/data 下三类 world branch 的真机对比；misaligned/aligned human 反事实；world-only 与 action+world modality ablation。</li>
+            <li><strong>重要 confound：</strong>target 变化时 head 也变化。Pixel 是 6×384 DiT，DINO 多一个 2×2048 wide head，3D Flow 是 4×256 decoder，Pixel-PT 更是 1.3B。结果不能完全归因于 target representation。</li>
+            <li><strong>训练预算不完全相同：</strong>Pixel-PT 用 2×L40S、1000 epochs；其他方法 1×L40S、2000 epochs。作者控制了 wall-clock 约两天，但没有控制 samples、parameters 和 FLOPs。</li>
+            <li><strong>策略泛化范围有限：</strong>每任务一套 policy，不是多任务 foundation policy；作者明确承认尚不能从 human data 学会新的 motion primitive。</li>
+            <li><strong>模拟器外推较弱：</strong>RoboTwin 跨本体 transfer 在三个任务上的 success 大多为 0–28%，说明这个接口还没有被证明能稳定跨机器人扩展。</li>
+            <li><strong>统计仍较粗：</strong>每个 split 20 次 rollout，一个成功样本就是 5 个百分点；置信区间处理规范，但细小差异仍不能过度解释。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="reproduce">
+          <h2>8. 可复现清单 <a class="heading-anchor" href="#reproduce">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>模块</th><th>必须复现的细节</th><th>常见坑</th></tr></thead>
+            <tbody>
+              <tr><td>时间同步</td><td>Aria RGB/VIO、手 pose、robot camera、proprio 与 action timestamp</td><td>错一两帧会把 ego-motion residual 变成 flow target</td></tr>
+              <tr><td>动作坐标</td><td>双臂 14D，当前 camera frame，1%/99% quantile</td><td>欧拉角约定与左右臂 frame 不一致</td></tr>
+              <tr><td>速度对齐</td><td>human 1.0 s、robot 1.5 s，都重采样 100</td><td>future target 必须索引原始时间 horizon，不是重采样 index</td></tr>
+              <tr><td>3D target</td><td>Track4World + Aria VIO，1120 anchors，100-step flow</td><td>遮挡、metric scale、pose drift、无效点 mask</td></tr>
+              <tr><td>Flow filtering</td><td>robot 2 mm / human 10 mm；human 跳过头尾 20 帧</td><td>阈值过高会删掉精细接触，过低会学噪声</td></tr>
+              <tr><td>DINO</td><td>DINOv2-B frozen，drop CLS/register，per-token LN</td><td>feature normalization 不一致会主导 MSE</td></tr>
+              <tr><td>Optimization</td><td>32+32 batch，AdamW，bf16，$\lambda=1$</td><td>world loss 数值尺度不同但权重相同，不代表梯度强度相同</td></tr>
+              <tr><td>评测</td><td>固定 ID/OOD objects、scene、position protocol</td><td>20 trials 的随机种子与失败判定必须预注册</td></tr>
+            </tbody>
+          </table>
+          <blockquote class="rich-callout rich-callout-uncertain">
+            <p><strong>【不确定】</strong>截至 2026-07-18，官方项目页仍标注 policy code “coming soon”，公开 GitHub 只有网站和交互结果数据。论文没有给出完整 checkpoint、训练 seed、gradient clipping、EMA、动作执行 receding horizon、Euler angle continuity、各 loss 的梯度范数和 Track4World 失败率。合理复现路径是先用 3D-flow-only 验证数据管线，再加入 action loss；同时记录无效 anchor 比例、VIO drift 和 world/action gradient cosine similarity。</p>
+          </blockquote>
+        </section>
+
+        <section class="article-section" id="improvements">
+          <h2>9. 可以继续往哪里改 <a class="heading-anchor" href="#improvements">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr></thead>
+            <tbody>
+              <tr><td>让 future head 条件于候选 action</td><td>从表征塑形升级为反事实 dynamics，可用于 action ranking</td><td>human action mismatch 会重新污染 world channel</td><td>同观测交换 action，检查 future flow 是否因果变化</td></tr>
+              <tr><td>DINO + 3D Flow 双 target</td><td>同时保留 OOD 语义和空间精度</td><td>梯度冲突与额外数据成本</td><td>共享 future tokens、分头预测，报告 ID/OOD Pareto</td></tr>
+              <tr><td>object-centric 3D flow</td><td>过滤背景与旁观者，聚焦被操作对象</td><td>需要 mask/track identity</td><td>比较 dense、motion-threshold、object-masked flow</td></tr>
+              <tr><td>多 horizon world tokens</td><td>兼顾 grasp 接触和子任务结果</td><td>远期 target 多模态、难预测</td><td>0.25/0.5/1.0 s 三尺度 loss 与长时任务消融</td></tr>
+              <tr><td>去掉 human action，仅用 language/intention + flow</td><td>可扩展到无手 pose 的互联网 ego video</td><td>缺少 task relevance，学到旁观运动</td><td>Flow-only 加自动 task caption，对比 Action+Flow</td></tr>
+              <tr><td>统一参数量/算力的 target 对比</td><td>更干净地隔离 representation 因果</td><td>不同 target 最优架构本来就不同</td><td>matched-FLOPs head 与 best-per-target head 双轨报告</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="card">
+          <h2>10. 速读备忘卡 <a class="heading-anchor" href="#card">#</a></h2>
+          <ul class="takeaway-list">
+            <li>EgoWAM 研究的是 human-to-robot co-training 的 world representation。</li>
+            <li>BC 只有 action transfer channel，残余形态与行为风格会造成负迁移。</li>
+            <li>human/robot action 已对齐到 100×14 EEF chunk，baseline 不是故意做弱。</li>
+            <li>HPT trunk 是 256D、16 blocks，使用 64 action tokens 与 16 future tokens。</li>
+            <li>world loss 同时来自 human 与 robot，权重 $\lambda=1$。</li>
+            <li>Pixel 过度保留外观，强视频先验甚至会 hallucinate 错误物理状态。</li>
+            <li>DINO feature 最擅长新物体和新场景，但仍受 image-grid ego-motion 影响。</li>
+            <li>3D Flow 用 Aria VIO 消掉头动，最适合空间精确操作。</li>
+            <li>Flow-only 已优于 Action-only；Action+Flow 最好，动作仍提供 task relevance。</li>
+            <li>world head 训练后删除，4090 上 action policy 以 30 Hz 运行。</li>
+            <li>world prediction 不条件于 action，因此不是反事实 simulator。</li>
+            <li>最可复用结论：选择 target 时先问它是否抽象外观、跨本体一致、消除相机自运动。</li>
+          </ul>
+          <p class="insight">一句话记忆：<strong>不要强迫人类数据教机器人“手怎么动”，先让它教模型“世界怎样变化”。</strong></p>
+        </section>
+
+        <footer class="article-footer">
+          <p>资料：<a href="https://arxiv.org/abs/2607.08436">arXiv</a> · <a href="https://gatech-rl2.github.io/egowam.github.io/">Project</a> · <a href="https://github.com/GaTech-RL2/egowam.github.io">Website repository</a></p>
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+        </footer>
+      </article>
+    </main>
+  </body>
+</html>
