@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Riemann-1.0 深度解读：全因果自回归 World Action Model、action-first 因果分解、结构化 teacher-forcing mask、LAM 伪动作、三级具身预训练、机器人策略与动作条件视觉模拟。">
+    <title>Riemann-1.0：把机器人交互顺序写进 World Action Model</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260717a">
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script type="application/json" id="paper-metadata">
+      {
+        "title": "Riemann-1.0：把机器人交互顺序写进 World Action Model",
+        "paper": "https://riemann-dynamics.github.io/Riemann-1.0-Website/paper/Riemann-1.0.pdf",
+        "project": "https://riemann-dynamics.github.io/Riemann-1.0-Website/",
+        "repository": "https://github.com/Riemann-Dynamics/Riemann-1.0-Website",
+        "parent_file": "index.html",
+        "remix_prompt": "同样处理 https://riemann-dynamics.github.io/Riemann-1.0-Website/paper/Riemann-1.0.pdf 这个",
+        "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+        "authors": ["Riemann Dynamics"],
+        "date": "2026-07-19",
+        "paper_date": "2026-07-19",
+        "category": "robotics-world-models",
+        "tags": ["riemann-1.0", "world-action-model", "fully-causal-autoregressive", "flow-matching", "latent-action-model", "progressive-embodied-pretraining", "multi-embodiment", "action-conditioned-video", "robot-policy", "wan-vae", "teacher-forcing", "kv-cache"],
+        "systems": ["Riemann-1.0", "Wan VAE", "T5 Encoder", "VGGT-Omega", "MANO", "RoboCasa365", "RoboTwin 2.0", "LIBERO", "Tianji Marvin"],
+        "datasets": ["200K+ hours egocentric human video", "12K+ hours UMI and exoskeleton data", "20K+ hours robot trajectories", "RoboCasa365", "RoboTwin 2.0", "LIBERO"],
+        "methods": ["causal action-video factorization", "structured teacher-forcing attention", "joint latent and action flow matching", "embodiment-specific state-action adapters", "LAM pseudo-action bootstrap", "trajectory-grounded alignment", "robot-policy enhancement", "sliding-window KV cache"],
+        "code": "As of 2026-07-19, the public GitHub repository contains the project website, paper, figures, and videos. It does not contain model training, inference, data-processing, checkpoints, or robot deployment code.",
+        "related_posts": ["posts/rise-of-world-action-models.html", "posts/egowam-world-representation-human-robot-transfer.html", "posts/lingbot-vla2-foundation-to-application.html", "posts/qwen-robotworld-language-conditioned-world-model.html", "posts/wam-data-cleaning-qwen-cosmos-roadmap.html", "posts/cosmos3-omnimodal-world-models-physical-ai.html"],
+        "graph_nodes": ["Riemann-1.0", "World Action Model", "causal action-video sequence", "robot policy", "visual world simulator", "LAM pseudo action", "egocentric human video", "UMI and exoskeleton", "robot trajectory", "progressive embodied pretraining", "structured attention mask", "flow matching", "embodiment-specific adapters", "Wan VAE", "T5", "KV cache", "Fast-WAM", "DreamZero", "LingBot-VA"],
+        "graph_edges": [
+          "Riemann-1.0 -> is_a -> World Action Model",
+          "causal action-video sequence -> powers -> robot policy",
+          "causal action-video sequence -> powers -> visual world simulator",
+          "egocentric human video -> receives -> LAM pseudo action",
+          "LAM pseudo action -> bootstraps -> progressive embodied pretraining",
+          "UMI and exoskeleton -> bridges -> human and robot embodiment",
+          "robot trajectory -> grounds -> executable action",
+          "progressive embodied pretraining -> increases -> action loss weight",
+          "structured attention mask -> prevents -> future leakage",
+          "flow matching -> predicts -> action velocity",
+          "flow matching -> predicts -> visual latent velocity",
+          "embodiment-specific adapters -> preserve -> native action semantics",
+          "Wan VAE -> encodes -> multi-view visual latent",
+          "T5 -> encodes -> task and embodiment prompt",
+          "KV cache -> supports -> online autoregressive control",
+          "Riemann-1.0 -> differs_from -> DreamZero joint denoising",
+          "Riemann-1.0 -> differs_from -> LingBot-VA video-first policy",
+          "Riemann-1.0 -> differs_from -> Fast-WAM decoupled DiTs"
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#core">Insight</a>
+        <a href="#method">Method</a>
+        <a href="#experiments">Experiments</a>
+      </nav>
+    </header>
+
+    <main class="article-shell" id="top">
+      <article>
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+          <p class="kicker">Paper Deep Dive · WAM · Embodied Pretraining</p>
+          <h1>Riemann-1.0：把机器人交互顺序写进 World Action Model</h1>
+          <p class="article-dek">它不是“先生成未来视频，再从视频读动作”，也不是把 action 与 video 一起无序去噪。Riemann-1.0 把一次交互写成 observation/state → action → next observation 的因果序列，用同一套 DiT 在 policy 模式预测动作、在 simulator 模式接受动作并预测视觉后果，再用人类 ego、UMI 与机器人轨迹组成从弱动作到可执行动作的三级课程。</p>
+          <div class="article-meta">
+            <span>2026.07.19</span>
+            <span>分类：robotics-world-models</span>
+            <a href="https://riemann-dynamics.github.io/Riemann-1.0-Website/paper/Riemann-1.0.pdf">PDF</a>
+            <a href="https://riemann-dynamics.github.io/Riemann-1.0-Website/">Project</a>
+            <a href="https://github.com/Riemann-Dynamics/Riemann-1.0-Website">Website repo</a>
+          </div>
+        </header>
+
+        <section class="article-section" id="core">
+          <h2>0. 一句话结论 <a class="heading-anchor" href="#core">#</a></h2>
+          <blockquote>
+            <p>Riemann-1.0 解决的是 WAM 的交互顺序与异构数据难统一：它按“历史观测先预测动作、当前动作再预测下一视觉”的全因果顺序联合训练 action/video flow matching，并用 LAM 伪动作 → 人手/UMI/机器人真实轨迹 → 高质量机器人数据三级预训练，把 232K+ 小时异构经验转成可执行策略；代价是自回归去噪与长 KV cache，并且论文没有给模型规模、训练算力、关键消融和可运行代码，视觉 simulator 也只有定性结果。</p>
+          </blockquote>
+          <p class="insight"><strong>核心 insight：</strong>WAM 真正要统一的不是“两个输出头”，而是一条因果接口：$a_t$ 必须只从过去产生，$z_t$ 必须在看到 $a_t$ 后产生。这样 policy 和 simulator 才是同一联合分布的两种使用方式，而不是两个松散拼起来的系统。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/riemann-1/teaser.png" alt="Riemann-1.0 数据、训练、策略和视觉模拟总览">
+            <figcaption>官方总览。数据侧覆盖 ego、UMI/外骨骼与机器人轨迹；模型侧以全因果 attention 串起 action 与 video；部署侧同时给出 observation→action 的策略接口和 action→future observation 的视觉模拟接口。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section" id="positioning">
+          <h2>1. 论文定位：它到底在做什么 <a class="heading-anchor" href="#positioning">#</a></h2>
+          <p>任务属于多本体机器人 World Action Model。输入包括语言任务 $c$、多视角视觉观测、机器人状态和历史动作；模型需要同时学习两个条件分布：</p>
+          <div class="math-block">$$
+            \underbrace{p(a_t\mid z_{<t},s_{<t},a_{<t},c)}_{\text{policy：下一段动作}}
+            \quad\text{与}\quad
+            \underbrace{p(z_t\mid z_{<t},s_{<t},a_{\le t},c)}_{\text{simulator：动作的视觉后果}}.
+          $$</div>
+          <p>它的任务不是从互联网视频直接恢复精确机器人控制。人类视频先提供 interaction dynamics 与伪动作，UMI/3D 手轨迹负责把视觉变化靠近连续控制，真正可执行的动作仍由 robot trajectory 落地。</p>
+          <table class="data-table">
+            <thead><tr><th>范式</th><th>因子分解</th><th>主要问题</th><th>Riemann-1.0 的差异</th></tr></thead>
+            <tbody>
+              <tr><td>DreamZero 式 joint denoising</td><td>$p(z_{1:T},a_{1:T}\mid z_0,s_0,c)$</td><td>高维视频与低维动作同时去噪，尺度和时间频率差异大</td><td>按 action→consequence 分块自回归</td></tr>
+              <tr><td>LingBot-VA 式 video-first</td><td>$p(z_{1:T}\mid z_0,c)p(a_{1:T}\mid z_{\le T},s,c)$</td><td>动作依赖先生成的未来视频，控制延迟高且受视频误差影响</td><td>动作先于对应未来视觉产生</td></tr>
+              <tr><td>Fast-WAM 式 decoupled</td><td>video DiT + action DiT</td><td>模块清晰，但 action 仍可能依赖 predicted visual feature</td><td>单 backbone、同一 causal history、两类 velocity head</td></tr>
+              <tr><td>Riemann-1.0</td><td>$\prod_t p(a_t\mid h_t)p(z_t\mid h_t,a_t)$</td><td>自回归去噪慢、暴露误差累积</td><td>一个模型兼容在线 policy 与 action-conditioned rollout</td></tr>
+            </tbody>
+          </table>
+          <p><strong>需要收紧的表述：</strong>论文称其为 multi-embodiment visual world simulator。它预测的是相机视觉 latent，不预测未来 robot state、力、接触或奖励；所以更准确的名称是<strong>动作条件视觉模拟器</strong>，还不是可直接替代 physics engine 的完整状态模拟器。</p>
+        </section>
+
+        <section class="article-section" id="method">
+          <h2>2. 方法总览：一个序列，两种读法 <a class="heading-anchor" href="#method">#</a></h2>
+          <pre class="code-block"><code>task + embodiment + camera layout
+        -> T5 text embedding
+
+multi-view RGB canvas -> Wan VAE -> 3D patch tokens z
+robot state/action -> embodiment-specific canonicalization
+                   -> normalize + pad + category-specific projections
+
+unified tokens:
+[z0 context, z_clean history, z_noisy target,
+ s0:F, a_clean history, a_noisy target]
+        -> CaPE + TimePE/AdaLN
+        -> shared Action/Video DiT + structured causal mask
+             -> shared latent velocity head: V_z
+             -> embodiment-specific action velocity head: V_a
+
+policy mode: h_t -> denoise a_t -> execute -> encode real observation z_t
+simulator mode: h_t + supplied a_t -> denoise z_t -> decode future RGB</code></pre>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/riemann-1/model-architecture.png" alt="Riemann-1.0 全因果 action-video DiT 架构">
+            <figcaption>官方架构图。视觉 token、state token 与 action token 进入共享 DiT；视觉 velocity head 共享，动作投影与输出 head 按 embodiment/category 区分。注意“统一”发生在共享 dynamics backbone，不是把所有机器人的物理动作硬塞到同一个坐标定义。</figcaption>
+          </figure>
+          <h3>关键张量与符号</h3>
+          <table class="data-table">
+            <thead><tr><th>符号</th><th>形状 / 含义</th><th>实现位置</th></tr></thead>
+            <tbody>
+              <tr><td>$z_0$</td><td>首个多视角 canvas 的 clean visual latent</td><td>Wan VAE + 3D patch embedding</td></tr>
+              <tr><td>$z_{1:F}$</td><td>$F$ 个未来 latent；每个覆盖一段低层动作</td><td>latent flow-matching target</td></tr>
+              <tr><td>$s_{0:F}$</td><td>$F+1$ 个状态，初始状态加每次 transition 后状态</td><td>只作为条件，不由模型生成</td></tr>
+              <tr><td>$a_{1:F}$</td><td>$[B,D_a,F,apf,1]$；每个 latent 对应 $apf$ 个 low-level action</td><td>action flow-matching target</td></tr>
+              <tr><td>$c$</td><td>task + embodiment + view configuration</td><td>T5 cross-attention condition</td></tr>
+              <tr><td>$e$</td><td>embodiment/category ID</td><td>选择 state/action projection 与 action head</td></tr>
+            </tbody>
+          </table>
+          <p><strong>【不确定】</strong>论文图给出了抽象形状，却没有报告 $F$、训练时真实 $apf$、$D_a/D_s$、VAE latent channel、patch size、DiT depth/width 或参数量。模拟 benchmark 说明一个视觉 latent 对应 16 个 low-level actions，但不能据此断定所有真机与预训练数据都固定使用 16。验证只能等代码/config 发布，或检查后续 checkpoint 的 adapter shape。</p>
+        </section>
+
+        <section class="article-section" id="innovations">
+          <h2>3. 关键创新点 <a class="heading-anchor" href="#innovations">#</a></h2>
+
+          <h3>3.1 Action-first 的全因果分解</h3>
+          <p><strong>旧方法瓶颈：</strong>joint denoising 没显式表达“动作导致观察变化”；video-first 必须先想象视频才能行动；双 DiT 则不保证 policy 与 simulator 共享同一因果状态。</p>
+          <div class="math-block">$$
+            p(a_{1:T},z_{1:T}\mid z_0,s_0,c)
+            =\prod_{t=1}^{T}
+            p(a_t\mid z_{<t},s_{<t},a_{<t},c)
+            p(z_t\mid z_{<t},s_{<t},a_{\le t},c).
+          $$</div>
+          <p><strong>怎么改：</strong>每个 step 先生成动作 chunk $a_t$，再把它加入上下文并生成视觉后果 $z_t$。真机时第二项由环境 observation 替代；模拟时第二项由模型生成。</p>
+          <p><strong>为什么有效：</strong>policy 和 simulator 不再是两条不同 pipeline。给定历史时，动作 head 是控制接口；给定候选动作时，latent head 是 consequence interface。二者共享的 hidden state 必须同时解释“该做什么”和“做完会怎样”。</p>
+          <p><strong>代价与限制：</strong>一个 interaction block 内仍需 diffusion/flow denoising；长时控制需要 growing KV cache 与 sliding window。更重要的是，论文没有通过“打乱 action-video 顺序”“去掉 latent loss”或“joint/video-first matched-compute”消融证明收益确实来自因果顺序。</p>
+
+          <h3>3.2 结构化 teacher forcing mask：块级因果，不是逐 token 三角形</h3>
+          <p>训练序列同时放入 clean history 与 noisy targets。若使用普通 full attention，noisy $a_t$ 会偷看未来 $z_t$；若使用严格逐 token causal mask，同一帧的空间 patch 又无法双向建模。作者用 frame ID、time ID、clean/noisy flag 构造 block mask：</p>
+          <table class="data-table">
+            <thead><tr><th>Query token</th><th>可以看</th><th>不能看</th></tr></thead>
+            <tbody>
+              <tr><td>clean token</td><td>当前及过去的 clean blocks</td><td>未来 clean block、所有不应出现的 target</td></tr>
+              <tr><td>noisy action $\tilde a_t$</td><td>过去 clean history；同 noisy action block 内双向</td><td>当前/未来视觉结果</td></tr>
+              <tr><td>noisy latent $\tilde z_t$</td><td>过去 clean history、当前 clean action $a_t$；同 noisy latent block</td><td>未来 transition</td></tr>
+              <tr><td>padding</td><td>无</td><td>全部屏蔽</td></tr>
+            </tbody>
+          </table>
+          <p><strong>机制：</strong>它保留 frame 内空间双向 attention，同时在 interaction block 之间保持 action→visual consequence 的因果方向。所谓“fully causal”应理解为<strong>交互时间轴上的块级因果</strong>，不是所有 patch token 的严格单向语言模型。</p>
+
+          <h3>3.3 多本体不是共享同一动作空间，而是共享 dynamics backbone</h3>
+          <p>不同机器人先各自转换到 embodiment-specific canonical order，再按本体统计量归一化，并 pad 到最大 $D_a,D_s$。category slot 选择本体专属的 state/action input projection 与 action velocity head；loss mask 只在有效 channel-step 上归一化。</p>
+          <p><strong>为什么有效：</strong>视觉、语言和时序推理参数可跨机器人共享，但最后几层仍保留关节数、控制量和单位差异。它避免把 Frank、WindowX、双臂和灵巧手误写成一个含义不一致的“大动作向量”。</p>
+          <p><strong>容易忽略的实现：</strong>padding 区域不仅不算 loss，clean sample、noise、noisy sample 与 velocity target 都保持零。否则训练时 pad channel 是高斯噪声、部署时却是零，会形成非常隐蔽的 train-test mismatch。</p>
+
+          <h3>3.4 Progressive Embodied Pretraining：动作监督逐级变“可执行”</h3>
+          <table class="data-table">
+            <thead><tr><th>Stage</th><th>数据</th><th>Action supervision</th><th>$\lambda$</th><th>目标</th></tr></thead>
+            <tbody>
+              <tr><td>I. LAM Bootstrap</td><td>200K+ h 无标签 ego video</td><td>冻结 LAM 的 32D pseudo action</td><td>0.1</td><td>先学广泛视觉 dynamics</td></tr>
+              <tr><td>II. Trajectory Alignment</td><td>3D hand + 12K+ h UMI/外骨骼 + robot</td><td>连续手/EEF/关节动作</td><td>0.5</td><td>把 motion token 对齐到真实轨迹</td></tr>
+              <tr><td>III. Policy Enhancement</td><td>20K+ h 高质量 robot-only</td><td>可执行 robot action/state</td><td>0.9</td><td>校准 actuator convention 与闭环稳定性</td></tr>
+              <tr><td>Post-training</td><td>目标任务 teleoperation</td><td>目标本体真机动作</td><td>0.95</td><td>适配部署任务</td></tr>
+            </tbody>
+          </table>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/riemann-1/data-infra.png" alt="Riemann-1.0 异构具身数据清洗与统一流程">
+            <figcaption>官方数据引擎。ego 侧包含层级 VLM 标注、hand tracking、MANO 3D reconstruction、VGGT-Ω 相机估计与质量过滤；UMI/robot 侧重点是时间同步、EEF calibration、静止段与异常控制过滤。</figcaption>
+          </figure>
+          <p><strong>核心不是把三种数据混在一起：</strong>Stage I 的 latent action 只需要解释视觉转移；Stage II 的 hand/UMI 把它拉向连续几何控制；Stage III 才让 action head 偏向机器人可执行分布。$\lambda$ 从 0.1→0.5→0.9→0.95，就是这条监督可信度曲线的显式实现。</p>
+          <p><strong>代价与限制：</strong>LAM pseudo action 仍可能编码相机运动、遮挡和画面变化，而不是 agent action；3D 手重建依赖 MANO、VGGT-Ω 与 temporal refinement。论文没有给三阶段各自 step、mixing ratio 或阶段消融，所以目前无法判断收益来自 curriculum、总训练量还是 robot-only 最后一阶段。</p>
+        </section>
+
+        <section class="article-section" id="train-infer">
+          <h2>4. 训练和推理流程 <a class="heading-anchor" href="#train-infer">#</a></h2>
+          <h3>训练输入与输出</h3>
+          <ol>
+            <li>按 embodiment 把多路 camera 拼成固定 canvas，resize 后经冻结或预训练的 Wan VAE 得到 visual latent。</li>
+            <li>把 task、embodiment type 与 view 数写成结构化 prompt，经 T5 encoder 得到 cross-attention condition。</li>
+            <li>state/action 按本体定义重排、归一化、padding；每个 visual transition 对齐一段 $apf$ low-level actions。</li>
+            <li>采样 latent noise level 与 action noise level，构造 clean history 和 noisy target block。</li>
+            <li>共享 DiT 在结构化 mask 下输出 latent velocity $V_z$ 与 action velocity $V_a$。</li>
+            <li>用有效性 mask 计算两项 flow loss，以阶段相关 $\lambda$ 合并反向传播。</li>
+          </ol>
+          <h3>Policy 模式：真实环境关闭视觉生成回路</h3>
+          <ol>
+            <li>首帧 $z_0$、初始 state $s_0$ 与文本 condition 初始化 KV cache。</li>
+            <li>从高斯 noisy action 开始，用 flow scheduler 去噪得到 $a_t$。</li>
+            <li>把 clean action chunk 写入 cache，开环执行其中 $apf$ 个 low-level controls。</li>
+            <li>环境返回真实多视角 observation 与最终 state；编码为 $z_t,s_t$ 写入 cache。</li>
+            <li>重复，窗口满后丢弃早期 cache，并以最近 observation 重新初始化上下文。</li>
+          </ol>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/riemann-1/closed-loop-inference.png" alt="Riemann-1.0 使用 KV cache 的闭环在线推理">
+            <figcaption>官方闭环推理图。每轮 action 先生成并执行，真实 observation 再刷新 history；因此 policy 不需要等待模型生成未来视频。</figcaption>
+          </figure>
+          <h3>Simulator 模式：动作成为可控输入</h3>
+          <ol>
+            <li>输入当前 observation、task prompt、state 与候选 future action chunk。</li>
+            <li>跳过 action sampling，直接把 supplied action token 放入因果序列。</li>
+            <li>latent head flow-denoise 对应未来 $z_t$，Wan VAE 解码为 RGB。</li>
+            <li>长 horizon 时把生成 latent 重新作为 clean context，自回归滚动。</li>
+          </ol>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/riemann-1/simulator-architecture.png" alt="Riemann-1.0 动作条件视觉模拟流程">
+            <figcaption>官方 simulator 接口。candidate action 可以来自 policy、规划器或记录轨迹；模型输出动作一致的多视角视觉后果。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section" id="formulas">
+          <h2>5. 关键公式与实现张量 <a class="heading-anchor" href="#formulas">#</a></h2>
+          <h3>5.1 Flow matching 的线性路径</h3>
+          <div class="math-block">$$
+            x_\sigma=(1-\sigma)x+\sigma\epsilon,
+            \qquad \epsilon\sim\mathcal N(0,I),\quad \sigma\in[0,1],
+            \qquad v^\star=\epsilon-x.
+          $$</div>
+          <p>$x$ 可以是 visual latent 或 action tensor；$\sigma=0$ 是 clean data，$\sigma=1$ 是 Gaussian noise。模型学习从 data 指向 noise 的常速度 $\epsilon-x$；采样时从 noise 端反向积分到 clean data。论文没有写 $\sigma$ 的采样分布、ODE solver 与 denoising step 数。</p>
+
+          <h3>5.2 Visual latent velocity</h3>
+          <div class="math-block">$$
+            \mathcal L_z=
+            \mathbb E\left[
+            \left\|v^z_\theta(z_\sigma,\sigma,z_{<t},s_{<t},a_{\le t},c)
+            -(\epsilon_z-z)\right\|_2^2
+            \right].
+          $$</div>
+          <p>实现中 $z_\sigma$ 是当前 noisy future-latent block；key/value 来自过去 clean visual/state/action 以及当前 clean action。$v^z_\theta$ 输出与 latent target 完全同形状。$a_{\le t}$ 是公式中最关键的下标：视觉后果可以看当前动作。</p>
+
+          <h3>5.3 Action velocity</h3>
+          <div class="math-block">$$
+            \mathcal L_a=
+            \mathbb E\left[
+            \left\|v^a_\theta(a_\sigma,\sigma,z_{<t},s_{<t},a_{<t},c)
+            -(\epsilon_a-a)\right\|_2^2
+            \right].
+          $$</div>
+          <p>$a_\sigma\in\mathbb R^{B\times D_a\times F\times apf\times1}$。动作只能看 $z_{<t}$，不能看 $z_t$；这正是避免 future observation leakage 的地方。最终输出经 embodiment-specific velocity head，再由 validity mask 过滤 pad channel。</p>
+
+          <h3>5.4 双目标权重</h3>
+          <div class="math-block">$$
+            \mathcal L=(1-\lambda)\mathcal L_z+\lambda\mathcal L_a,
+            \qquad \lambda:0.1\rightarrow0.5\rightarrow0.9\rightarrow0.95.
+          $$</div>
+          <p>$\lambda$ 不只是 loss 权重，也是 curriculum 的能力旋钮：早期要求 backbone 解释视觉变化，后期把容量压向 executable control。但两项 loss 的原始尺度、有效 token 数和梯度范数没有报告，不能只凭数值认为 Stage II 恰好“各占一半”。</p>
+
+          <h3>5.5 LAM：从相邻帧提取 32D 伪动作</h3>
+          <div class="math-block">$$
+            q_\phi(u_t\mid x_t,x_{t+1})=\mathcal N(\mu_t,\mathrm{diag}(\sigma_t^2)),
+          $$</div>
+          <div class="math-block">$$
+            \mathcal L_{LAM}=\|\hat x_{t+1}-x_{t+1}\|_2^2
+            +\beta D_{KL}\left(q_\phi(u_t\mid x_t,x_{t+1})\|\mathcal N(0,I)\right).
+          $$</div>
+          <p>两帧各切成 $16\times16$ patches，并加入 learnable action-prompt token。future-frame prompt 的 hidden state 投影为 32D Gaussian moments；decoder 只看当前帧与 sampled latent，不能直接看 $x_{t+1}$。离线标注时使用 posterior mean $\mu_t$，避免 sampling noise。它编码的是“解释这一帧变化所需的信息”，不等价于真实控制命令。</p>
+        </section>
+
+        <section class="article-section" id="alignment">
+          <h2>6. 训练与推理是否真的对齐 <a class="heading-anchor" href="#alignment">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>检查项</th><th>训练</th><th>推理</th><th>风险</th></tr></thead>
+            <tbody>
+              <tr><td>历史 action</td><td>teacher-forced clean GT actions</td><td>policy 自己生成的 actions</td><td>动作误差会进入后续 cache</td></tr>
+              <tr><td>历史 visual</td><td>clean GT visual latents</td><td>policy 用真实观察；simulator 用生成观察</td><td>policy mismatch 小，simulator exposure bias 大</td></tr>
+              <tr><td>State</td><td>记录轨迹 replay</td><td>policy 从真实机器人读；simulator 未生成</td><td>纯 simulator 无法独立闭合完整状态演化</td></tr>
+              <tr><td>Action block</td><td>整块 noisy target 去噪</td><td>整块生成后执行 $apf$ 步</td><td>chunk 内无视觉反馈，接触误差只能下一块纠正</td></tr>
+              <tr><td>Attention context</td><td>固定训练窗口</td><td>growing cache + sliding reset</td><td>窗口长度与 reset 策略未给</td></tr>
+              <tr><td>Padding</td><td>数据、噪声、target 全部置零并 mask</td><td>无效 action channel 为零</td><td>这一点对齐得较好</td></tr>
+              <tr><td>Noise path</td><td>随机单一 $\sigma$ 做 velocity regression</td><td>多步 ODE/flow integration</td><td>solver accumulation error</td></tr>
+              <tr><td>数据分布</td><td>ego/UMI/多机器人</td><td>目标 robot 与目标 camera layout</td><td>依赖 Stage III/post-train 做最终校准</td></tr>
+            </tbody>
+          </table>
+          <p>最值得肯定的是 policy 模式用<strong>真实新观察</strong>替代 generated latent，避免把视频生成误差硬塞进控制环。最值得警惕的是 simulator 模式：它同时承受 clean-history teacher forcing、生成视觉自回归和未生成 state 三个 mismatch，论文尚未用长 rollout 指标量化误差增长。</p>
+        </section>
+
+        <section class="article-section" id="experiments">
+          <h2>7. 实验复盘：策略结果强，机制证据不足 <a class="heading-anchor" href="#experiments">#</a></h2>
+          <h3>结果总览</h3>
+          <table class="data-table">
+            <thead><tr><th>评测</th><th>Riemann-1.0</th><th>最强对手</th><th>差值</th></tr></thead>
+            <tbody>
+              <tr><td>RoboCasa365 Target-50</td><td><strong>62.6</strong></td><td>ABot-M0.5 54.2</td><td>+8.4</td></tr>
+              <tr><td>RoboTwin 2.0 Avg.</td><td><strong>94.3</strong></td><td>ABot-M0.5 94.1</td><td>+0.2</td></tr>
+              <tr><td>LIBERO Avg.</td><td><strong>99.0</strong></td><td>Being-H0.5 / G0.5 98.9</td><td>+0.1</td></tr>
+              <tr><td>真机四任务 Avg. SR</td><td><strong>85.0</strong></td><td>G0.5 70.0</td><td>+15.0</td></tr>
+              <tr><td>真机四任务 Avg. PSR</td><td><strong>94.43</strong></td><td>G0.5 80.18</td><td>+14.25</td></tr>
+              <tr><td>Held-out compositional/OOD Avg.</td><td><strong>75.0</strong></td><td>$\pi_{0.5}$ 47.5</td><td>+27.5</td></tr>
+            </tbody>
+          </table>
+          <p>真机覆盖四层按颜色堆叠、衣物折叠、桌面整理和厨房整理。每任务 15 条 teleoperation demonstrations，并将四任务合并微调一个 generalist policy；每个主任务的 SR/PSR 表中数值以 5% 为步长，意味着应是 20 次 trial。held-out compositional 与 OOD 则每任务 10 次。</p>
+          <h3>哪些结论有数据支持</h3>
+          <ul>
+            <li>RoboCasa365 的 Composite-Seen/Unseen 分别比 ABot-M0.5 高 11.7/10.7，长组合任务收益明显，不只是简单 atomic task 刷分。</li>
+            <li>真机 kitchen organization 从最强 baseline 35% SR 提到 90%，是最显著的单项提升。</li>
+            <li>同一模型能在多种 embodiment 与 camera layout 下生成 action-consistent qualitative rollout。</li>
+          </ul>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/riemann-1/simulator-results.jpg" alt="Riemann-1.0 多本体动作条件视觉 rollout">
+            <figcaption>官方多本体 rollout。画面说明模型能维持主要场景结构并响应动作，但论文没有 FVD、LPIPS、trajectory consistency、contact consistency 或 counterfactual action sensitivity 等定量指标。</figcaption>
+          </figure>
+          <h3>哪些结论还没有被实验隔离</h3>
+          <ul>
+            <li><strong>没有核心 ablation：</strong>没有 Stage I/II/III、$\lambda$、LAM、human/UMI/robot 数据量、causal mask、latent loss、embodiment adapter 的消融。</li>
+            <li><strong>没有 matched-compute 范式比较：</strong>表格中的不同 baseline 规模、预训练数据、后训练 recipe 与测试实现未完全对齐。只有 DreamZero* 明确用官方代码复现为 5B，并在作者数据上训练。</li>
+            <li><strong>模拟器只有定性证据：</strong>图片能证明“看起来合理”，不能证明 action controllability、长时物理一致性或可用于 planning。</li>
+            <li><strong>数据规模表述不一致：</strong>摘要写 200K+ hours，数据节写 230K+，分项是 200K+12K+20K，即至少 232K+。博客按分项写 232K+，但精确去重后规模未披露。</li>
+            <li><strong>后训练数据描述需要澄清：</strong>Section 4.2 写每任务 3 小时，Section 5.1 写每任务 15 demonstrations；二者可以同时成立，但论文没有说明单条时长和实际 frame/action 数。</li>
+            <li><strong>接近饱和的 benchmark：</strong>LIBERO +0.1、RoboTwin +0.2 很难支撑强机制结论；RoboCasa 与真机结果更有区分度。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="reproduce">
+          <h2>8. 可复现清单 <a class="heading-anchor" href="#reproduce">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>模块</th><th>论文已给</th><th>仍需确认 / 常见坑</th></tr></thead>
+            <tbody>
+              <tr><td>Trajectory schema</td><td>prompt、embodiment、views、$z$、$s$、$a$、semantic metadata</td><td>timestamp unit、episode boundary、frame/action frequency</td></tr>
+              <tr><td>Multi-view</td><td>按 embodiment 拼 canvas，再送 Wan VAE</td><td>canvas layout、resize/crop、缺失 camera mask</td></tr>
+              <tr><td>Action/state</td><td>canonical order、per-embodiment normalize、pad、valid mask</td><td>坐标系、rotation representation、统计量 clipping</td></tr>
+              <tr><td>LAM</td><td>16×16 patches、32D latent、弱 KL、posterior mean 标注</td><td>$\beta$、encoder/decoder 宽深、训练帧率与数据量</td></tr>
+              <tr><td>DiT</td><td>CaPE、TimePE、AdaLN、T5 cross-attention、双 velocity head</td><td>参数量、层数、hidden size、head 数、初始化</td></tr>
+              <tr><td>Mask</td><td>frame/time/clean flag 构造 block-causal visibility</td><td>token serialization 顺序、同 block state/action 的精确可见性</td></tr>
+              <tr><td>Flow matching</td><td>线性 path、velocity MSE</td><td>$\sigma$ distribution、solver、steps、CFG、EMA</td></tr>
+              <tr><td>Curriculum</td><td>$\lambda=0.1/0.5/0.9/0.95$ 与阶段数据类型</td><td>各阶段 steps、batch composition、sampling temperature</td></tr>
+              <tr><td>Optimization</td><td>未披露</td><td>optimizer、LR、warmup、WD、precision、grad clip、hardware</td></tr>
+              <tr><td>Online control</td><td>KV cache、execute $apf$、sliding window reset</td><td>window 长度、latency、replan rate、安全约束、失败恢复</td></tr>
+            </tbody>
+          </table>
+          <blockquote class="rich-callout rich-callout-uncertain">
+            <p><strong>【不确定】</strong>截至 2026-07-19，官方 GitHub 只是 project-page 仓库，包含论文、网页、图片和视频，不含训练/推理代码、配置、checkpoint、数据 manifest 或机器人控制实现。最现实的复现顺序是：先单本体、短序列、固定 $apf$ 验证 mask 无泄漏；再做 Stage III robot-only；随后加入 Stage II UMI/hand；最后才引入 200K+ 小时 LAM pseudo action。每一步都必须保留相同 compute 的 action-only 与 latent-only 对照。</p>
+          </blockquote>
+        </section>
+
+        <section class="article-section" id="improvements">
+          <h2>9. 可能的改进方向 <a class="heading-anchor" href="#improvements">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr></thead>
+            <tbody>
+              <tr><td>生成 proprio/contact state，而不只生成 RGB latent</td><td>让 simulator 真正闭合状态转移，可用于 model-based planning</td><td>不同本体 state 难共享，传感器噪声高</td><td>预测 EEF/joint/contact，报告 multi-step state error 与 planning success</td></tr>
+              <tr><td>scheduled sampling / self-forcing</td><td>减小视觉与动作历史的 teacher-forcing gap</td><td>训练不稳定、计算显著增加</td><td>按 rollout horizon 报告 latent drift 与 policy SR</td></tr>
+              <tr><td>Action Consistency reward 或 cycle check</td><td>让生成视频对动作更敏感，而非只保持外观</td><td>需要 inverse model，可能被 shortcut</td><td>交换 action chunk，测 predicted object/EEF displacement 的可分性</td></tr>
+              <tr><td>LAM 中显式消除 camera motion</td><td>伪动作更接近 manipulation effect</td><td>依赖 pose estimator，快速头动和动态背景易失败</td><td>raw LAM vs ego-stabilized LAM，比较 Stage I 后 robot linear probe</td></tr>
+              <tr><td>自适应 $\lambda$ 与 gradient balancing</td><td>避免固定权重被 token 数和 loss scale 淹没</td><td>可能削弱课程的明确方向</td><td>固定 $\lambda$、GradNorm、uncertainty weighting 的 data-efficiency 曲线</td></tr>
+              <tr><td>分层 action：skill token + continuous chunk</td><td>长时任务减少 cache 压力，并增强可组合规划</td><td>skill boundary 与低层控制可能脱节</td><td>RoboCasa Composite 与真机 organization 的 horizon-scaled 对比</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="card">
+          <h2>10. 速读备忘卡 <a class="heading-anchor" href="#card">#</a></h2>
+          <ul class="takeaway-list">
+            <li>Riemann-1.0 是全因果自回归 World Action Model。</li>
+            <li>核心顺序是 history → action chunk → visual consequence。</li>
+            <li>Policy 用真实 observation 刷新 context，不必先生成未来视频。</li>
+            <li>Simulator 接受候选 action，并生成对应未来视觉 latent。</li>
+            <li>State 只作为条件，不由模型生成，所以 simulator 仍是 visual-only。</li>
+            <li>视觉用 Wan VAE，语言用 T5，主体是共享 Action/Video DiT。</li>
+            <li>不同本体共享 backbone，但保留专属 state/action adapter 与 action head。</li>
+            <li>结构化 attention mask 在 block 间因果、block 内可双向。</li>
+            <li>Stage I 用 32D LAM pseudo action 学视频 dynamics。</li>
+            <li>Stage II 用 3D hand、UMI 与 robot trajectory 做真实轨迹对齐。</li>
+            <li>Stage III robot-only，把 action 权重升到 0.9；post-train 为 0.95。</li>
+            <li>数据分项至少 232K+ 小时，其中 ego video 占绝大多数。</li>
+            <li>RoboCasa 62.6、RoboTwin 94.3、LIBERO 99.0、真机平均 SR 85.0。</li>
+            <li>最大缺口是无核心消融、无训练超参/算力、无模型代码、无 simulator 定量评测。</li>
+          </ul>
+          <p class="insight">一句话记忆：<strong>它把 WAM 从“同时预测动作和视频”推进到“按真实交互因果顺序预测动作和视频”。</strong></p>
+        </section>
+
+        <footer class="article-footer">
+          <p>资料：<a href="https://riemann-dynamics.github.io/Riemann-1.0-Website/paper/Riemann-1.0.pdf">Paper</a> · <a href="https://riemann-dynamics.github.io/Riemann-1.0-Website/">Project</a> · <a href="https://github.com/Riemann-Dynamics/Riemann-1.0-Website">Website repository</a></p>
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+        </footer>
+      </article>
+    </main>
+  </body>
+</html>
