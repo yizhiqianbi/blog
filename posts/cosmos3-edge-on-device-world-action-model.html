@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Cosmos 3 Edge 深度解读：4B 双塔 MoT、AR Reasoner 与 diffusion Generator、统一 action token、DROID Policy、Jetson Thor 上的 chunk-level real-time，以及模型卡与代码实现差异。">
+    <title>Cosmos 3 Edge：4B Omni-model 如何把 World Action Model 放上边缘设备</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260717a">
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script type="application/json" id="paper-metadata">
+      {
+        "title": "Cosmos 3 Edge：4B Omni-model 如何把 World Action Model 放上边缘设备",
+        "paper": "https://research.nvidia.com/labs/cosmos-lab/cosmos3/technical-report.pdf",
+        "project": "https://huggingface.co/blog/nvidia/cosmos3edge",
+        "repository": "https://github.com/NVIDIA/cosmos-framework",
+        "model": "https://huggingface.co/nvidia/Cosmos3-Edge",
+        "policy_model": "https://huggingface.co/nvidia/Cosmos3-Edge-Policy-DROID",
+        "parent_file": "index.html",
+        "remix_prompt": "同样处理 https://huggingface.co/blog/nvidia/cosmos3edge 同样处理",
+        "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+        "authors": ["Pranjali Joshi", "Saeed Babamohamadi", "NVIDIA"],
+        "date": "2026-07-21",
+        "paper_date": "2026-07-20",
+        "category": "robotics-world-models",
+        "tags": ["cosmos3-edge", "world-action-model", "mixture-of-transformers", "edge-inference", "jetson-thor", "robot-policy", "droid", "action-token", "rectified-flow", "multimodal-rope", "chunked-control", "on-device-vlm"],
+        "systems": ["Cosmos3-Edge", "Cosmos3-Edge-Policy-DROID", "Cosmos Framework", "Transformers", "Diffusers", "vLLM-Omni", "Jetson AGX Thor", "RoboLab", "DROID"],
+        "datasets": ["Nemotron pretraining corpus", "Cosmos 3 multimodal corpus", "DROID", "VANTAGE-Bench", "RoboLab", "PAIBench-G", "RBench", "PhysicsIQ"],
+        "methods": ["dual-tower Mixture-of-Transformers", "autoregressive reasoning", "diffusion generation", "domain-aware action projection", "relative SE(3) action", "3D multimodal RoPE", "FPS modulation", "rectified flow", "four-step UniPC sampling", "chunked policy serving"],
+        "code": "The public Cosmos and cosmos-framework repositories include inference cookbooks, Edge model configuration, action preprocessing, domain-aware projections, RoboLab policy server, DROID dataset adapters, evaluation scripts, and Nano policy post-training recipes. As of 2026-07-21, an Edge-specific DROID post-training launch configuration is not present; the released Edge policy checkpoint can be served with the shared policy server.",
+        "related_posts": ["posts/cosmos3-omnimodal-world-models-physical-ai.html", "posts/cosmos3-group-meeting-speaker-guide.html", "posts/rise-of-world-action-models.html", "posts/riemann-1-causal-autoregressive-world-action-model.html", "posts/lingbot-vla2-foundation-to-application.html", "posts/wam-data-cleaning-qwen-cosmos-roadmap.html"],
+        "graph_nodes": ["Cosmos3-Edge", "Cosmos3-Edge-Policy-DROID", "Cosmos 3", "MoT", "Reasoner tower", "Generator tower", "joint attention", "action token", "3D mRoPE", "FPS modulation", "DROID", "RoboLab", "Jetson AGX Thor", "chunk-level real-time", "Cosmos Framework", "DomainAwareLinear", "ActionProcessor"],
+        "graph_edges": [
+          "Cosmos3-Edge -> variant_of -> Cosmos 3",
+          "Cosmos3-Edge -> contains -> Reasoner tower",
+          "Cosmos3-Edge -> contains -> Generator tower",
+          "Reasoner tower -> conditions -> Generator tower",
+          "MoT -> couples_via -> joint attention",
+          "action token -> represents -> physical state transition",
+          "3D mRoPE -> aligns -> language video and action",
+          "FPS modulation -> maps -> token index to physical time",
+          "Cosmos3-Edge-Policy-DROID -> post_trained_on -> DROID",
+          "Cosmos3-Edge-Policy-DROID -> evaluated_on -> RoboLab",
+          "Cosmos3-Edge-Policy-DROID -> deployed_on -> Jetson AGX Thor",
+          "Jetson AGX Thor -> achieves -> chunk-level real-time",
+          "Cosmos Framework -> implements -> policy server",
+          "DomainAwareLinear -> preserves -> embodiment-specific action space",
+          "ActionProcessor -> normalizes_and_pads -> action tensor",
+          "Cosmos3-Edge -> trades -> capacity for edge throughput"
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#core">Insight</a>
+        <a href="#method">Method</a>
+        <a href="#experiments">Experiments</a>
+      </nav>
+    </header>
+
+    <main class="article-shell" id="top">
+      <article>
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+          <p class="kicker">Technical Deep Dive · Edge WAM · MoT</p>
+          <h1>Cosmos 3 Edge：4B Omni-model 如何把 World Action Model 放上边缘设备</h1>
+          <p class="article-dek">Edge 不是把 Cosmos 3 Nano 做一次量化。它重新训练一个 2B dense backbone，再复制为约 2B Reasoner 与约 2B Generator：前者自回归理解文本和视觉，后者通过 diffusion 生成图像、视频与动作。DROID policy 用 4 步去噪一次产生 32×8 动作块，并可跳过视频解码，在 Jetson Thor 上实现的是 chunk-level real-time，而不是每秒运行 15 次模型。</p>
+          <div class="article-meta">
+            <span>2026.07.21</span>
+            <span>分类：robotics-world-models</span>
+            <span>原文：2026.07.20</span>
+            <a href="https://huggingface.co/blog/nvidia/cosmos3edge">HF Blog</a>
+            <a href="https://huggingface.co/nvidia/Cosmos3-Edge">Model</a>
+            <a href="https://github.com/NVIDIA/cosmos-framework">Code</a>
+          </div>
+        </header>
+
+        <section class="article-section" id="core">
+          <h2>0. 一句话结论 <a class="heading-anchor" href="#core">#</a></h2>
+          <blockquote>
+            <p>Cosmos 3 Edge 解决的是统一 world model 太大、无法靠近传感器部署的问题：它用 4B 双塔 MoT 保留 VLM reasoning、视频 world model 与 action generation，并通过 4-step flow sampling、32-step action chunk 和关闭 VAE decode，把 DROID policy 放到 Jetson AGX Thor；代价是 Edge 的能力明显低于 16B Nano，策略只在部分 RoboLab 指标略胜 $\pi_{0.5}$，而“15 Hz”指动作流执行频率，不是 15 model forward/s。</p>
+          </blockquote>
+          <p class="insight"><strong>核心 insight：</strong>Edge deployment 的关键不是单纯缩参数，而是改变控制系统的时间预算。模型花约 1.528 秒生成 32 个动作，动作以 15 Hz 执行、覆盖约 2.133 秒；只要下一块在上一块耗尽前生成，就满足实时闭环。</p>
+          <div class="math-block">$$
+            T_{budget}=\frac{H}{f_{ctrl}}=\frac{32}{15}\approx2.133\ \text{s},
+            \qquad T_{infer}=1.528\ \text{s}<T_{budget}.
+          $$</div>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/cosmos3-edge/hero.png" alt="NVIDIA Cosmos 3 Edge 官方视觉">
+            <figcaption>Cosmos 3 Edge 面向机器人、自动驾驶与 smart infrastructure 的 on-device Physical AI。真正的工程指标是吞吐、显存和控制 deadline，而不只是模型参数量。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section" id="positioning">
+          <h2>1. 论文定位：Edge 是 Cosmos 3 的第三个尺度 <a class="heading-anchor" href="#positioning">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>Variant</th><th>总参数</th><th>每座 tower 的 backbone</th><th>定位</th></tr></thead>
+            <tbody>
+              <tr><td>Cosmos3-Super</td><td>64B</td><td>32B，64 layers，5120 hidden</td><td>数据中心高质量生成</td></tr>
+              <tr><td>Cosmos3-Nano</td><td>16B</td><td>8B，36 layers，4096 hidden</td><td>工作站级 omni-model</td></tr>
+              <tr><td>Cosmos3-Edge</td><td><strong>4B</strong></td><td><strong>2B，28 layers，2048 hidden</strong></td><td>边缘 reasoning 与 action</td></tr>
+            </tbody>
+          </table>
+          <p>“4B”不是一个 4B Transformer 同时跑两种 token。每个 decoder layer 有两套独立参数：Reasoner 约 2B，Generator 约 2B；它们共享序列与注意力交互方式，而不共享 LayerNorm、QKV projection 和 MLP 权重。额外还有 27-layer、1152D 的 vision encoder，以及冻结的 Wan VAE。</p>
+          <p>Edge 可以被看成三个接口：</p>
+          <ul>
+            <li><strong>Small VLM：</strong>text/image/video → text，用于 VANTAGE、robotics reasoning 与 driving reasoning。</li>
+            <li><strong>World generator：</strong>text/image/action → image/video，支持 I2V、forward dynamics、inverse dynamics。</li>
+            <li><strong>World Action Model：</strong>observation + instruction + state → action + predicted visual consequence；DROID checkpoint 是专门 post-train 的 policy。</li>
+          </ul>
+          <p>它与 Riemann-1.0 的差异也很直接：Riemann 用 action→next observation 的自回归因果顺序；Cosmos 3 policy 把 noisy action 与 noisy future video 放在同一个 diffusion subsequence 中联合去噪。前者强调 interaction order，后者强调同一 model 在 FD/ID/policy 模式之间共享能力。</p>
+        </section>
+
+        <section class="article-section" id="method">
+          <h2>2. 方法总览：Reasoner 只向 Generator 单向供上下文 <a class="heading-anchor" href="#method">#</a></h2>
+          <pre class="code-block"><code>Understanding path
+image/video -> ViT (patch 16, 27 blocks, 1152D)
+            -> 2x2 spatial merge + projector -> 2048D AR tokens
+text        -> Nemotron tokenizer -> 2048D AR tokens
+            -> Reasoner tower: causal next-token prediction
+
+Generation path
+image/video -> frozen Wan VAE -> 48-channel latent -> 2x2 latent patch -> DM tokens
+action      -> normalize -> pad to 64D -> domain-aware projection -> DM tokens
+            -> Generator tower: rectified-flow denoising
+
+Joint attention
+AR query -> attends causal AR keys/values only
+DM query -> attends full [AR; DM] keys/values
+AR never reads DM, so reasoning conditions generation without reverse leakage</code></pre>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/cosmos3-edge/mot-architecture.png" alt="Cosmos 3 Edge 的双塔 Mixture-of-Transformers 和 attention mask">
+            <figcaption>Cosmos 3 MoT。两座 tower 有独立参数，但在每层做 dual-stream joint attention。橙色 DM query 能看 AR 与 DM；蓝色 AR query 永远看不到 DM，因此所谓“reason before generate”是结构上的单向条件，而不是生成结果回写 reasoning。</figcaption>
+          </figure>
+          <table class="data-table">
+            <thead><tr><th>配置项</th><th>模型卡 / 代码值</th><th>含义</th></tr></thead>
+            <tbody>
+              <tr><td>Transformer</td><td>28 layers，2048 hidden，16 Q heads，8 KV heads</td><td>GQA，head dim 128，FFN 9216</td></tr>
+              <tr><td>Vision encoder</td><td>27 layers，1152 hidden，patch 16</td><td>2×2 merge 后投影到 2048D</td></tr>
+              <tr><td>Generator latent</td><td>48 channels，latent patch 2</td><td>Wan VAE 时间压缩 4×，总空间压缩约 32×</td></tr>
+              <tr><td>Action</td><td>model width 64，32 embodiment domains</td><td>原始 8D/10D/20D/29D/57D 经专属 projection</td></tr>
+              <tr><td>Position</td><td>3D mRoPE sections [24,20,20]</td><td>head 64 rotary dims 分配给 $t,h,w$</td></tr>
+              <tr><td>Edge generation</td><td>BF16，sound_gen=false</td><td>当前 Edge checkpoint 不开放 audio generation</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="innovations">
+          <h2>3. 关键创新点 <a class="heading-anchor" href="#innovations">#</a></h2>
+
+          <h3>3.1 两座 2B tower，而不是让离散 token 和连续 latent 抢同一套参数</h3>
+          <p><strong>旧方法瓶颈：</strong>语言适合 next-token prediction，视频与连续动作适合 diffusion/flow matching。完全共享参数会让 causal attention 与 bidirectional denoising、离散 logits 与连续 velocity 彼此干扰；完全分离又失去共同 world representation。</p>
+          <p><strong>怎么改：</strong>每层有 Reasoner/Generator 两套 Norm、attention projections 和 MLP。AR token 与 DM token 在同一 packed sequence 中，但走不同参数路径，通过 joint attention 交换信息。</p>
+          <p><strong>为什么有效：</strong>Reasoner 保留 VLM 的语义、空间和时序理解；Generator 可以自由使用 full attention 去噪。DM 读取 AR 的 key/value，让文本 reasoning 和 ViT observation 成为生成条件。</p>
+          <p><strong>代价：</strong>参数几乎翻倍，所以 2B backbone 变成 4B omni-model。DM 不能反向更新 AR hidden state；它不是两座 tower 反复对话，而是单向 conditioning。</p>
+
+          <h3>3.2 Action 不是离散 code，而是按本体投影的连续几何向量</h3>
+          <p>Cosmos 3 把 action 定义成相邻视觉状态之间的 causal transition。共享组件包括 9D pose（3D translation + 6D rotation）和 grasp state：</p>
+          <ul>
+            <li>车与 camera motion：9D ego pose delta。</li>
+            <li>单臂：9D EEF pose delta + 1D gripper，共 10D。</li>
+            <li>双臂：左右各 9D + 1D，共 20D。</li>
+            <li>ego human：head 9D + 双 wrist 18D + 双手 fingertip 30D，共 57D。</li>
+            <li>humanoid：ego 9D + 双臂 20D，共 29D。</li>
+          </ul>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/cosmos3-edge/action-representation.png" alt="Cosmos 3 的统一动作表征">
+            <figcaption>论文 Figure 3。统一的是 pose/grasp 的几何语义，不是所有本体共用同一个输出矩阵。代码把动作先归一化、pad 到 64D，再由 domain ID 选择专属输入/输出 projection。</figcaption>
+          </figure>
+          <p>代码中的 <code>DomainAwareLinear</code> 用 embedding table 存每个 domain 的矩阵 $W^{(k)}$ 与 bias $b^{(k)}$；<code>ActionProcessor</code> 保留 raw dimension 和 normalizer record，生成后先截掉 padding，再反归一化回执行空间。这个细节决定了“统一 action space”不会破坏本体数值语义。</p>
+
+          <h3>3.3 3D mRoPE 对齐的是物理时间，不只是 token 序号</h3>
+          <p>Language 使用 $(t,h,w)=(i,i,i)$，退化成普通 1D RoPE；video 使用完整 $(t,h,w)$；action 只用时间坐标 $(t,0,0)$。AR 与 DM 之间再固定错开 15000，避免最后一个语言 token 与首个 diffusion visual token 的位置过近导致过饱和和棋盘格。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/cosmos3-edge/mrope.png" alt="Cosmos 3 3D mRoPE 与 FPS modulation">
+            <figcaption>论文 Figure 6。不同 FPS 的相邻 token 不应代表相同时间间隔；Cosmos 3 用 FPS modulation 把 video、audio 与 action 放到统一物理时间轴。</figcaption>
+          </figure>
+          <div class="math-block">$$
+            \delta t=\frac{\mathrm{TPS}_{base}}{\mathrm{TPS}},
+            \qquad \mathrm{TPS}_{base}=\frac{24}{4}=6.
+          $$</div>
+          <p>视频 TPS 是 fps/4，action TPS 就是控制频率。于是 16 FPS 的 video latent 每步走 $6/(16/4)=1.5$，30 FPS 每步走 $6/(30/4)=0.8$。attention 看到的是近似真实时间差，而不是“都是相邻一个 token”。</p>
+
+          <h3>3.4 三种 action mode 用 clean/noisy pattern 切换</h3>
+          <table class="data-table">
+            <thead><tr><th>Mode</th><th>Clean condition</th><th>Noisy target</th><th>用途</th></tr></thead>
+            <tbody>
+              <tr><td>Forward Dynamics</td><td>初始 video + action</td><td>future video</td><td>给定动作预测视觉后果</td></tr>
+              <tr><td>Inverse Dynamics</td><td>observed video transition</td><td>action</td><td>解释导致变化的动作</td></tr>
+              <tr><td>Policy</td><td>当前 observation / state / language</td><td>future video + action</td><td>联合预测干预及其视觉后果</td></tr>
+            </tbody>
+          </table>
+          <p>PushT 消融中，联合 FD/ID/policy 训练把 ID MSE 从 $1.11\times10^{-3}$ 降到 $3.09\times10^{-4}$，policy coverage 从 74.1% 提到 77.3%，但 FD PSNR 从 27.13 降到 26.22。共享 action structure 有收益，但不是所有任务都无损。</p>
+        </section>
+
+        <section class="article-section" id="train-infer">
+          <h2>4. 训练与推理流程 <a class="heading-anchor" href="#train-infer">#</a></h2>
+          <h3>Edge language backbone</h3>
+          <ol>
+            <li>从头训练 2B dense LLM：Nemotron corpus 15T tokens，sequence length 8192，BF16。</li>
+            <li>AdamW peak LR $1.2\times10^{-3}$，$\beta=(0.9,0.95)$，WD 0.1，grad clip 1.0，WSD schedule。</li>
+            <li>长上下文阶段使用 90B tokens、128K sequence、RoPE base $10^8$，constant LR $1.2\times10^{-5}$。</li>
+            <li>Text SFT 使用 26M examples，pack 成约 2.6M sequences，batch 32；约 140K steps / 1.7 epochs 达峰值。</li>
+          </ol>
+          <h3>Multimodal Reasoner 与 Generator</h3>
+          <ol>
+            <li>Reasoner 加入 ViT 与 projector，在约 22M pretrain samples 上做 next-token prediction，再用约 2.2M Physical AI SFT samples 专化。</li>
+            <li>训练好的 Reasoner 参数复制初始化 Generator tower，把语义与物理理解先验带到 diffusion path。</li>
+            <li>Generator 逐步加入 image、video 与 action 数据。Edge 模型卡列出约 767M image、348M video、7M action generation samples。</li>
+            <li>代码默认 Edge action loss weight 10，image/video noise time 使用 logit-normal / waver 分布，BF16、EMA 0.1、full activation checkpointing。</li>
+          </ol>
+          <p><strong>【不确定】</strong>技术报告首发时 Edge 尚未开放，因此完整 generator 章节主要记录 Nano/Super；当前 Edge 模型卡没有单列 Edge generator 的训练 steps、batch、GPU 数与数据重采样比例。合理推测是沿用统一 curriculum 并缩放到 28-layer dense MoT，但只能用训练 config/checkpoint metadata 或官方补充报告验证。</p>
+
+          <h3>DROID policy inference</h3>
+          <pre class="code-block"><code>prompt + current robot state
+3 camera views -> wrist on top + 2 exterior views below -> 540x640 canvas
+             -> first frame is clean; future 32 frames are empty/noisy slots
+state/action  -> DROID 8D -> normalize -> pad to 64D
+             -> policy mode joint denoising
+             -> UniPC, 4 steps, shift 5, CFG 3
+             -> predicted action [32, 8]
+             -> skip VAE video decode by default
+             -> WebSocket response -> execute at 15 Hz</code></pre>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/cosmos3-edge/banana-policy.gif" alt="Cosmos 3 Edge DROID 策略执行抓取香蕉任务">
+            <figcaption>HF 发布页的 DROID policy 示例。模型内部仍联合预测 video/action latent，但部署默认 <code>decode_video=false</code>，只返回动作，避免 VAE decode 占用控制时延。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section" id="formulas">
+          <h2>5. 关键公式与代码张量 <a class="heading-anchor" href="#formulas">#</a></h2>
+          <h3>5.1 Relative SE(3) pseudo-action</h3>
+          <div class="math-block">$$
+            \Delta T_t=T_{t-1}^{-1}T_t,
+            \qquad x_t=[\Delta p_t,\operatorname{Rot6D}(\Delta R_t),g_t].
+          $$</div>
+          <p>$\Delta p_t\in\mathbb R^3$，Rot6D 是过参数化旋转，$g_t$ 是当前 grasp state 而非差分。代码将预测 Rot6D 经 SVD 正交化回 $SO(3)$。使用 state difference 可以绕过 PID 和底层 motor command，但它是 pseudo-action，不一定等于真实控制输入。</p>
+
+          <h3>5.2 Domain-aware projection</h3>
+          <div class="math-block">$$
+            z_t=W_{in}^{(k)}x_t+b_{in}^{(k)},
+            \qquad \hat x_t=W_{out}^{(k)}\hat z_t+b_{out}^{(k)}.
+          $$</div>
+          <p>$k\in\{1,\dots,32\}$ 是 embodiment domain；$x_t\in\mathbb R^{d_k}$，模型内部 action tensor pad 到 64D，再投到 2048D token。代码中的权重表形状等价于 $[K,d_{out}d_{in}]$，每个 batch sample 按 domain ID 取矩阵并做 batched matmul。</p>
+
+          <h3>5.3 Dual-stream attention</h3>
+          <div class="math-block">$$
+            O_{AR}=\operatorname{Attn}_{causal}(Q_{AR},K_{AR},V_{AR}),
+          $$</div>
+          <div class="math-block">$$
+            O_{DM}=\operatorname{Attn}_{full}
+            \left(Q_{DM},[K_{AR};K_{DM}],[V_{AR};V_{DM}]\right).
+          $$</div>
+          <p>关键不是 concat 本身，而是非对称性：$O_{AR}$ 没有 $K_{DM},V_{DM}$。Generator 读取 Reasoner，Reasoner 不读取 noisy/generated modality，因此不会破坏 next-token causal semantics。</p>
+
+          <h3>5.4 Rectified flow</h3>
+          <div class="math-block">$$
+            x_\tau=(1-\tau)x+\tau\epsilon,
+            \qquad \mathcal L_{RF}=\mathbb E\|v_\theta(x_\tau,\tau,c)-(\epsilon-x)\|_2^2.
+          $$</div>
+          <p>$x$ 可以是 48-channel video latent 或 padded action sequence。训练随机采一个 noise time；部署从 Gaussian noise 出发用 UniPC 积分。Edge policy 把通常几十步的 diffusion 压到 4 步，这是时延下降的主要来源之一。</p>
+
+          <h3>5.5 Chunk-level real-time factor</h3>
+          <div class="math-block">$$
+            \mathrm{RTF}=\frac{H/f_{ctrl}}{T_{E2E}}.
+          $$</div>
+          <p>T5000 上 $H=32,f_{ctrl}=15,T_{E2E}=1.528$，RTF=1.40。它的含义是每块生成速度比消费速度快 40%，不是 15 Hz inference。若没有异步预取，chunk boundary 仍可能有停顿；模型卡没有报告 sensor→server→controller 全系统 jitter。</p>
+        </section>
+
+        <section class="article-section" id="alignment">
+          <h2>6. 训练与推理细节对齐 <a class="heading-anchor" href="#alignment">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>检查项</th><th>训练 / 模型内部</th><th>部署</th><th>影响</th></tr></thead>
+            <tbody>
+              <tr><td>Future video</td><td>与 action 联合预测，提供 auxiliary world loss</td><td>默认不 VAE decode</td><td>保留 representation shaping，省去解码时延</td></tr>
+              <tr><td>Action horizon</td><td>checkpoint metadata 为 32 steps / 15 Hz</td><td>整块返回并执行</td><td>块内反馈频率低于低层控制频率</td></tr>
+              <tr><td>Denoising</td><td>随机 noise-time velocity regression</td><td>4-step UniPC，CFG 3，shift 5</td><td>极少步采样可能牺牲多模态动作精度</td></tr>
+              <tr><td>Observation history</td><td>DROID trajectory window</td><td>server 默认 history_length=1</td><td>动态状态主要靠当前图像/state 推断</td></tr>
+              <tr><td>Action dimension</td><td>多本体 pad 到 64D</td><td>DROID 截回 8D、反转 gripper convention</td><td>代码显式处理 train/robot convention</td></tr>
+              <tr><td>Visual resolution</td><td>DROID 原图 360×640，三视角 canvas 540×640</td><td>real-time 表写 640×540→544×736 bucket</td><td>HF 博客的 640×360 不是完整 server tensor</td></tr>
+              <tr><td>Reasoner context</td><td>128K extension</td><td>报告目标 32K；config 131072；模型卡写 256K</td><td>最大可靠 context 存在来源冲突</td></tr>
+            </tbody>
+          </table>
+          <blockquote class="rich-callout rich-callout-uncertain">
+            <p><strong>【不确定】</strong>上下文长度有三种公开口径：技术报告训练 128K、主要面向部署 32K；Transformers config 的 <code>max_position_embeddings</code> 是 131072；模型卡宣称最高 256K。可能分别指训练长度、保守质量长度和 processor 接受长度。验证时应在 32K/128K/256K 做 needle retrieval 与显存测试，不能只看 tokenizer 是否接受输入。</p>
+          </blockquote>
+        </section>
+
+        <section class="article-section" id="experiments">
+          <h2>7. 实验复盘：Edge 的优势首先是效率，不是全面胜过 Nano <a class="heading-anchor" href="#experiments">#</a></h2>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/cosmos3-edge/benchmark-overall.png" alt="Cosmos 3 Edge reasoning generation 和 policy 总体结果">
+            <figcaption>Edge 总览。与同尺寸模型相比，它在 Physical AI reasoning 和 I2V 有竞争力；但 16B Nano 在所有汇总项都更强，说明 Edge 是明确的 capacity-throughput trade-off。</figcaption>
+          </figure>
+          <table class="data-table">
+            <thead><tr><th>能力</th><th>Edge</th><th>Nano</th><th>关键解释</th></tr></thead>
+            <tbody>
+              <tr><td>General reasoning avg.</td><td>60.7</td><td>69.6</td><td>Edge 仅略高 Qwen3-2B-VL 60.3</td></tr>
+              <tr><td>Robotics reasoning avg.</td><td>48.5</td><td>55.1</td><td>高于 Qwen3-2B-VL 38.7</td></tr>
+              <tr><td>Smart infrastructure avg.</td><td>50.3</td><td>61.0</td><td>同尺寸组中最佳，支撑 VANTAGE claim</td></tr>
+              <tr><td>Driving reasoning avg.</td><td>61.8</td><td>76.0</td><td>明显高于 Qwen3-2B-VL 42.7</td></tr>
+              <tr><td>I2V PAIBench-G</td><td>81.2</td><td>82.4</td><td>质量接近，吞吐差距大</td></tr>
+              <tr><td>RoboLab specific prompt</td><td>28.8</td><td>39.7</td><td>略高 $\pi_{0.5}$ 28.1</td></tr>
+            </tbody>
+          </table>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/cosmos3-edge/benchmark-i2v.png" alt="Cosmos 3 Edge 图生视频质量和吞吐">
+            <figcaption>单 H100 eager、480p、24 FPS 的 I2V：Edge 为 6.71 frames/s，Nano 2.66，Cosmos-Predict2.5-2B 为 1.31；Edge 的 PAIBench-G 81.2 略低 Nano 82.4。</figcaption>
+          </figure>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/cosmos3-edge/benchmark-robolab.png" alt="Cosmos 3 Edge Policy DROID 在 RoboLab 上的结果">
+            <figcaption>RoboLab 细表。Edge 在 specific prompt overall 28.8 略高 $\pi_{0.5}$ 28.1；但 default prompt 22.9 低于 $\pi_{0.5}$ 28.0 和 DreamZero 25.7。将其概括成“全面 SOTA robot policy”并不严谨。</figcaption>
+          </figure>
+          <h3>Edge real-time 表该怎么读</h3>
+          <table class="data-table">
+            <thead><tr><th>平台</th><th>Median E2E</th><th>RTF@15Hz</th><th>是否满足 15Hz action stream</th></tr></thead>
+            <tbody>
+              <tr><td>Jetson AGX Thor T5000 128GB</td><td>1.528 s</td><td>1.40</td><td><strong>是</strong></td></tr>
+              <tr><td>Thor T4000 64GB</td><td>2.208 s</td><td>0.97</td><td>否，约慢 3.5%</td></tr>
+              <tr><td>Thor T3000 32GB（模拟配置）</td><td>2.632 s</td><td>0.81</td><td>否</td></tr>
+              <tr><td>Thor T2000 16GB</td><td>5.195 s</td><td>0.41</td><td>否；需要 swap 配置</td></tr>
+            </tbody>
+          </table>
+          <h3>实验中的隐藏 confound</h3>
+          <ul>
+            <li>vLLM-Omni 与 PyTorch 表使用不同 resolution、denoising steps、guidance 和测量协议，官方也明确禁止横向直比。</li>
+            <li>15 Hz 只有 T5000 PyTorch 4-step 配置通过；“包括 Jetson T2000/T3000”表示模型可运行，不等于都达到 15 Hz。</li>
+            <li>RoboLab 是 DROID 外的模拟 benchmark，但 Edge 缺少真实机器人 leaderboard 结果；发布页示例不能代替真机统计。</li>
+            <li>Reasoning benchmark 是大量子榜平均，比较模型的训练数据不受控；“同尺寸”也不等于同 FLOPs、视觉 token 数或 context。</li>
+            <li>4-step policy 的动作质量没有与 30-step 同 checkpoint 做 success/latency Pareto 消融。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="reproduce">
+          <h2>8. 可复现清单 <a class="heading-anchor" href="#reproduce">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>模块</th><th>关键实现</th><th>复现坑点</th></tr></thead>
+            <tbody>
+              <tr><td>Checkpoint</td><td><code>nvidia/Cosmos3-Edge</code> / <code>Edge-Policy-DROID</code></td><td>OpenMDW-1.1；仅正式测试 BF16</td></tr>
+              <tr><td>Reasoner</td><td>Transformers 只加载 Reasoner tower</td><td>Generator/VAE/scheduler 仍由 Diffusers/Cosmos Framework 管理</td></tr>
+              <tr><td>MoT</td><td>28×2048，two-way joint attention</td><td>不要误写成两塔共享全部 attention weights</td></tr>
+              <tr><td>Action</td><td>32 domains、max 64D、quantile/meanstd/minmax normalizer</td><td>rotation convention、gripper flip、pad mask 必须与训练一致</td></tr>
+              <tr><td>DROID input</td><td>wrist top + two exterior bottom，state 8D</td><td>三视角顺序、resize bucket、RGB uint8 约定</td></tr>
+              <tr><td>Policy sample</td><td>32 actions、15 Hz、4 UniPC steps、shift 5、CFG 3</td><td>默认 seed 每次变化；评测需固定或报告多 seed</td></tr>
+              <tr><td>Serving</td><td>WebSocket policy server + RoboLab client</td><td>默认串行 lock；多机器人并发需要独立容量规划</td></tr>
+              <tr><td>Latency</td><td>warmup 后报告 E2E、range、RTF</td><td>必须包含 preprocess/HTTP；不能只报 kernel time</td></tr>
+              <tr><td>Video output</td><td><code>decode_video=false</code> 默认关闭</td><td>开启 VAE decode 后不再沿用原 latency 结论</td></tr>
+              <tr><td>Post-training</td><td>公开 Nano DROID/LIBERO recipe</td><td>截至 7/21 未发现 Edge-specific DROID launch config</td></tr>
+            </tbody>
+          </table>
+          <p>最短运行路径是 Cosmos Framework 容器中启动 <code>action_policy_server_robolab</code>，checkpoint 指向 Edge-Policy-DROID，并让 RoboLab client 通过 WebSocket 请求动作。源码已公开 server、DROID adapter、normalizer、domain projection 与 inference loop；完整 base pretraining 不具备现实复现条件。</p>
+        </section>
+
+        <section class="article-section" id="improvements">
+          <h2>9. 可能的改进方向 <a class="heading-anchor" href="#improvements">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr></thead>
+            <tbody>
+              <tr><td>异步双缓冲 action chunk</td><td>隐藏 1.5 s 推理时延，消除 chunk boundary 停顿</td><td>旧 chunk 与新观测不一致</td><td>同步 vs overlap，报告 jitter、SR 与 emergency replan</td></tr>
+              <tr><td>动态 horizon 8/16/32</td><td>接触阶段短 horizon，空移阶段长 horizon</td><td>不同长度分布可能破坏 flow calibration</td><td>按 contact probability 切换，画 latency-success Pareto</td></tr>
+              <tr><td>distill 4-step policy，而不只直接少步采样</td><td>恢复少步动作质量</td><td>teacher cost 高、mode collapse</td><td>30-step teacher→4-step DMD/consistency distillation</td></tr>
+              <tr><td>低频 Reasoner + 高频 Generator</td><td>reasoning 不必每块重算，减少 AR cost</td><td>任务状态变化后 plan stale</td><td>缓存 reasoning tokens，按事件触发刷新</td></tr>
+              <tr><td>state/contact auxiliary head</td><td>比 RGB rollout 更直接约束控制后果</td><td>跨本体 sensor schema 难统一</td><td>video-only vs video+proprio+contact 的真机消融</td></tr>
+              <tr><td>FP8/FP4 Edge deployment</td><td>降低显存与时延，覆盖 T3000/T2000</td><td>当前只验证 BF16，flow/action 对量化敏感</td><td>逐 tower mixed precision，报告 action MSE 与 closed-loop SR</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="card">
+          <h2>10. 速读备忘卡 <a class="heading-anchor" href="#card">#</a></h2>
+          <ul class="takeaway-list">
+            <li>Cosmos3-Edge 是 4B omni-model，2026-07-20 开放。</li>
+            <li>4B 主要来自约 2B Reasoner + 约 2B Generator。</li>
+            <li>两塔独立 Norm/QKV/MLP，通过 joint attention 连接。</li>
+            <li>AR 只能看 AR；DM 能看 AR+DM，信息流单向。</li>
+            <li>Edge 是从头训练的 2B dense backbone，不是 Nano 的量化版。</li>
+            <li>视觉理解用 ViT，视觉生成用冻结 Wan VAE。</li>
+            <li>动作由 relative pose + grasp state 构成，不是离散 action code。</li>
+            <li>多本体动作 pad 到 64D，但 projection 按 32 个 domain 分开。</li>
+            <li>3D mRoPE 用 FPS modulation 对齐真实物理时间。</li>
+            <li>FD、ID、policy 通过 clean/noisy token pattern 切换。</li>
+            <li>DROID policy 一次生成 $[32,8]$ 动作块，4-step UniPC。</li>
+            <li>15 Hz 是动作执行率；T5000 模型约 1.528 秒生成一块。</li>
+            <li>Edge I2V 吞吐 6.71 frames/s，质量略低 Nano。</li>
+            <li>RoboLab specific prompt 略胜 $\pi_{0.5}$，但 default prompt 并非最佳。</li>
+            <li>代码可运行 inference/server；Edge-specific policy post-train recipe 仍不完整。</li>
+          </ul>
+          <p class="insight">一句话记忆：<strong>Cosmos 3 Edge 不是让模型以 15 Hz 思考，而是让模型提前生成足够长的动作缓存，使控制流能以 15 Hz 连续消费。</strong></p>
+        </section>
+
+        <footer class="article-footer">
+          <p>资料：<a href="https://huggingface.co/blog/nvidia/cosmos3edge">HF Blog</a> · <a href="https://research.nvidia.com/labs/cosmos-lab/cosmos3/technical-report.pdf">Technical report</a> · <a href="https://huggingface.co/nvidia/Cosmos3-Edge">Base model</a> · <a href="https://huggingface.co/nvidia/Cosmos3-Edge-Policy-DROID">DROID policy</a> · <a href="https://github.com/NVIDIA/cosmos-framework">Cosmos Framework</a></p>
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+        </footer>
+      </article>
+    </main>
+  </body>
+</html>
