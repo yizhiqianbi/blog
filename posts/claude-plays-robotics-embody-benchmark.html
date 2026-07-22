@@ -1,0 +1,371 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Anthropic Claude plays robotics 深度解读：Embody benchmark、四种控制接口、Go2/G1 locomotion、LIBERO manipulation、MolmoAct VLA supervision、视觉工具、短期适应与真实机器人局限。">
+    <title>Claude plays robotics：真正决定机器人能力的是模型，还是控制接口？</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260717a">
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script type="application/json" id="paper-metadata">
+      {
+        "title": "Claude plays robotics：真正决定机器人能力的是模型，还是控制接口？",
+        "paper": "https://www.anthropic.com/research/claude-plays-robotics",
+        "project": "https://www.anthropic.com/research/claude-plays-robotics",
+        "repository": "https://github.com/safety-research/embody",
+        "parent_file": "index.html",
+        "remix_prompt": "同样处理 https://www.anthropic.com/research/claude-plays-robotics",
+        "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+        "authors": ["Shmuel Berman", "Michael Ilie", "Jia Deng", "Daniel Freeman"],
+        "date": "2026-07-23",
+        "paper_date": "2026-07-09",
+        "category": "robotics-world-models",
+        "tags": ["embody-benchmark", "llm-robotics", "control-interface", "robot-supervisor", "vla-supervision", "molmoact", "unitree-go2", "unitree-g1", "libero", "mujoco", "spatial-memory", "in-context-learning", "robot-safety"],
+        "systems": ["Embody", "Claude Opus", "Claude Mythos Preview", "MolmoAct", "MuJoCo", "Unitree Go2", "Unitree G1", "Franka Panda", "Anthropic Agent SDK", "BatchedEnvWarp"],
+        "datasets": ["LIBERO-40", "LIBERO-goal", "Embody classic control", "TwinFlipper", "Embody high-level locomotion suite"],
+        "methods": ["direct control", "programmatic control", "policy control", "reinforcement learning supervision", "VLA supervision", "pretrained gait policy", "PPO", "context truncation", "perception-tool ablation", "paused-simulator evaluation"],
+        "code": "The article specifies the harness, prompts, trial counts, PPO defaults, files and intended public repository. As of 2026-07-23, github.com/safety-research/embody still returns 404, so the executable benchmark, exact prompts, scoring implementation and experiment commands cannot yet be audited.",
+        "related_posts": ["posts/vla-policies.html", "posts/lingbot-vla2-foundation-to-application.html", "posts/xiaomi-robotics-1-scaling-vla-100k-hours.html", "posts/qwen-robotnav-agentic-navigation.html", "posts/qwen-vla-unified-embodied-action-model.html", "posts/cosmos3-edge-on-device-world-action-model.html"],
+        "graph_nodes": ["Claude plays robotics", "Embody", "control interface", "direct control", "programmatic control", "RL supervision", "policy control", "MolmoAct", "VLA supervisor", "Unitree Go2", "Unitree G1", "Franka Panda", "LIBERO-40", "spatial memory", "orientation tool", "paused simulator", "robot capability evaluation"],
+        "graph_edges": [
+          "Claude plays robotics -> introduces -> Embody",
+          "Embody -> varies -> control interface",
+          "Embody -> evaluates -> robot capability evaluation",
+          "direct control -> exposes -> motor torque or end-effector action",
+          "programmatic control -> produces -> Python controller",
+          "RL supervision -> optimizes -> PPO policy",
+          "policy control -> delegates_to -> pretrained gait policy",
+          "VLA supervisor -> supervises -> MolmoAct",
+          "MolmoAct -> acts_on -> Franka Panda",
+          "orientation tool -> improves -> spatial control",
+          "paused simulator -> removes -> inference latency constraint",
+          "Claude plays robotics -> finds -> short-horizon adaptation",
+          "Claude plays robotics -> finds -> weak spatial memory",
+          "control interface -> determines -> effective robot capability"
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#core">Insight</a>
+        <a href="#method">Method</a>
+        <a href="#experiments">Experiments</a>
+      </nav>
+    </header>
+
+    <main class="article-shell" id="top">
+      <article>
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+          <p class="kicker">Technical Deep Dive · LLM Robotics · Evaluation</p>
+          <h1>Claude plays robotics：真正决定机器人能力的是模型，还是控制接口？</h1>
+          <p class="article-dek">这不是一个新的 VLA，也没有用机器人数据训练 Claude。Anthropic 构建了 Embody 评测，把多个通用模型接到从 motor torque 到 pretrained policy 的四级接口上。结果说明：今天的 LLM 更适合做低频 planner、controller programmer 和 policy supervisor，而不是高频关节控制器；系统能做什么，取决于模型与接口的乘积。</p>
+          <div class="article-meta">
+            <span>2026.07.23</span>
+            <span>分类：robotics-world-models</span>
+            <span>原文：2026.07.09</span>
+            <a href="https://www.anthropic.com/research/claude-plays-robotics">Anthropic</a>
+            <a href="https://github.com/safety-research/embody">Code（待发布）</a>
+          </div>
+        </header>
+
+        <section class="article-section" id="core">
+          <h2>0. 一句话结论 <a class="heading-anchor" href="#core">#</a></h2>
+          <blockquote>
+            <p>Anthropic 要回答的不是“Claude 会不会端到端控制机器人”，而是“通用模型接入不同机器人接口后，系统能力会放大到什么程度”：直接输出 torque 基本失败，写 controller 或监督预训练 policy 明显更强；代价是能力主要来自 scaffold，低层实时性、长程空间记忆和可靠闭环仍很弱。</p>
+          </blockquote>
+          <p class="insight"><strong>核心 insight：</strong>机器人能力不是模型的单变量函数。更准确的对象是整个 agentic stack：</p>
+          <div class="math-block">$$
+            C_{robot}=F(M, E, I, O, H),
+          $$</div>
+          <p>其中 $M$ 是 foundation model，$E$ 是 embodiment，$I$ 是 control interface，$O$ 是 observation/tool，$H$ 是 interaction history。换一个接口，同一个模型可以从“完全不会站立”变成“能穿过简单迷宫”。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/claude-robotics/embody-composite.png" alt="Embody benchmark 按控制接口堆叠的综合机器人能力分数">
+            <figcaption>官方 Embody composite。它展示的是跨 embodiment 与 interface 的归一化聚合分数，不等价于某一真实机器人任务的成功率；high-level locomotion 还被排除在该 composite 之外。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section" id="positioning">
+          <h2>1. 论文定位：它是系统能力评测，不是机器人模型训练 <a class="heading-anchor" href="#positioning">#</a></h2>
+          <p>文章横跨三类任务、四种接口和多种本体，比较 12 个模型、5 个 provider。研究对象是通用 VLM 在机器人 scaffold 中的可用性与安全边界。</p>
+          <table class="data-table">
+            <thead><tr><th>维度</th><th>设置</th><th>真正考察的能力</th></tr></thead>
+            <tbody>
+              <tr><td>Classic control</td><td>Pendulum、Hopper、全新 TwinFlipper</td><td>低维动力学、代码控制、reward/policy 设计</td></tr>
+              <tr><td>Locomotion</td><td>12-DoF Go2、29-DoF G1、11 项导航任务</td><td>平衡、步态调用、视觉导航、空间记忆</td></tr>
+              <tr><td>Manipulation</td><td>7-DoF Franka Panda，LIBERO kitchen</td><td>视觉定位、接触/抓取/放置、VLA 监督</td></tr>
+              <tr><td>Real world</td><td>实体 Unitree Go2 的少量探索</td><td>simulation 结论是否暴露相似失败模式</td></tr>
+            </tbody>
+          </table>
+          <p><strong>和 VLA benchmark 的差异：</strong>常规评测固定 policy 架构与 action space，然后比较训练方法；Embody 刻意改变 action abstraction。它因此更接近 capability audit，但不能回答哪种端到端机器人训练方法更好。</p>
+          <p><strong>和 agent benchmark 的差异：</strong>动作会进入动力学系统，错误会累积、引起接触和失稳；但多数低层仿真实验会在 API 调用时暂停物理时间，所以测到的是 latency-free upper bound。</p>
+        </section>
+
+        <section class="article-section" id="method">
+          <h2>2. 方法总览：同一个模型，接四种 action interface <a class="heading-anchor" href="#method">#</a></h2>
+          <div class="code-block"><pre><code>task + robot specification + observation/history
+  → general-purpose VLM agent
+  → choose one interface
+      A. direct:       action_t / torque_t
+      B. programmatic: controller(obs) → action
+      C. RL supervisor: reward + policy net + PPO schedule
+      D. policy control: velocity command or accept/edit VLA action
+  → MuJoCo / physical Go2
+  → state, RGB, force feedback, score
+  → retry or next action</code></pre></div>
+          <p>四种接口对应四个时间尺度。direct control 要让语言模型进入 physics loop；programmatic control 让模型一次写出可高频执行的函数；RL supervision 让模型设计学习过程；policy control 则把模型放在低频 semantic loop。</p>
+          <table class="data-table">
+            <thead><tr><th>接口</th><th>模型直接输出</th><th>执行者</th><th>关键限制</th></tr></thead>
+            <tbody>
+              <tr><td>Direct</td><td>torque/force 或 7D end-effector delta</td><td>模拟器/机器人</td><td>数值精度、带宽、接触稳定性</td></tr>
+              <tr><td>Programmatic</td><td>Python controller</td><td>本地高频函数</td><td>代码是否形成稳定 feedback law</td></tr>
+              <tr><td>RL supervision</td><td>reward、network、schedule</td><td>PPO policy</td><td>长迭代链与 reward specification</td></tr>
+              <tr><td>Policy/VLA supervision</td><td>高层速度或 accept/edit/replace</td><td>gait policy / MolmoAct</td><td>何时信任、何时纠正专用 policy</td></tr>
+            </tbody>
+          </table>
+          <p>这张接口表就是全文的因果骨架。模型版本的提升很重要，但接口往往产生更大的 effect size。</p>
+        </section>
+
+        <section class="article-section" id="innovations">
+          <h2>3. 关键创新点 <a class="heading-anchor" href="#innovations">#</a></h2>
+
+          <h3>3.1 把 control abstraction 当成第一等评测变量</h3>
+          <p><strong>旧方法为什么不行：</strong>只测 torque control 会低估接入成熟 controller 后的风险；只测高层 API 又会把专用 policy 的能力算到 LLM 身上。</p>
+          <p><strong>它怎么改：</strong>在相同任务族中并列 direct、code、RL 和 policy interfaces，并报告跨本体 composite。</p>
+          <p><strong>为什么有效：</strong>它把“模型会什么”和“系统允许模型调用什么”拆开。安全评测由 model card 变成 access-level audit。</p>
+          <p><strong>代价/限制：</strong>不同接口的动作预算、先验和计算资源并不等价，分数不能被解释为纯模型能力。</p>
+
+          <h3>3.2 让 LLM 监督 VLA，而不是替代 VLA</h3>
+          <p>在 LIBERO 中，MolmoAct 提议 $a_t^{VLA}\in\mathbb{R}^7$，LLM 根据图像、任务和历史决定：</p>
+          <div class="math-block">$$
+            a_t = g_\theta(o_{\le t}, c, a_t^{VLA})
+            \in \{a_t^{VLA},\ \operatorname{edit}(a_t^{VLA}),\ \operatorname{replace}(a_t^{VLA})\}.
+          $$</div>
+          <p><strong>有效机制：</strong>VLA 提供局部 visuomotor prior，LLM 负责语义目标、失败识别和 out-of-distribution 判断。</p>
+          <p><strong>关键负结果：</strong>在熟悉的 LIBERO-40 上，所有 LLM+VLA 都差于 MolmoAct 单独运行。更强的 supervisor 也会因为过度 override 破坏正确动作；“不盲从”不等于“会纠错”。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/claude-robotics/vla-supervision.png" alt="语言模型监督 MolmoAct 在 LIBERO 上的结果">
+            <figcaption>预训练 VLA 将成功率大幅抬高，但 supervisor 引入 control penalty。真正需要评测的是 selective intervention，而不是单纯 follow rate。</figcaption>
+          </figure>
+
+          <h3>3.3 用小型 orientation tool 暴露 spatial bottleneck</h3>
+          <p>深度图、segmentation、crosshair 或第三视角通常中性甚至有害；直接给 heading 的 compass 却普遍提升 locomotion，可查询物体/距离的 cursor 将 Mythos Preview 在 10-task manipulation subset 的成功率从 6% 提到 32%。</p>
+          <p><strong>机制：</strong>更多像素增加的是高熵观察；heading/cursor 提供的是和控制直接对齐的低熵 state estimate。当前模型缺的常常不是“再看一张图”，而是稳定的坐标系与可校准的几何查询。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/claude-robotics/perception-aids.png" alt="不同感知辅助工具对高层 locomotion 的影响">
+            <figcaption>Compass 是最稳定的增益项；第三视角只对更新模型明显有用，说明 perception aid 与模型能力之间存在交互效应。</figcaption>
+          </figure>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/claude-robotics/manipulation-vision-tools.png" alt="RGB 深度分割和 cursor 对机械臂操作成功率的影响">
+            <figcaption>Cursor 的收益远高于被动 depth/segmentation overlay。可交互测量工具比稠密但难解析的视觉提示更适合当前 VLM。</figcaption>
+          </figure>
+
+          <h3>3.4 区分短期纠错与长期 embodied learning</h3>
+          <p>新模型的主要收益来自 retry 后改策略，而不是第一次尝试更强。但删除大部分历史通常不降性能，甚至因为 context rot 而上升。简单 one-shot course 能靠少量示例记住特定 sequence；更长路线即使练习 20 次仍全部失败。</p>
+          <p><strong>结论：</strong>这里观测到的是 recent-context adaptation，不是持久 world model、地图记忆或跨 episode policy learning。</p>
+        </section>
+
+        <section class="article-section" id="train-infer">
+          <h2>4. “训练”与执行流程：Claude 没有做机器人 post-training <a class="heading-anchor" href="#train-infer">#</a></h2>
+          <h3>4.1 Direct / programmatic execution</h3>
+          <ol>
+            <li>固定 prompt template，填入关节数、质量、force limit、observation fields 与任务。</li>
+            <li>Direct 模式逐步输出数值动作；code 模式生成 <code>controller(obs) -&gt; action</code>。</li>
+            <li>Classic control 与 locomotion 在 LLM 调用时暂停 MuJoCo，再恢复执行。</li>
+            <li>Manipulation 不暂停：每个 movement 后返回 RGB 与 gripper force，模型再输出 7D end-effector command。</li>
+          </ol>
+          <p>腿式机器人真实低层循环约需 83 Hz，非 reasoning API 只有约 0.2–0.4 Hz。频率差为：</p>
+          <div class="math-block">$$
+            \rho_f=\frac{f_{control}}{f_{LLM}}
+            \approx \frac{83}{0.2\sim0.4}=208\sim415.
+          $$</div>
+          <p>因此 paused simulation 不是小优化，而是改变了系统因果时间。结果只能回答“如果推理快两个数量级，动作选择是否合理”。</p>
+
+          <h3>4.2 Model-designed RL</h3>
+          <p>LLM 可定义 reward、最多 200K 参数的 policy network 和 training schedule，再调用 GPU batched MuJoCo 中的 PPO。默认：32 个并行环境、rollout 256、batch 64、4 epochs、$gamma=0.99$、GAE $lambda=0.95$、clip 0.2、learning rate $3\times10^{-4}$、entropy 0.01、value coefficient 0.5、gradient clip 0.5。Classic control 限时 1.5 小时，Go2/G1 限时 4 小时。</p>
+          <p>这里真正被训练的是小型 PPO policy，不是 Claude。Claude 是 AutoRL designer。</p>
+
+          <h3>4.3 High-level policy execution</h3>
+          <div class="code-block"><pre><code>Locomotion:
+RGB_t + history + goal
+  → LLM → [v_x, v_y, yaw_rate]
+  → pretrained gait policy → joint commands
+
+Manipulation:
+RGB_t + force_t + instruction + MolmoAct proposal
+  → LLM supervisor → accept / edit / replace
+  → 7D Panda action → next observation</code></pre></div>
+          <figure class="note-figure">
+            <img src="../assets/claude-robotics/libero-direct-demo.gif" alt="Claude 在模拟 LIBERO 场景中直接控制 Franka Panda">
+            <figcaption>官方 direct-manipulation 演示。单次成功说明模型偶尔能闭环完成任务，不代表高成功率；总体 full-task success 仅 0–5.5%。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section" id="formulas">
+          <h2>5. 关键公式与实现对象 <a class="heading-anchor" href="#formulas">#</a></h2>
+          <h3>5.1 闭环 direct control</h3>
+          <div class="math-block">$$
+            a_t=M_\theta(c,o_t,h_t),\qquad
+            s_{t+1}=\mathcal{T}(s_t,a_t),\qquad
+            o_{t+1}=\mathcal{O}(s_{t+1}).
+          $$</div>
+          <p>$c$ 是任务与机器人说明，$h_t$ 是保留在 context 中的交互历史。对 Go2/G1，$a_t$ 可为关节 torque/force；对 Panda，$a_t\in\mathbb{R}^7$ 是 end-effector motion。paused simulation 相当于让 wall-clock latency 不进入 $\mathcal{T}$。</p>
+
+          <h3>5.2 Programmatic controller</h3>
+          <div class="math-block">$$
+            \phi=M_\theta(c,\mathcal{D}_{API}),\qquad a_t=\pi_\phi(o_t).
+          $$</div>
+          <p>LLM 只在外环生成参数/代码 $phi$，本地函数 $\pi_\phi$ 在内环高频运行。这解释了 programmatic control 为什么通常远胜逐步 token action：语言模型负责 synthesis，不承担 servo bandwidth。</p>
+
+          <h3>5.3 VLA follow 与 intervention</h3>
+          <div class="math-block">$$
+            \mathrm{FollowRate}=\frac{1}{T}\sum_{t=1}^{T}
+            \mathbf{1}[a_t=a_t^{VLA}].
+          $$</div>
+          <p>官方要求完整 7D action 精确相同才算 follow。这个指标能测 override 频率，却不能判断 override 是否正确；需要额外统计 beneficial intervention 与 harmful intervention。</p>
+
+          <h3>5.4 PPO objective</h3>
+          <div class="math-block">$$
+            L^{clip}(\phi)=\mathbb{E}_t\left[
+            \min\left(r_t(\phi)\hat A_t,
+            \operatorname{clip}(r_t(\phi),1-\epsilon,1+\epsilon)\hat A_t\right)
+            \right],\quad \epsilon=0.2.
+          $$</div>
+          <p>LLM 决定 reward 与 policy design，<code>train_ppo_batched</code> 执行优化。实验因此混合了“模型能否设计训练问题”和“PPO 在给定预算内能否学会”的效果。</p>
+        </section>
+
+        <section class="article-section" id="alignment">
+          <h2>6. 评测与真实部署对齐检查 <a class="heading-anchor" href="#alignment">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>项目</th><th>评测设置</th><th>真实部署差异</th><th>影响</th></tr></thead>
+            <tbody>
+              <tr><td>Latency</td><td>direct/code 仿真暂停等待 API</td><td>physics 与障碍物不会等模型</td><td>严重高估腿式低层控制可部署性</td></tr>
+              <tr><td>Observation</td><td>每 turn 1 张 JPEG；历史图全部保留</td><td>真实系统常用连续视频与 state estimator</td><td>时序运动信息不足，context 快速膨胀</td></tr>
+              <tr><td>Reset</td><td>平衡尝试间重置；许多模型首试不稳</td><td>真机跌倒有成本且 initial state 更复杂</td><td>best-of-retries 不等于 robust policy</td></tr>
+              <tr><td>Action</td><td>Panda 使用简化 7D end-effector command</td><td>底层 IK、碰撞和伺服器承担部分难度</td><td>“direct”仍不是 raw joint torque</td></tr>
+              <tr><td>Reasoning</td><td>provider 间 reasoning mode 不完全等价</td><td>延迟、token budget 与闭环频率耦合</td><td>跨模型比较存在 compute confound</td></tr>
+              <tr><td>Memory</td><td>保留 first 10 + recent $N$ turns</td><td>部署需要地图、状态摘要与持久记忆</td><td>结果只证明短上下文适应</td></tr>
+            </tbody>
+          </table>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/claude-robotics/context-truncation.png" alt="LIBERO 任务在不同上下文截断方式下的结果">
+            <figcaption>大幅删除历史通常没有显著伤害，部分模型反而提升。不能据此声称模型建立了长期 embodied memory。</figcaption>
+          </figure>
+          <p><strong>【不确定】真实 Go2 的安全层：</strong>文章描述研究者会在危险时停止机器人，但未写清 speed cap、collision monitor、emergency stop policy 和 low-level controller 版本。可能是人工遥控急停、厂商 gait safety 或额外 watchdog；需等代码与 hardware protocol 才能验证。</p>
+        </section>
+
+        <section class="article-section" id="experiments">
+          <h2>7. 实验复盘：最有价值的是负结果 <a class="heading-anchor" href="#experiments">#</a></h2>
+          <h3>7.1 结果到底说明了什么</h3>
+          <ul>
+            <li><strong>Classic control：</strong>新模型主要在后续尝试中拉开差距；写 Python controller 普遍优于让模型自己组织 RL。</li>
+            <li><strong>Low-level locomotion：</strong>Go2 有有限进展；所有模型都无法让倒地 G1 成功站起。需要约 83 Hz 的系统却由 0.2–0.4 Hz API 做动作选择。</li>
+            <li><strong>Direct manipulation：</strong>reach、touch、grasp 等 subgoal 在进步，但 full success 最高仅 5.5%。</li>
+            <li><strong>High-level locomotion：</strong>预训练 gait policy 后能做简单导航；持续定位、遮挡重规划与长 open-loop plan 仍失败。</li>
+            <li><strong>VLA supervision：</strong>熟悉任务上 supervisor 仍拖累 MolmoAct；MolmoAct 自身失败的 3 个 novel tasks 上，强模型有小幅净增益。</li>
+            <li><strong>Reasoning：</strong>多数差异在 standard error 内，额外 reasoning 经常无效或负向。反应式控制不是把 thinking budget 调高就能解决。</li>
+          </ul>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/claude-robotics/go2-direct-control.png" alt="多个模型直接控制 Go2 的结果">
+            <figcaption>直接控制 Go2 的结果噪声较大且任务范围有限。代码控制的改善不能被解释为 LLM 已掌握通用 whole-body control。</figcaption>
+          </figure>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/claude-robotics/libero-direct-results.png" alt="多个模型在 LIBERO direct manipulation 上的成功率">
+            <figcaption>Direct manipulation 的绝对成功率仍很低。展示 touch/grasp progress 是合理的，但不能用局部进展替代 end-to-end reliability。</figcaption>
+          </figure>
+          <figure class="note-figure">
+            <img src="../assets/claude-robotics/high-level-locomotion.png" alt="不同模型和 reasoning 配置的高层 locomotion 综合分数">
+            <figcaption>高层 locomotion 随模型代际总体提升，但 Opus 4.5–4.7 的 plateau 掩盖了任务级 failure mode 迁移。</figcaption>
+          </figure>
+
+          <h3>7.2 公平性与 confound</h3>
+          <ul>
+            <li>大多数 cell 为 35 trials；LIBERO-40 为 40 tasks × 5 seeds，共 200；high-level locomotion 每条件 100。真实 Go2 只是无法高 N 的 vignette。</li>
+            <li>每个 interface 使用同一 prompt template，没有逐模型调参，这是优点；但 Anthropic Agent SDK、OpenRouter、Gemini adapter 和 reasoning semantics 并不相同。</li>
+            <li>TwinFlipper 用来降低 pretraining contamination，但其“模型从未见过”的结论无法被严格验证。</li>
+            <li>Composite 是跨任务归一化平均并按 interface 堆叠，而且排除 high-level locomotion；一个总数无法反映 robustness 或 physical risk。</li>
+            <li>MolmoAct novel test 只有 3 tasks × 12 seeds。它适合说明趋势，不足以证明通用 OOD correction。</li>
+          </ul>
+
+          <h3>7.3 真机证据</h3>
+          <p>实体 Go2 的失败很具体：把玻璃门中的目标反射当成真实目标、误判垃圾桶与 crosshair 的相对位置、在走廊转弯时错误相信自己已经完成转向。所有模型都没能仅靠视觉绕办公室一圈。这些案例支持“state estimation 与 spatial memory 是瓶颈”，但没有统计功效，不能用于模型排名。</p>
+        </section>
+
+        <section class="article-section" id="reproduce">
+          <h2>8. 可复现清单 <a class="heading-anchor" href="#reproduce">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>模块</th><th>已披露</th><th>仍缺失/风险</th></tr></thead>
+            <tbody>
+              <tr><td>Models</td><td>12 models、provider、adapter 与 reasoning 设置</td><td>API snapshot、temperature、完整 decoding 参数</td></tr>
+              <tr><td>Prompts</td><td>固定 template，填 robot/task fields</td><td>完整 system prompt 尚需代码仓库</td></tr>
+              <tr><td>Trials</td><td>35/50/200/36/100 等 cell counts</td><td>seed list、failure retry 和 timeout 细则</td></tr>
+              <tr><td>Simulation</td><td>MuJoCo、OSMesa、CPU/GPU 资源</td><td>MuJoCo version、XML、controller gains</td></tr>
+              <tr><td>RL</td><td>PPO defaults、32 envs、200K policy cap</td><td>reward templates、model-generated architecture 记录</td></tr>
+              <tr><td>Vision</td><td>每 turn 1 JPEG、prior frames retained、tool flags</td><td>resolution、JPEG quality、camera intrinsics/extrinsics</td></tr>
+              <tr><td>Metrics</td><td>正文描述 success/progress/composite</td><td><code>METRICS.md</code> 尚不可访问</td></tr>
+              <tr><td>Commands</td><td>计划发布 <code>EXPERIMENTS.md</code></td><td>仓库截至 2026-07-23 仍为 404</td></tr>
+            </tbody>
+          </table>
+          <p><strong>复现顺序：</strong>先做 Pendulum direct/code 验证 adapter 与 pause 语义；再做 TwinFlipper 检查 retry learning；然后复现 LIBERO direct 与 MolmoAct-only baseline；最后加入 supervisor，分别统计 follow、beneficial override、harmful override。不要先追 composite。</p>
+          <p><strong>【不确定】模型可用性：</strong>Claude Mythos Preview、Opus 4.7 等版本是否对外提供固定 snapshot、能否长期复现，原文没有保证。可选做法是保存完整 API response、model identifier 与日期，或在代码发布后使用作者缓存的 trajectory。</p>
+        </section>
+
+        <section class="article-section" id="improvements">
+          <h2>9. 可能的改进方向 <a class="heading-anchor" href="#improvements">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr></thead>
+            <tbody>
+              <tr><td>LLM 输出 subgoal，MPC/VLA 高频执行</td><td>匹配模型与控制时间尺度</td><td>subgoal 不可达或语义漂移</td><td>固定底层 policy，对比 torque、velocity、subgoal 三层接口</td></tr>
+              <tr><td>显式 pose/map belief state</td><td>改善 return_home、maze、drift detection</td><td>state estimator 错误会被模型过度信任</td><td>oracle pose、learned pose、纯 RGB 三组消融</td></tr>
+              <tr><td>训练 selective VLA intervention head</td><td>减少熟悉任务上的 harmful override</td><td>可能退化为永远 defer</td><td>分别报告 coverage、risk、beneficial/harmful intervention</td></tr>
+              <tr><td>episode memory 压缩为 state/event graph</td><td>减少 context rot，保留失败因果</td><td>摘要丢掉接触细节</td><td>full context、recent window、learned memory 对比</td></tr>
+              <tr><td>异步双环架构</td><td>低层 50–500 Hz，LLM 0.1–2 Hz 仍可部署</td><td>高层命令滞后</td><td>引入真实 wall-clock 与动态障碍，测 deadline miss</td></tr>
+              <tr><td>真机安全 capability envelope</td><td>把 access level 纳入部署许可</td><td>限制过强导致任务无法完成</td><td>按区域、对象、速度、力矩逐级开放并测风险事件</td></tr>
+            </tbody>
+          </table>
+          <p class="insight"><strong>可迁移设计：</strong>不要把 LLM 当作另一个 action head。先决定它应该控制哪一个 abstraction level，再设计 observation contract、intervention policy 与 safety boundary。</p>
+        </section>
+
+        <section class="article-section" id="card">
+          <h2>10. 速读备忘卡 <a class="heading-anchor" href="#card">#</a></h2>
+          <ul class="takeaway-list">
+            <li>这是一套 Embody capability benchmark，不是新 VLA。</li>
+            <li>Claude 没做机器人 post-training；PPO policy 才被现场训练。</li>
+            <li>四种接口是 direct、programmatic、RL supervision、policy control。</li>
+            <li>同一模型的表现高度依赖 robot body 与 action abstraction。</li>
+            <li>腿式低层控制需约 83 Hz，API 仅约 0.2–0.4 Hz。</li>
+            <li>暂停仿真给出 latency-free upper bound，不代表可实时部署。</li>
+            <li>Panda direct action 是 7D end-effector command，不是 raw torque。</li>
+            <li>Direct LIBERO full success 只有 0–5.5%，subgoal progress 更明显。</li>
+            <li>MolmoAct 大幅增能，但熟悉任务上 LLM supervisor 仍会拖累它。</li>
+            <li>Compass 与 cursor 比 depth/segmentation overlay 更有效。</li>
+            <li>额外 reasoning 多数无显著收益，有时妨碍反应式控制。</li>
+            <li>模型能从最近失败中调整，但没有可靠长期 spatial memory。</li>
+            <li>实体 Go2 实验暴露反射、障碍误判和自定位失败。</li>
+            <li>评测机器人 agent 时，access level 必须与 model 一起报告。</li>
+            <li>截至 2026-07-23，承诺的 Embody 公开仓库仍未上线。</li>
+          </ul>
+          <p class="insight">一句话记忆：<strong>Claude 现在更像机器人系统的低频认知层，不是高频控制层；机器人能力的开关在 interface。</strong></p>
+        </section>
+
+        <footer class="article-footer">
+          <p>资料：<a href="https://www.anthropic.com/research/claude-plays-robotics">Anthropic research article</a> · <a href="https://github.com/safety-research/embody">Embody repository（待发布）</a> · 官方文章图表与 appendix</p>
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+        </footer>
+      </article>
+    </main>
+  </body>
+</html>
