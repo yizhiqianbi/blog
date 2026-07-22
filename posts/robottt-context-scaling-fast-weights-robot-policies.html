@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="RoboTTT 深度解读：在 GR00T N1.7 的 DiT action head 中加入 Test-Time Training fast weights，以 sequence action forcing 和 TBPTT 扩展到 8K 步机器人上下文，并实现 one-shot human-video imitation、在线纠错和长程双臂装配。">
+    <title>RoboTTT：把 8K 步机器人历史压进 Fast Weights</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260717a">
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script type="application/json" id="paper-metadata">
+      {
+        "title": "RoboTTT：把 8K 步机器人历史压进 Fast Weights",
+        "paper": "https://arxiv.org/pdf/2607.15275",
+        "project": "https://research.nvidia.com/labs/gear/robottt/",
+        "repository": null,
+        "parent_file": "index.html",
+        "remix_prompt": "同样处理 RoboTTT: Context Scaling for Robot Policies",
+        "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+        "authors": ["Yunfan Jiang", "Yevgen Chebotar", "Ruijie Zheng", "Fengyuan Hu", "Yunhao Ge", "Jimmy Wu", "Tianyuan Dai", "Scott Reed", "Li Fei-Fei", "Yuke Zhu", "Linxi Jim Fan"],
+        "date": "2026-07-23",
+        "paper_date": "2026-07-16",
+        "category": "robotics-world-models",
+        "tags": ["robottt", "test-time-training", "fast-weights", "long-context-policy", "context-scaling", "groot-n1.7", "flow-matching-policy", "sequence-action-forcing", "tbptt", "dagger-distillation", "one-shot-imitation", "human-video", "bimanual-manipulation", "task-progress"],
+        "systems": ["RoboTTT", "GR00T N1.7", "Eagle VLM", "DiT action head", "TTT-KVB", "Gated DeltaNet", "YAM bimanual robot"],
+        "datasets": ["tabletop bimanual robot mixture", "egocentric human video mixture", "Pup Go Car", "Circuit", "Gear Bot", "DAgger correction trajectories"],
+        "methods": ["Test-Time Training", "fast-weight recurrence", "key-value binding loss", "sequence action forcing", "truncated backpropagation through time", "flow matching", "register tokens", "tanh residual gating", "DAgger Distillation", "masked context loss", "one-shot in-context imitation"],
+        "code": "No official code repository is linked from the paper or project page as of 2026-07-23. The paper discloses architecture, training schedules, optimizer settings, task rubrics and deployment hardware, but exact TTT minibatch construction, TBPTT segment length, denoising-step count, action chunk size, data-mixture composition and implementation cannot yet be audited.",
+        "related_posts": ["posts/qwen-robotworld-language-conditioned-world-model.html", "posts/qwen-robotmanip-alignment-unlocks-scale.html", "posts/egowam-world-representation-human-robot-transfer.html", "posts/procvlm-procedure-aware-progress-vlm.html", "posts/mint-intent-token-robot-manipulation.html", "posts/claude-plays-robotics-embody-benchmark.html", "posts/cosmos3-edge-on-device-world-action-model.html"],
+        "graph_nodes": ["RoboTTT", "GR00T N1.7", "TTT layer", "fast weights", "slow weights", "TTT-KVB", "sequence action forcing", "TBPTT", "register token", "DAgger Distillation", "human video context", "task progress", "Gated DeltaNet", "Pup Go Car", "Circuit", "Gear Bot", "YAM bimanual robot"],
+        "graph_edges": [
+          "RoboTTT -> extends -> GR00T N1.7",
+          "RoboTTT -> inserts -> TTT layer",
+          "TTT layer -> carries -> fast weights",
+          "fast weights -> compress -> visuomotor history",
+          "TTT-KVB -> updates -> fast weights",
+          "sequence action forcing -> stabilizes -> sequence flow matching",
+          "TBPTT -> enables -> 8K timestep training",
+          "register token -> carries -> visual information across time",
+          "DAgger Distillation -> maps -> failures to corrections",
+          "human video context -> conditions -> one-shot imitation",
+          "RoboTTT -> tracks -> task progress",
+          "RoboTTT -> compared_with -> Gated DeltaNet",
+          "RoboTTT -> deployed_on -> YAM bimanual robot",
+          "RoboTTT -> evaluates_on -> Pup Go Car",
+          "RoboTTT -> evaluates_on -> Circuit",
+          "RoboTTT -> evaluates_on -> Gear Bot"
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#core">Insight</a>
+        <a href="#method">Method</a>
+        <a href="#experiments">Experiments</a>
+      </nav>
+    </header>
+
+    <main class="article-shell" id="top">
+      <article>
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+          <p class="kicker">Technical Deep Dive · Long-Context Policy · Fast Weights</p>
+          <h1>RoboTTT：把 8K 步机器人历史压进 Fast Weights</h1>
+          <p class="article-dek">RoboTTT 不把五分钟历史留在 KV cache，也不把它压成一个普通 RNN vector。它在 GR00T N1.7 的每层 DiT action block 后插入可在部署时做梯度下降的 MLP：历史被连续写入 fast weights，当前动作再从这组权重中读取。训练侧用 sequence action forcing 稳定长序列 flow matching，用 TBPTT 把显存从总长度中解耦。</p>
+          <div class="article-meta">
+            <span>2026.07.23</span>
+            <span>分类：robotics-world-models</span>
+            <span>arXiv：2607.15275</span>
+            <a href="https://arxiv.org/pdf/2607.15275">Paper</a>
+            <a href="https://research.nvidia.com/labs/gear/robottt/">Project</a>
+          </div>
+        </header>
+
+        <section class="article-section" id="core">
+          <h2>0. 一句话结论 <a class="heading-anchor" href="#core">#</a></h2>
+          <blockquote>
+            <p>RoboTTT 解决机器人 policy 无法经济地利用数千步视觉动作历史的问题：它把 TTT fast weights 作为递归状态，用部署时梯度更新压缩 8K 步上下文，并配合 sequence action forcing、TBPTT 与 DAgger Distillation；真实双臂装配平均完成分从 42% 提到 79%，代价是训练昂贵、在线要反向传播、历史被不可解释地写入权重，且代码尚未公开。</p>
+          </blockquote>
+          <p class="insight"><strong>核心 insight：</strong>RoboTTT 的 context 不是“可回看的 8K 帧”，而是“被梯度写进参数空间的 8K 步经验”。它把 long-context policy 写成：</p>
+          <div class="math-block">$$
+            W_t=U_\psi(W_{t-1},x_t),\qquad
+            A_t=\pi_\theta(o_t,q_t,l;W_t),
+          $$</div>
+          <p>$W_t$ 是 rollout 内持续变化的 fast weights；模型不会重新 attend 全部历史，只能通过 $W_t$ 取回过去留下的压缩信息。其优势是每步计算不随历史长度增长，风险是遗忘、覆盖与错误写入都更难检查。</p>
+          <figure class="note-figure">
+            <img src="../assets/robottt/overview.png" alt="RoboTTT 论文总览图：长程装配、one-shot imitation、在线改进和扰动恢复">
+            <figcaption>RoboTTT 的四类结果：五分钟装配、单个人类视频条件模仿、失败后在线纠错、部件被移除后的阶段回退。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section" id="positioning">
+          <h2>1. 论文定位：把 context length 变成机器人 policy 的 scaling axis <a class="heading-anchor" href="#positioning">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>方法</th><th>历史表示</th><th>每步随历史增长</th><th>主要问题</th></tr></thead>
+            <tbody>
+              <tr><td>Single-step VLA</td><td>只有当前观测</td><td>否</td><td>state aliasing、无阶段记忆</td></tr>
+              <tr><td>History concatenation</td><td>拼接少量旧帧</td><td>是/窗口固定</td><td>时序 OOD、噪声相关</td></tr>
+              <tr><td>Transformer + KV cache</td><td>保留全部 K/V</td><td>内存线性，decode attention 线性</td><td>8K 视觉动作流成本过高</td></tr>
+              <tr><td>GDN / recurrent state</td><td>固定尺寸向量/矩阵状态</td><td>否</td><td>线性 update 容量有限</td></tr>
+              <tr><td>RoboTTT</td><td>两层 MLP 的 fast weights</td><td>对历史长度为常数</td><td>每步需要内层梯度更新</td></tr>
+            </tbody>
+          </table>
+          <p>它不是 world model：没有显式预测未来图像或状态。它也不是传统 test-time adaptation：不是用 entropy 等无监督目标临时校准 domain shift。RoboTTT 将 test-time gradient descent 本身定义为序列记忆的 update rule，并在外层 imitation loss 中元学习该 update rule。</p>
+          <p>论文把它实例化在 <strong>GR00T N1.7</strong> 上，但贡献单位是 action head 的 temporal module，因此理论上可嵌入其他 flow/diffusion VLA。现有证据只覆盖该 backbone 与 YAM 双臂平台，“plug-and-play”仍是设计主张而非跨架构实证。</p>
+        </section>
+
+        <section class="article-section" id="method">
+          <h2>2. 方法总览：空间内 attention，时间上 TTT <a class="heading-anchor" href="#method">#</a></h2>
+          <div class="code-block"><pre><code>At timestep t:
+language l + four RGB views o_t
+  → frozen/encoded Eagle VLM tokens Φ_t
+proprioception q_t → state token
+noised H-step action chunk Ã_t → action tokens
+16 learned registers R_t gather visual information
+  → GR00T DiT self-attention + cross-attention, within timestep t
+  → flatten [R_t, q_t, Ã_t] across time
+  → TTT MLP fast-weight update, across timesteps
+  → tanh-gated residual back to DiT stream
+  → flow-matching action velocity → denoised chunk A_t</code></pre></div>
+          <p>每个 timestep 的 token 是 $[R_t, q_t, \tilde A_t]$，其中 $R_t$ 有 16 个 register，$q_t$ 是 proprioception token，$\tilde A_t$ 是加噪 action-chunk tokens。VL tokens $\Phi_t$ 只参与该步 cross-attention，不直接进入 TTT，避免大量视觉 patch 跨时间更新；register 充当视觉信息的窄通道。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/robottt/architecture.png" alt="RoboTTT 的 sequence training 与 inference 架构">
+            <figcaption>训练把多个 timestep 展平后分 mini-batch 更新 fast weights；推理从 learned $W_0$ 出发，每步 update 后将 $W_t$ 传给下一步。attention 处理步内多模态关系，TTT 处理步间历史。</figcaption>
+          </figure>
+          <table class="data-table">
+            <thead><tr><th>组件</th><th>论文配置</th><th>作用</th></tr></thead>
+            <tbody>
+              <tr><td>Base policy</td><td>GR00T N1.7：Eagle VLM + 16-layer DiT</td><td>当前观测理解与 action flow matching</td></tr>
+              <tr><td>TTT layers</td><td>每个 DiT layer 后 1 层，共 16 层</td><td>跨时间 fast-weight recurrence</td></tr>
+              <tr><td>Fast model</td><td>2-layer MLP + GeLU，约 10M/layer</td><td>比线性状态更高容量的历史压缩器</td></tr>
+              <tr><td>Parameters</td><td>DiT 538M → action head 总计约 690M</td><td>新增约 152M sequence parameters</td></tr>
+              <tr><td>Inner update</td><td>standard GD，base LR 0.1 + learned LR</td><td>部署时写入 fast weights</td></tr>
+              <tr><td>Gate</td><td>$\alpha_0=0.001$，逐维 tanh gate</td><td>初始近似保留 pretrained VLA</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="innovations">
+          <h2>3. 关键创新点 <a class="heading-anchor" href="#innovations">#</a></h2>
+
+          <h3>3.1 Fast weights 是可学习的递归记忆</h3>
+          <p><strong>旧方法为什么不行：</strong>KV cache 精确但成本随长度增长；普通 RNN state 固定但容量与 update rule 受限，难从高度重复的机器人视频流里筛出阶段、遮挡前物体状态和失败原因。</p>
+          <p><strong>它怎么改：</strong>用一个小 MLP $f_W$ 的参数 $W$ 当 hidden state。每来一个 token，先用 key-value binding loss 对 $W$ 做一步梯度下降，再用更新后的 MLP 查询输出。</p>
+          <p><strong>为什么有效：</strong>梯度更新提供非线性、内容依赖的写入规则；外层 task gradient 共同学习 Q/K/V 投影、初始值 $W_0$ 和 learning rate，使“记什么、怎么写、怎么读”由机器人动作损失决定。</p>
+          <p><strong>代价/限制：</strong>每个 control step、每个 TTT layer 都需要 inner-loop gradient；固定尺寸并不等于无限信息容量。论文没有报告 latency/显存相对 GR00T 的数字。</p>
+
+          <h3>3.2 Sequence action forcing 稳定长序列 flow matching</h3>
+          <p><strong>旧方法为什么不行：</strong>若整个长序列共享同一 diffusion/flow noise level，该序列会整体过易或整体过难，loss 与 fast-weight update 的条件高度相关，训练容易失稳。</p>
+          <p><strong>它怎么改：</strong>每个 action chunk 独立采样 $\tau_t$。于是一个 sequence 同时包含不同难度的 denoising target，类似 action 版 teacher forcing，但“forcing”的是 chunk-wise noise schedule。</p>
+          <p><strong>证据：</strong>去掉该设计后真实闭环几乎无法取得有效进展，是最强消融之一。</p>
+
+          <h3>3.3 TBPTT 让训练长度和显存解耦</h3>
+          <p>序列被切为若干 segment。segment 内保留 outer gradient；边界处 $W$ 继续向前传，但执行 <code>detach</code>。因此：</p>
+          <div class="math-block">$$
+            \mathrm{Memory}_{train}=O(L_{seg}),\qquad
+            \mathrm{State}_{t+1}=\operatorname{stopgrad}(W_t)
+            \text{ at boundaries}.
+          $$</div>
+          <p><strong>有效机制：</strong>后段仍看到被前段写过的 fast weights，所以 forward context 可达 8K；但 credit assignment 只穿过局部 segment。</p>
+          <p><strong>隐藏代价：</strong>$W_0$ 只从第一个 segment 接收直接梯度，早期写入对五分钟后动作的长期因果贡献被截断。论文没有披露 segment length，这是复现关键缺口。</p>
+
+          <h3>3.4 Loss masking 把任何时序变成“纯上下文”</h3>
+          <p>RoboTTT 将“更新 fast weights”和“产生 imitation loss”解耦。人类视频没有机器人 action target，仍可更新 $W$；DAgger 中失败动作不应被模仿，也可作为 context 更新 $W$。</p>
+          <p>这统一出两种能力：</p>
+          <ul>
+            <li><strong>Human video one-shot：</strong>视频段只写记忆，随后 robot 段计算 action loss，目标构型只能从视频中读取。</li>
+            <li><strong>DAgger Distillation：</strong>失败轨迹写记忆，只有 human correction 计算 loss，学习的是 failure → correction 映射。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="train-infer">
+          <h2>4. 训练与推理流程 <a class="heading-anchor" href="#train-infer">#</a></h2>
+          <h3>4.1 Pretraining</h3>
+          <ol>
+            <li>混合长轨迹 tabletop bimanual robot data 与 egocentric human video。</li>
+            <li>从短 context curriculum 逐步增加到目标长度，最长 8K timesteps。</li>
+            <li>冻结 GR00T N1.7 其他组件，只训练新增 TTT/GDN sequence layers。</li>
+            <li>16 张 GB200、30K steps；4K 以下 global batch 64，4K 以上降到 16。</li>
+            <li>AdamW，weight decay $10^{-5}$，WSD schedule，peak LR $2\times10^{-5}$。</li>
+          </ol>
+          <h3>4.2 Task post-training</h3>
+          <p>每个 downstream task 都在 1K context 下训练 20K steps、8 张 GB200、per-device batch 1；此阶段解冻所有参数，使用 cosine schedule 与 peak LR $5\times10^{-5}$。三项真机数据分别为 Pup Go Car 8 小时、Circuit 6 小时、Gear Bot 5 小时。</p>
+          <p>这里有一个重要设计：<strong>8K 是 pretraining context，downstream post-training 仍只有 1K</strong>。长程 update dynamics 从预训练迁移，任务数据不需要完整覆盖 8K training window。</p>
+          <h3>4.3 Inference</h3>
+          <div class="code-block"><pre><code>reset rollout: W ← learned W0
+for each 30 Hz policy timestep t:
+    encode four 480p RGB views + proprioception + instruction
+    for each of 16 DiT/TTT blocks:
+        run within-step attention
+        W_t ← W_{t-1} - η ∇W L_KVB
+        add tanh(α) · f_Wt(query)
+    denoise H-step action chunk with k flow steps
+    execute action(s)
+    carry W_t forward</code></pre></div>
+          <p>部署硬件为 RTX 5090，YAM 双臂机器人，四个 RealSense D405，480p，论文称控制频率 30 Hz。</p>
+          <p><strong>【不确定】</strong>论文未公开 action chunk $H$、flow denoising steps $k$、每次 inference 的 TTT token mini-batch 组织和 30 Hz 下 action chunk 的执行策略。合理可能是沿用 GR00T N1.7 默认配置、逐控制 tick 重规划，或 chunk 内只执行前若干步；必须由代码或补充配置验证。</p>
+        </section>
+
+        <section class="article-section" id="formulas">
+          <h2>5. 关键公式逐项拆解 <a class="heading-anchor" href="#formulas">#</a></h2>
+          <h3>5.1 TTT-KVB：先写，再读</h3>
+          <div class="math-block">$$
+            W_t=W_{t-1}-\eta\nabla_W
+            \left\|f_{W_{t-1}}(K_t)-V_t\right\|_2^2,
+            \qquad O_t=f_{W_t}(Q_t).
+          $$</div>
+          <p>$Q_t=X_t\theta_Q$、$K_t=X_t\theta_K$、$V_t=X_t\theta_V$；$X_t$ 来自跨时间展平的 register、state 与 action tokens。$W_t$ 不是 checkpoint slow weights，而是单个 rollout 的动态状态。$\eta$ 由常数 0.1 与 learned learning rate 共同构成。</p>
+
+          <h3>5.2 Tanh gate：避免新分支摧毁预训练能力</h3>
+          <div class="math-block">$$
+            O=O_{attn}+\tanh(\alpha)\odot O_{TTT},
+            \qquad \alpha_0=0.001.
+          $$</div>
+          <p>$\alpha\in\mathbb{R}^d$ 是逐 channel gate。初始 $\tanh(\alpha)\approx0$，网络近似原 GR00T；训练只在 TTT 有益的维度打开通路。</p>
+
+          <h3>5.3 Sequence flow-matching loss</h3>
+          <div class="math-block">$$
+            A_t^{\tau_t}=\tau_t A_t+(1-\tau_t)\epsilon_t,
+            \quad \epsilon_t\sim\mathcal N(0,I),
+          $$</div>
+          <div class="math-block">$$
+            \mathcal L_{fm}=\frac1T\sum_{t=1}^{T}
+            \mathbb E_{\tau_t,\epsilon_t}
+            \left\|v_\theta(\Phi_t,A_t^{\tau_t},q_t;W_{t-1})
+            -(A_t-\epsilon_t)\right\|_2^2.
+          $$</div>
+          <p>每个 $\tau_t=s(1-u_t)$ 独立采样，$u_t\sim\mathrm{Beta}(1.5,1)$、$s=0.999$。输出 target $A_t-\epsilon_t$ 是从 noise 指向 clean action 的 velocity。</p>
+
+          <h3>5.4 Masked context objective</h3>
+          <div class="math-block">$$
+            \mathcal L=\frac{1}{\sum_t m_t}\sum_t m_t\ell_t,
+            \qquad W_t=U(W_{t-1},x_t)\ \text{for all }t.
+          $$</div>
+          <p>$m_t=0$ 的人类视频或失败动作仍执行 fast-weight update，但不产生 imitation gradient；$m_t=1$ 的 robot target 或 human correction 同时写上下文并监督动作。这是 one-shot imitation 与 DAgger Distillation 共用的核心操作。</p>
+        </section>
+
+        <section class="article-section" id="alignment">
+          <h2>6. 训练与推理对齐检查 <a class="heading-anchor" href="#alignment">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>项目</th><th>训练</th><th>推理</th><th>风险</th></tr></thead>
+            <tbody>
+              <tr><td>Fast-weight update</td><td>每步 inner GD，并对局部 inner loop 求高阶梯度</td><td>每步 inner GD，无 outer update</td><td>数值漂移会随 rollout 累积</td></tr>
+              <tr><td>Context horizon</td><td>pretrain 最高 8K；post-train 1K</td><td>可运行超过 8K，但未验证</td><td>超出预训练 update 次数后分布外</td></tr>
+              <tr><td>Gradient horizon</td><td>TBPTT 只在 segment 内反传</td><td>fast weights 全程连续传播</td><td>forward memory 长，credit assignment 短</td></tr>
+              <tr><td>Action input</td><td>ground-truth action 加独立噪声</td><td>模型生成并执行的 action</td><td>错误 action 会写入后续 memory</td></tr>
+              <tr><td>Visual context</td><td>register token 代理视觉 patch</td><td>同样只让 register 跨时序</td><td>细粒度视觉细节可能在瓶颈中丢失</td></tr>
+              <tr><td>Reset</td><td>每条 sequence 从 $W_0$ 开始</td><td>每个 rollout 重置 $W_0$</td><td>不能跨 episode 持久学习</td></tr>
+              <tr><td>Human video</td><td>同任务 human-video/robot-trajectory pair</td><td>单段 unseen configuration 视频</td><td>依赖训练时学到跨 embodiment 对齐</td></tr>
+            </tbody>
+          </table>
+          <p>论文所说“inference latency 不增长”应读成<strong>相对于已处理历史长度的渐近常数</strong>，而不是“和 GR00T 一样快”。RoboTTT 无需越来越长的 attention，却额外执行 16 个 MLP 的 gradient update；论文没有报告 baseline latency、RTF 或显存，30 Hz 声明不足以量化开销。</p>
+        </section>
+
+        <section class="article-section" id="experiments">
+          <h2>7. 实验复盘：8K scaling 有说服力，但范围很集中 <a class="heading-anchor" href="#experiments">#</a></h2>
+          <h3>7.1 主结果</h3>
+          <p>三项都是真实 YAM 双臂装配：Pup Go Car 平均约 2 分钟，Circuit 约 1 分钟，Gear Bot 约 5 分钟/10 stages。RoboTTT 平均 completion score 为 79%，GR00T N1.7 为 42%，相对提升 87%；GDN 为 56%。完整成功次数：</p>
+          <table class="data-table">
+            <thead><tr><th>方法</th><th>Pup Go Car</th><th>Circuit unseen</th><th>Gear Bot</th></tr></thead>
+            <tbody>
+              <tr><td>RoboTTT</td><td>9/20</td><td>13/20</td><td>2/10</td></tr>
+              <tr><td>GR00T N1.7</td><td>3/20</td><td>3/20</td><td>0/10</td></tr>
+              <tr><td>GR00T N1.7 Hist.</td><td>0/20</td><td>8/20</td><td>0/10</td></tr>
+              <tr><td>GDN</td><td>3/20</td><td>8/20</td><td>0/10</td></tr>
+            </tbody>
+          </table>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/robottt/main-results.png" alt="RoboTTT 在三项长程双臂装配上的主结果">
+            <figcaption>Completion score 是 task-specific rubric，不是 binary success。Gear Bot 只有 10 次测试，2 次成功说明出现了新能力，但置信区间仍很宽。</figcaption>
+          </figure>
+
+          <h3>7.2 Context scaling</h3>
+          <p>RoboTTT 从 128、256、512、1K、2K、4K 到 8K 的平均闭环分数总体持续增长；8K 为 71.5%，比 1K 的 43.9% 高 63%，比最佳短上下文 baseline 45.6% 高 57%。GDN 没有出现相同趋势。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/robottt/context-scaling.png" alt="RoboTTT 从 128 到 8K 预训练上下文的闭环性能曲线">
+            <figcaption>这是全文最关键的 scaling evidence。注意这些评测早于主结果 Pup Go Car 使用的 DAgger 数据，因此数值不能与主表直接混用。</figcaption>
+          </figure>
+
+          <h3>7.3 One-shot、扰动与在线恢复</h3>
+          <ul>
+            <li><strong>One-shot human video：</strong>Circuit unseen configuration，RoboTTT 65% completion、6/10 full success；GDN 33%、0/10。所有配置共享“assemble circuit”提示，目标只在视频中。</li>
+            <li><strong>Perturbation：</strong>装好后人为拆掉 roof/tire。RoboTTT 恢复 15/20、18/20；GDN 为 13/20、18/20。Tire 上两种长上下文方法持平，不能把所有收益都归因于 gradient update。</li>
+            <li><strong>DAgger Distillation：</strong>同一批 100 条 DAgger trajectories 下，correction-only 平均提升 9%，failure-as-context/correction-as-target 提升 33%。</li>
+          </ul>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/robottt/one-shot-imitation.png" alt="人类演示视频作为上下文后 RoboTTT 执行 Circuit 装配">
+            <figcaption>Human demonstration 只更新 fast weights，不提供 robot action supervision；reset 后模型从相同语言 prompt 中恢复视频指定的组件与顺序。</figcaption>
+          </figure>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/robottt/dagger-distillation.png" alt="DAgger Distillation 的定量结果与失败后恢复过程">
+            <figcaption>失败 action 的价值不是被模仿，而是给 correction 建立条件。该数据使用方式也提升 GDN，说明 DAgger Distillation 是独立于 TTT 的贡献。</figcaption>
+          </figure>
+
+          <h3>7.4 消融是否支撑结论</h3>
+          <p>MLP fast model 比 linear fast model 高 27%；加入 past action tokens 相对提升 23%，再加入 16 个 register tokens 提升 18%；只给 GR00T 加 register 不改善。这个 matched-token control 支持收益来自 register × temporal update 的交互，而非单纯增参。</p>
+          <figure class="note-figure">
+            <img src="../assets/robottt/ablation.png" alt="RoboTTT 对 sequence action forcing、MLP、action token 和 register token 的消融">
+            <figcaption>去掉 sequence action forcing 几乎失去闭环进展；MLP、action history 与 register 均有独立贡献。</figcaption>
+          </figure>
+
+          <h3>7.5 隐藏 confound</h3>
+          <ul>
+            <li>任务都来自一个 YAM 双臂平台、三类玩具装配，未验证跨机器人、移动操作或 deformable object。</li>
+            <li>8K 模型见过更多连续 context，但不同长度下 global batch 从 64 降到 16；论文没有给 token/样本预算完全匹配分析。</li>
+            <li>主结果 Pup Go Car 使用了 DAgger training，而 scaling curve 明确不使用；“87%”是完整 recipe 收益，不是纯 8K/TTT 收益。</li>
+            <li>completion score 是人工设计阶段 rubric；长任务自然会从阶段记忆获益，binary success 的样本数较小。</li>
+            <li>没有 Transformer long-window baseline、外部 episodic memory baseline，也没有 latency-matched recurrent baseline。</li>
+            <li>预训练数据规模与具体混合比例未披露，无法判断 human-video one-shot 的数据覆盖边界。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="reproduce">
+          <h2>8. 可复现清单 <a class="heading-anchor" href="#reproduce">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>模块</th><th>论文已写</th><th>仍需确认</th></tr></thead>
+            <tbody>
+              <tr><td>Backbone</td><td>GR00T N1.7，Eagle + 16-layer DiT</td><td>确切 checkpoint 与 action schema</td></tr>
+              <tr><td>TTT</td><td>每层 2-layer GeLU MLP，base LR 0.1</td><td>hidden width、normalization、gradient implementation</td></tr>
+              <tr><td>Tokens</td><td>16 registers + state + action，VL 不直接进 TTT</td><td>action token count、tensor layout</td></tr>
+              <tr><td>Flow</td><td>Beta(1.5,1)，scale 0.999，chunk 独立 $\tau$</td><td>chunk $H$、denoise steps $k$</td></tr>
+              <tr><td>TBPTT</td><td>carry state + detach boundary</td><td>segment length、minibatch order</td></tr>
+              <tr><td>Pretrain</td><td>30K steps、16×GB200、WSD、LR $2e{-5}$</td><td>数据总量、采样比例、curriculum schedule</td></tr>
+              <tr><td>Post-train</td><td>1K context、20K steps、8×GB200、LR $5e{-5}$</td><td>augmentation、EMA、flow sampling config</td></tr>
+              <tr><td>Deployment</td><td>RTX 5090、4×D405 480p、30 Hz</td><td>实测 latency、显存、action execution policy</td></tr>
+              <tr><td>Code</td><td>无公开仓库</td><td>全部实现与配置尚不可审计</td></tr>
+            </tbody>
+          </table>
+          <p><strong>最低成本复现路径：</strong>先在一个冻结 action DiT 后只插 1 层 TTT，使用 128/512/1K context 验证 loss 稳定性；再加入 per-chunk noise；最后才做 TBPTT 与 8K。必须同时记录 inner-gradient norm、$\|W_t-W_0\|$、gate magnitude、fast-weight reset 和 wall-clock latency。</p>
+          <p><strong>最容易踩的坑：</strong>不要在 rollout 间忘记 reset $W_0$；不要让 failed robot actions 进入 imitation target；不要把 TBPTT detach 误写成重置 fast weights；不要把相同 $\tau$ 广播到整条 sequence。</p>
+        </section>
+
+        <section class="article-section" id="improvements">
+          <h2>9. 可能的改进方向 <a class="heading-anchor" href="#improvements">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr></thead>
+            <tbody>
+              <tr><td>显式 progress/state token + fast weights</td><td>让阶段记忆可读、减少 aliasing</td><td>progress 标注或伪标签错误</td><td>Gear Bot 阶段 probe 与 intervention</td></tr>
+              <tr><td>分层快慢记忆：recent attention + TTT</td><td>保留精确近期接触，压缩远期历史</td><td>两种 memory 冲突</td><td>固定计算量比较 TTT-only/hybrid</td></tr>
+              <tr><td>不确定性门控 fast-weight write</td><td>避免错误动作污染记忆</td><td>过度保守导致不写新信息</td><td>人为注入错误 action，测恢复与遗忘</td></tr>
+              <tr><td>跨 episode persistent memory</td><td>从多次失败持续改善</td><td>安全、隐私与灾难性漂移</td><td>固定任务连续 20 episodes，周期性 reset 对照</td></tr>
+              <tr><td>更高效 inner optimizer / low-rank fast weights</td><td>降低在线 backward 开销</td><td>压缩后容量不足</td><td>同延迟比较 GD、Muon、LoRA-fast、GDN</td></tr>
+              <tr><td>world-model auxiliary objective</td><td>让 $W_t$ 编码可预测动力学而非仅 action</td><td>生成目标分散 policy capacity</td><td>加入 latent next-state loss，测 perturbation recovery</td></tr>
+            </tbody>
+          </table>
+          <p class="insight"><strong>对 task progress 建模的启发：</strong>RoboTTT 证明长历史能解决视觉相似阶段的 state aliasing，但 progress 被隐式藏在 MLP 权重里。更可控的版本应从 $W_t$ 解码 stage belief、completed predicates 与失败事件，让策略既有长记忆，也能被监督和调试。</p>
+        </section>
+
+        <section class="article-section" id="card">
+          <h2>10. 速读备忘卡 <a class="heading-anchor" href="#card">#</a></h2>
+          <ul class="takeaway-list">
+            <li>RoboTTT 是 GR00T N1.7 的 long-context action policy 扩展。</li>
+            <li>8K timesteps 约等于 30 Hz 下五分钟，不是 8K visual tokens。</li>
+            <li>历史不存 KV cache，而被 inner-loop gradient 写入 fast weights。</li>
+            <li>每个 16-layer DiT block 后加入一个 2-layer MLP TTT layer。</li>
+            <li>attention 做 timestep 内融合，TTT 做 timestep 间记忆。</li>
+            <li>16 个 register tokens 代理视觉信息进入跨时序模块。</li>
+            <li>tanh gate 从 0.001 开始，避免破坏 pretrained policy。</li>
+            <li>sequence action forcing 为每个 action chunk 独立采样 noise level。</li>
+            <li>TBPTT 跨 segment carry fast weights，但截断 gradient。</li>
+            <li>pretrain 到 8K，downstream post-train 仍只用 1K context。</li>
+            <li>平均 completion 79%，GR00T single-step 为 42%。</li>
+            <li>8K 比同模型 1K pretraining 高约 63%。</li>
+            <li>Human video 只写 context、不计算 action loss，实现 6/10 one-shot。</li>
+            <li>DAgger Distillation 把失败当 context、纠正当 target。</li>
+            <li>固定历史成本不等于零成本：每步仍需 16 层 test-time backward。</li>
+            <li>代码、TBPTT segment、action chunk 和 latency 尚未公开。</li>
+          </ul>
+          <p class="insight">一句话记忆：<strong>RoboTTT 把机器人的 rollout history 从 token space 搬到了 weight space。</strong></p>
+        </section>
+
+        <footer class="article-footer">
+          <p>资料：<a href="https://arxiv.org/pdf/2607.15275">Paper</a> · <a href="https://research.nvidia.com/labs/gear/robottt/">Project page</a> · NVIDIA GEAR / Stanford / UT Austin</p>
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+        </footer>
+      </article>
+    </main>
+  </body>
+</html>
