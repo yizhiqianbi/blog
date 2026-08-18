@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="AgentOPSD 深度解读：用 privileged self-teacher 的概率差构造 turn-level evidence，通过递归 Bayesian belief revision 对 GRPO advantage 做有界重加权，并核对论文公式、实验与开源代码。">
+    <title>AgentOPSD：用递归自蒸馏给长轨迹分配 turn-level credit</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260717a">
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script type="application/json" id="paper-metadata">
+      {
+        "title": "AgentOPSD：用递归自蒸馏给长轨迹分配 turn-level credit",
+        "paper": "https://arxiv.org/pdf/2608.05987v1",
+        "project": "https://arxiv.org/abs/2608.05987",
+        "repository": "https://github.com/ZethWang/AgentOPSD",
+        "parent_file": "index.html",
+        "remix_prompt": "https://arxiv.org/pdf/2608.05987v1 解读这篇论文；同样帮我写个报告推送",
+        "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+        "authors": ["Zi-Han Wang", "Zhengxi Lu", "Zhiyuan Yao", "Jinyang Wu", "Jie Wu", "Zhengzhou Cai", "Yueqing Sun", "Ziang Ye", "Linji Hao", "Qi Gu", "Xunliang Cai", "Yongliang Shen", "Yujiu Yang"],
+        "date": "2026-08-18",
+        "paper_date": "2026-08-06",
+        "category": "agents-systems",
+        "tags": ["agentopsd", "agentic-rl", "credit-assignment", "grpo", "on-policy-self-distillation", "privileged-teacher", "bayesian-belief", "turn-level-advantage", "long-horizon-agent", "alfworld", "webshop", "search-qa"],
+        "systems": ["AgentOPSD", "Qwen2.5-3B-Instruct", "Qwen2.5-7B-Instruct", "veRL", "verl-agent", "SkillRL SkillBank"],
+        "datasets": ["ALFWorld", "WebShop", "Natural Questions", "TriviaQA", "PopQA", "HotpotQA", "2Wiki", "MuSiQue", "Bamboogle"],
+        "methods": ["Group Relative Policy Optimization", "privileged on-policy self-distillation", "teacher-student log-probability gap", "turn-level evidence aggregation", "log-odds belief recursion", "bounded advantage reshaping", "keyword skill retrieval", "PPO clipping"],
+        "code": "The official repository is public and contains the veRL-based trainer, skill files, baselines and launch scripts. As checked on 2026-08-18, the paper states turn-level recursion and gamma=0.95 across environments, while the public WebShop/Search scripts select token granularity and omit belief_decay_gamma, whose code default is 1.0; Search also uses KL coefficient 0.001 instead of the paper table's 0.01. Reproduction should pin a commit and resolve these differences first.",
+        "related_posts": ["posts/unmasking-on-policy-distillation.html", "posts/learning-to-foresee-effopd.html", "posts/teaching-nitrogen-to-play-claude-tutor.html", "posts/prowl-regret-driven-world-model-learning.html", "posts/interaction-models-thinking-machines.html"],
+        "graph_nodes": ["AgentOPSD", "GRPO", "OPSD", "privileged self-teacher", "SkillRL SkillBank", "teacher-student gap", "turn evidence", "success belief", "belief revision", "bounded advantage reshaping", "ALFWorld", "WebShop", "Search-QA", "SDAR", "RLSD", "StepOPSD"],
+        "graph_edges": [
+          "AgentOPSD -> extends -> GRPO",
+          "AgentOPSD -> uses -> privileged self-teacher",
+          "privileged self-teacher -> conditioned_on -> SkillRL SkillBank",
+          "teacher-student gap -> aggregated_into -> turn evidence",
+          "turn evidence -> updates -> success belief",
+          "belief revision -> reshapes -> GRPO advantage",
+          "bounded advantage reshaping -> preserves_sign_of -> GRPO advantage",
+          "AgentOPSD -> compared_with -> SDAR",
+          "AgentOPSD -> compared_with -> RLSD",
+          "AgentOPSD -> compared_with -> StepOPSD",
+          "AgentOPSD -> evaluates_on -> ALFWorld",
+          "AgentOPSD -> evaluates_on -> WebShop",
+          "AgentOPSD -> evaluates_on -> Search-QA",
+          "Unmasking OPD -> analyzes -> teacher-student signal",
+          "AgentOPSD -> reuses_concept_from -> on-policy self-distillation"
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#core">Insight</a>
+        <a href="#method">Method</a>
+        <a href="#experiments">Experiments</a>
+      </nav>
+    </header>
+
+    <main class="article-shell" id="top">
+      <article>
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+          <p class="kicker">Technical Deep Dive · Agentic RL · Credit Assignment</p>
+          <h1>AgentOPSD：用递归自蒸馏给长轨迹分配 turn-level credit</h1>
+          <p class="article-dek">长时序 Agent 的失败往往由少数关键决策决定，但 GRPO 会把同一个终局 advantage 广播给整条轨迹。AgentOPSD 用一个训练期可见 skill 的 self-teacher 重新评分 student 已执行的动作，把概率差聚合成每轮 evidence，再通过递归 success belief 判断这一轮究竟改变了多少结果预期。它不是新 Agent 架构，而是一套保守的 advantage reshaping 方法。</p>
+          <div class="article-meta">
+            <span>2026.08.18</span>
+            <span>分类：agents-systems</span>
+            <span>arXiv：2608.05987v1</span>
+            <a href="https://arxiv.org/pdf/2608.05987v1">Paper</a>
+            <a href="https://github.com/ZethWang/AgentOPSD">Code</a>
+          </div>
+        </header>
+
+        <section class="article-section" id="core">
+          <h2>0. 一句话结论 <a class="heading-anchor" href="#core">#</a></h2>
+          <blockquote>
+            <p>AgentOPSD 解决长时序 Agent RL 中“整条轨迹只有一个 reward，无法判断哪一轮关键”的问题：它将带 privileged skill 的同模型教师与普通 student 的 log-probability gap 聚合为 turn evidence，递归更新一个 success belief，再用 belief revision 对 GRPO advantage 做有界重加权；无需 critic 或额外 rollout，但训练时要增加教师评分，且 credit 的可靠性取决于 skill-conditioned teacher 是否真的更接近成功策略。</p>
+          </blockquote>
+          <p class="insight"><strong>核心 insight：</strong>一个 turn 的 credit 不应该只由它自己的局部 signal 决定，而应该由它让“最终会成功”的当前判断改变了多少决定。AgentOPSD 的贡献不是创造更强 teacher，而是把 teacher signal 从局部概率差改造成历史相关、环境 turn 对齐的权重。</p>
+          <div class="code-block"><pre><code>terminal verifier reward
+ privileged self-teacher gap
+ recursive history state
+ bounded multiplier
+= turn-aware GRPO update</code></pre></div>
+        </section>
+
+        <section class="article-section" id="positioning">
+          <h2>1. 论文定位：它改的是 credit assignment，不是 Agent backbone <a class="heading-anchor" href="#positioning">#</a></h2>
+          <p>设任务为 $x$，初始观察为 $o_0$。第 $k$ 轮时，Agent 根据可见交互历史 $s_k$ 生成动作 $a_k$，环境执行后返回新观察。长度为 $K$ 的轨迹只在结束时获得二值奖励 $R(\tau)$。</p>
+          <div class="math-block">$$
+            a_k=(y_{k,1},\ldots,y_{k,L_k})\sim\pi_\theta(\cdot\mid s_k),
+            \qquad
+            s_{k+1}=(s_k,a_k,o_k).
+          $$</div>
+          <p>GRPO 对同一个任务采样 $G$ 条轨迹，并构造 sequence-level advantage：</p>
+          <div class="math-block">$$
+            A_{\mathrm{seq}}^{(i)}=
+            \frac{R^{(i)}-\bar R}{\hat\sigma_R+\epsilon_0},
+            \qquad
+            \bar R=\frac{1}{G}\sum_{j=1}^{G}R^{(j)}.
+          $$</div>
+          <p>问题是 $A_{\mathrm{seq}}^{(i)}$ 被广播给轨迹 $i$ 的所有 token：一次关键搜索、一次错误购买和若干格式性 reasoning 都得到同样 credit。轨迹越长，这种统一广播越粗糙。</p>
+          <table class="data-table">
+            <thead><tr><th>方法</th><th>局部监督来源</th><th>是否历史相关</th><th>最终更新方向</th></tr></thead>
+            <tbody>
+              <tr><td>GRPO</td><td>只有终局 reward</td><td>否</td><td>Verifier</td></tr>
+              <tr><td>OPSD / Skill-SD</td><td>teacher-student token gap</td><td>否</td><td>Distillation / mixed objective</td></tr>
+              <tr><td>StepOPSD</td><td>turn-level local gap</td><td>否</td><td>局部 teacher signal</td></tr>
+              <tr><td>RLSD</td><td>bounded local gap coefficient</td><td>否</td><td>Verifier</td></tr>
+              <tr><td>AgentOPSD</td><td>recursive belief revision</td><td>是</td><td>Verifier，teacher 只改幅度</td></tr>
+            </tbody>
+          </table>
+          <p>因此它最准确的定位是：<strong>privileged-skill-guided、critic-free、turn-level advantage reshaping</strong>。推理模型仍是普通 Qwen2.5 Agent。</p>
+        </section>
+
+        <section class="article-section" id="method">
+          <h2>2. 方法总览：从 token gap 到递归 success belief <a class="heading-anchor" href="#method">#</a></h2>
+          <div class="code-block"><pre><code>For each task x:
+  student without skill → sample G=8 multi-turn trajectories
+  verifier             → terminal rewards R[1:G]
+  GRPO                  → sequence advantages A_seq[1:G]
+
+For each generated turn k:
+  same model + retrieved skill c+ → rescore the same action tokens
+  teacher_lp - student_lp         → delta[k, t]
+  sum over response tokens        → turn evidence e[k]
+
+For each trajectory:
+  group success rate              → prior B0
+  recursive log-odds update       → B1 ... BK
+  consecutive belief difference  → ΔB1 ... ΔBK
+  bounded multiplier              → turn advantages Ã1 ... ÃK
+
+standard clipped GRPO update</code></pre></div>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/agentopsd/method.png" alt="AgentOPSD 方法总览：token gap 聚合、递归 belief update 与 turn-level advantage reshaping">
+            <figcaption>官方方法图。中间部分是 AgentOPSD 相对 GRPO 的全部新增计算：teacher 重新评分、turn 聚合、belief recursion 和有界重加权。右侧 GRPO 则把同一个 sequence advantage 广播给所有 token。</figcaption>
+          </figure>
+          <table class="data-table">
+            <thead><tr><th>对象</th><th>实现形状</th><th>含义</th></tr></thead>
+            <tbody>
+              <tr><td>student / teacher log-probs</td><td><code>[N_turn, L_max]</code></td><td>同一批 student-generated token 的两次评分</td></tr>
+              <tr><td>response mask</td><td><code>[N_turn, L_max]</code></td><td>屏蔽 padding 与非 response token</td></tr>
+              <tr><td>turn evidence</td><td><code>[N_turn]</code></td><td>一轮内所有 token gap 的和</td></tr>
+              <tr><td>belief sequence</td><td>每条轨迹 <code>[K]</code></td><td>历史 evidence 下的相对 success support</td></tr>
+              <tr><td>turn advantage</td><td><code>[N_turn]</code></td><td>每轮独立的 GRPO 更新幅度</td></tr>
+              <tr><td>token advantage</td><td><code>[N_turn, L_max]</code></td><td>同一轮 token 继承相同 turn advantage</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="innovations">
+          <h2>3. 关键创新点 <a class="heading-anchor" href="#innovations">#</a></h2>
+
+          <h3>3.1 Self-teacher gap：让 skill 只提供训练期证据</h3>
+          <p><strong>旧方法为什么不行：</strong>终局 reward 无法在轨迹内部区分动作。额外训练 critic 需要 value targets；对每个 turn 分叉 rollout 又非常昂贵。</p>
+          <p><strong>它怎么改：</strong>Student 不看 skill；teacher 与 student 共用参数，但额外看到从 SkillRL SkillBank 检索出的 task-specific skill $c^+$。Teacher 不生成另一条轨迹，而是重新评分 student 已经生成的同一个 token：</p>
+          <div class="math-block">$$
+            \delta_{k,t}=
+            \operatorname{sg}\left[
+            \log\pi_\theta(y_{k,t}\mid s_k,c^+,y_{k,&lt;t})
+            -
+            \log\pi_\theta(y_{k,t}\mid s_k,y_{k,&lt;t})
+            \right].
+          $$</div>
+          <p>一轮内求和得到：</p>
+          <div class="math-block">$$
+            e_k=\sum_{t=1}^{L_k}\delta_{k,t}
+            =\log\frac{\pi_\theta(a_k\mid s_k,c^+)}
+            {\pi_\theta(a_k\mid s_k)}.
+          $$</div>
+          <p><strong>为什么可能有效：</strong>如果 skill 描述了可靠子目标与行动模式，那么一个在 skill 条件下概率明显上升的动作，更像掌握正确策略时会采取的动作。</p>
+          <p><strong>代价与限制：</strong>它依赖两个强假设：skill-conditioned branch 接近 success-conditional policy；无 skill branch 接近背景或 failure-dominated policy。论文只需要 gap 的 sign 与 ranking，不要求它是校准概率，但 skill 错误仍会直接污染 credit。</p>
+
+          <h3>3.2 Recursive belief：相同局部 evidence 在不同历史下不等价</h3>
+          <p><strong>旧方法为什么不行：</strong>StepOPSD 之类的方法只看当前 $e_k$。如果前几轮已经几乎确定成功，后续重复正确动作不应与早期转折点获得同样 credit。</p>
+          <p><strong>它怎么改：</strong>先用组内成功率作为 prior，再在 log-odds 空间递归累积 evidence：</p>
+          <div class="math-block">$$
+            B_0=\operatorname{clip}(\bar R,10^{-4},1-10^{-4}),
+            \qquad c_0=0,
+          $$</div>
+          <div class="math-block">$$
+            c_k=\gamma c_{k-1}+e_k,
+            \qquad
+            \ell_k=\operatorname{logit}(B_0)+c_k,
+            \qquad
+            B_k=\sigma(\ell_k).
+          $$</div>
+          <p>论文设置 $\gamma=0.95$，让旧 evidence 逐渐衰减。第 $k$ 轮的 credit proxy 是：</p>
+          <div class="math-block">$$
+            \Delta B_k=B_k-B_{k-1}.
+          $$</div>
+          <p>一阶近似揭示了机制：</p>
+          <div class="math-block">$$
+            \Delta B_k\approx
+            B_{k-1}(1-B_{k-1})
+            \left[e_k-(1-\gamma)c_{k-1}\right].
+          $$</div>
+          <p>$B(1-B)$ 是隐式 saturation gate：成功仍不确定时，新 evidence 影响最大；信念接近 0 或 1 时，相同 evidence 会被抑制。这就是“局部 gap 不是 sequential credit”的具体含义。</p>
+
+          <h3>3.3 Outcome alignment：Verifier 决定方向，teacher 只决定相对强弱</h3>
+          <p>成功轨迹中，向上修正 belief 的 turn 与终局一致；失败轨迹中，向下修正才与终局一致。因此：</p>
+          <div class="math-block">$$
+            q_k=\operatorname{sign}(A_{\mathrm{seq}})\Delta B_k.
+          $$</div>
+          <p>轨迹内对 $q_k$ 做标准化得到 $z_k$。这样，在成功轨迹里提升 success belief 的 turn 被放大；在失败轨迹里降低 success belief 的 turn 被放大。与结果矛盾的 revision 被缩小，但不会反转终局 reward 给出的梯度方向。</p>
+
+          <h3>3.4 Bounded reshaping：实际只在 GRPO 周围微调 ±10%</h3>
+          <div class="math-block">$$
+            w_k=\operatorname{clip}(1+bz_k,1-b,1+b),
+          $$</div>
+          <div class="math-block">$$
+            \widetilde A_k=
+            A_{\mathrm{seq}}left[(1-\lambda)+\lambda w_k\right].
+          $$</div>
+          <p>论文统一使用 $b=0.2,\lambda=0.5$，因此 $w_k\in[0.8,1.2]$，最终 advantage multiplier 仅在 $[0.9,1.1]$。这不是用 teacher 取代 verifier，而是在可靠的 GRPO direction 周围做保守 credit redistribution。</p>
+          <p class="insight"><strong>稳定性的真正来源：</strong>无论 belief proxy 多不准确，只要 $b&lt;1$，最终 multiplier 始终为正，$\operatorname{sign}(\widetilde A_k)=\operatorname{sign}(A_{\mathrm{seq}})$。当 $\lambda=0$ 时方法严格退化为 GRPO。</p>
+        </section>
+
+        <section class="article-section" id="train-infer">
+          <h2>4. 训练和推理流程 <a class="heading-anchor" href="#train-infer">#</a></h2>
+          <h3>4.1 一次训练 iteration</h3>
+          <ol>
+            <li>对每个任务用当前 student policy on-policy 采样 $G=8$ 条多轮轨迹。</li>
+            <li>ALFWorld/WebShop/Search-QA 环境 verifier 返回终局 reward。</li>
+            <li>计算标准 GRPO sequence advantage，先确定每条轨迹总体增强还是削弱。</li>
+            <li>根据任务关键词选择 general skill 与 task-specific Markdown skill。</li>
+            <li>给相同模型的 teacher prompt 插入 skill，对 student response 做额外 log-prob scoring。</li>
+            <li>把 token gap 聚合到 turn，按 <code>traj_uid</code> 与 <code>turn_step</code> 排序递归 belief。</li>
+            <li>计算 bounded turn advantages，并广播给各 turn 的有效 response tokens。</li>
+            <li>使用 PPO clipping 与 reference-policy KL 更新 actor；没有独立 distillation loss。</li>
+          </ol>
+          <h3>4.2 Teacher forcing 到底发生在哪里</h3>
+          <p>Teacher 不生成新 action，也不要求 student 模仿 teacher 的 argmax。两条 branch 对 student rollout 的同一个 $y_{k,t}$ 评分，因此 gap 是 on-policy likelihood contrast。Teacher log-prob 被 detach，只通过 advantage 影响 policy gradient。</p>
+          <h3>4.3 推理</h3>
+          <div class="code-block"><pre><code>task prompt + interaction history
+  → trained Qwen2.5 agent
+  → reasoning + environment action
+
+No skill retrieval
+No teacher branch
+No belief state
+No additional scoring pass
+No critic</code></pre></div>
+          <p>所以部署成本与普通 fine-tuned Agent 基本相同。增加的计算全部发生在训练阶段：对 rollout token 做一次 skill-conditioned teacher scoring，再执行轻量的逐 turn 标量递归。</p>
+        </section>
+
+        <section class="article-section" id="formulas">
+          <h2>5. 公式与实现逐项对齐 <a class="heading-anchor" href="#formulas">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>论文符号</th><th>实现对象</th><th>代码操作</th></tr></thead>
+            <tbody>
+              <tr><td>$\delta_{k,t}$</td><td><code>delta_t</code></td><td><code>(teacher_log_probs - student_log_probs) * response_mask</code></td></tr>
+              <tr><td>$e_k$</td><td><code>delta_turn</code></td><td>沿 response length 求和</td></tr>
+              <tr><td>$B_0$</td><td><code>v0_per_traj</code></td><td>同 task 的 GRPO group success mean，按 trajectory 去重</td></tr>
+              <tr><td>$c_k$</td><td><code>cum_d</code></td><td><code>gamma * acc + evidence</code></td></tr>
+              <tr><td>$B_k$</td><td><code>V_k</code></td><td><code>sigmoid(logit_v0 + cum_d)</code></td></tr>
+              <tr><td>$\Delta B_k$</td><td><code>A_seq</code> 局部变量</td><td>当前 belief 减前一 belief</td></tr>
+              <tr><td>$\widetilde A_k$</td><td><code>A_row</code></td><td>GRPO advantage × bounded multiplier</td></tr>
+            </tbody>
+          </table>
+          <p>核心实现位于 <a href="https://github.com/ZethWang/AgentOPSD/blob/main/verl/trainer/ppo/opsd_utils.py"><code>verl/trainer/ppo/opsd_utils.py</code></a>。训练循环位于 <a href="https://github.com/ZethWang/AgentOPSD/blob/main/verl/trainer/ppo/opsd_ray_trainer.py"><code>opsd_ray_trainer.py</code></a>：先按标准流程计算 GRPO advantage，再用 OPSD advantage 覆盖 <code>batch.batch["advantages"]</code>，最后复用原 actor update。</p>
+          <p><strong>实现细节：</strong>当前 batch 的每一行对应一个环境 turn；同一 episode 的行共享 <code>traj_uid</code>。Turn recursion 必须先按 <code>turn_step</code> 排序，然后将一个 turn scalar 广播到该行所有有效 token。</p>
+          <p><strong>Teacher skill：</strong><code>SkillProvider</code> 读取 <code>skills/{alfworld,search,webshop}</code> 下的 Markdown 和 <code>skill_mapping.json</code>。ALFWorld 与 WebShop 使用关键词映射 task type；脚本设置 <code>skill_all=false</code>，不是把全部 skill 一次性塞给 teacher。</p>
+        </section>
+
+        <section class="article-section" id="alignment">
+          <h2>6. 训练与推理对齐检查 <a class="heading-anchor" href="#alignment">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>检查项</th><th>训练</th><th>推理</th><th>判断</th></tr></thead>
+            <tbody>
+              <tr><td>Agent 输入</td><td>Student rollout 不看 skill</td><td>不看 skill</td><td>主输入分布对齐</td></tr>
+              <tr><td>Privileged skill</td><td>只给 detached teacher</td><td>不存在</td><td>通过参数蒸馏，存在 teacher-quality 依赖</td></tr>
+              <tr><td>动作采样</td><td>Student on-policy，温度 1.0</td><td>验证温度 0.4</td><td>常见 sampling mismatch</td></tr>
+              <tr><td>Reward / belief</td><td>终局后 hindsight 计算</td><td>不存在</td><td>仅训练期 credit，不是在线 planner</td></tr>
+              <tr><td>历史窗口</td><td>环境限制 50/15/4 turns</td><td>相同环境 prompt 模板</td><td>未验证超训练 horizon</td></tr>
+              <tr><td>Teacher action</td><td>重评分 student action</td><td>Student 自行生成</td><td>没有 action target mismatch</td></tr>
+            </tbody>
+          </table>
+          <p><strong>最关键的 mismatch：</strong>训练期能用任务类别检索 procedural skill，测试时没有。方法希望 student 将这种 skill-induced ranking 内化进参数，但没有证明面对 SkillBank 未覆盖的新任务时仍能得到可靠提升。</p>
+        </section>
+
+        <section class="article-section" id="experiments">
+          <h2>7. 实验复盘：结果支持了什么，没有支持什么 <a class="heading-anchor" href="#experiments">#</a></h2>
+          <h3>7.1 Benchmarks</h3>
+          <ul>
+            <li><strong>ALFWorld：</strong>文本具身家庭任务，6 类任务，最多 50 turns，指标为 success rate。</li>
+            <li><strong>WebShop：</strong>搜索、筛选属性与购买，固定 128 个 validation tasks，最多 15 turns，指标为 partial score 与 exact success。</li>
+            <li><strong>Search-QA：</strong>NQ/HotpotQA 训练域，加 TriviaQA、PopQA、2Wiki、MuSiQue、Bamboogle held-out，最多 4 turns，指标为 accuracy。</li>
+          </ul>
+          <h3>7.2 主结果</h3>
+          <table class="data-table">
+            <thead><tr><th>Backbone</th><th>方法</th><th>ALFWorld Avg</th><th>Search-QA Avg</th><th>WebShop Score</th><th>WebShop Acc</th></tr></thead>
+            <tbody>
+              <tr><td>Qwen2.5-3B</td><td>GRPO</td><td>75.0</td><td>36.4</td><td>79.8</td><td>63.3</td></tr>
+              <tr><td>Qwen2.5-3B</td><td>SDAR</td><td>84.4</td><td>43.4</td><td>85.0</td><td>68.0</td></tr>
+              <tr><td>Qwen2.5-3B</td><td>AgentOPSD</td><td><strong>84.4</strong></td><td><strong>46.7</strong></td><td><strong>90.4</strong></td><td><strong>69.5</strong></td></tr>
+              <tr><td>Qwen2.5-7B</td><td>GRPO</td><td>81.2</td><td>42.0</td><td>80.9</td><td>72.6</td></tr>
+              <tr><td>Qwen2.5-7B</td><td>SDAR</td><td>85.9</td><td>49.0</td><td>89.4</td><td><strong>82.8</strong></td></tr>
+              <tr><td>Qwen2.5-7B</td><td>AgentOPSD</td><td><strong>89.1</strong></td><td><strong>49.2</strong></td><td><strong>90.2</strong></td><td>79.7</td></tr>
+            </tbody>
+          </table>
+          <p>AgentOPSD 相对 GRPO 的提升稳定，尤其在 ALFWorld 与 WebShop partial score 上明显。但它不是所有指标最优：Qwen2.5-7B 的 WebShop exact success 为 79.7，低于 SDAR 的 82.8；Search-QA 对 SDAR 只有 0.2 个点优势。</p>
+          <h3>7.3 消融</h3>
+          <table class="data-table">
+            <thead><tr><th>设置</th><th>ALFWorld 7B</th><th>说明</th></tr></thead>
+            <tbody>
+              <tr><td>AgentOPSD full</td><td>89.1</td><td>turn-level、recursive、signed、empirical prior</td></tr>
+              <tr><td>token-level accumulation</td><td>85.9</td><td>环境反馈与完整 action turn 对齐更合理</td></tr>
+              <tr><td>raw local gap 替代 $\Delta B_k$</td><td>82.8</td><td>支持历史递归而非孤立 gap</td></tr>
+              <tr><td>只保留 $|\Delta B_k|$</td><td>80.5</td><td>outcome-consistent direction 很重要</td></tr>
+              <tr><td>移除 empirical $B_0$</td><td>78.9</td><td>组成功率 prior 是最强组件之一</td></tr>
+            </tbody>
+          </table>
+          <p>这组消融足以支持“turn aggregation、history recursion、outcome alignment 都有用”，但仍未证明 $\Delta B_k$ 找到的就是因果 pivotal turn。</p>
+          <h3>7.4 Horizon claim 的证据强度</h3>
+          <p>论文报告 ALFWorld 每增加一轮，AgentOPSD 成功率斜率为 -0.54 points，GRPO 为 -2.91，RLSD 为 -3.59。这个结果与动机一致，但它是不同子任务类别之间的回归，而且 mean turns 只统计成功 episode；task difficulty、category 与 horizon 混在一起，不能当作严格的长度干预实验。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/agentopsd/dynamics.png" alt="AgentOPSD 的训练成功率、horizon 敏感度和策略熵对比">
+            <figcaption>官方训练动态。AgentOPSD 的验证曲线和 horizon slope 更好，但论文未提供多随机种子置信区间；图中的波动带也不是跨 seed 误差条。</figcaption>
+          </figure>
+        </section>
+
+        <section class="article-section" id="critique">
+          <h2>8. 批判与可复现清单 <a class="heading-anchor" href="#critique">#</a></h2>
+          <h3>8.1 “Bayesian”是解释框架，不是校准概率模型</h3>
+          <p>理想 Bayes factor 需要 $p(a_k\mid s_k,C)$ 与 $p(a_k\mid s_k,\neg C)$。实际分子是 skill-conditioned self-teacher，分母是普通 student marginal。论文附录要求：</p>
+          <ul>
+            <li><strong>A1：</strong>$\pi(a\mid s,c^+)\approx p(a\mid s,C)$；</li>
+            <li><strong>A2：</strong>成功率较低时，$\pi(a\mid s)\approx p(a\mid s,\neg C)$。</li>
+          </ul>
+          <p>这些假设让 gap 的 sign/ranking 有合理解释，但不保证 $B_k$ 是真实 success probability。论文也明确把它称为 relative support。</p>
+
+          <h3>8.2 Teacher gap 天然有负漂移</h3>
+          <p>动作来自 student 时：</p>
+          <div class="math-block">$$
+            \mathbb E_{a\sim\pi_s}
+            [\log\pi_t(a)-\log\pi_s(a)]
+            =-D_{\mathrm{KL}}(\pi_s\|\pi_t)\le 0.
+          $$</div>
+          <p>因此直接累积 gap 会系统性地把 belief 向下推。代码注释也明确将其称为 negative-drift saturation，并实现了 centering、decay、tether 等诊断路径。论文 full method 依靠 $\gamma=0.95$、sigmoid gate、轨迹内标准化和有界 multiplier 控制这一问题，而不是消除它。</p>
+
+          <h3>8.3 Turn evidence 混入 reasoning length</h3>
+          <p>代码将一轮全部有效 response token 的 gap 直接求和，包括 <code>&lt;think&gt;</code> 和最终 <code>&lt;action&gt;</code>。长 reasoning 往往产生更大绝对 gap，所以所谓 pivotality 可能部分是在检测 verbosity 或 teacher-student 风格差异。更干净的对照应比较：</p>
+          <ul>
+            <li>sum gap 与 mean gap；</li>
+            <li>全 response 与仅 action span；</li>
+            <li>按 token 数或 entropy 标准化的 evidence。</li>
+          </ul>
+
+          <h3>8.4 没有 counterfactual ground truth</h3>
+          <p>真正的 turn contribution 应在固定 prefix 后替换或删除动作，再对后续 continuation 边际化。AgentOPSD 没有直接测这种 counterfactual value，只展示 policy performance 消融。下一步应抽样关键 turn 做 branch rollout，比较 $\Delta B_k$ 与真实 $\Delta Q_k$ 的 rank correlation。</p>
+
+          <h3>8.5 论文与当前代码存在配置差异</h3>
+          <table class="data-table">
+            <thead><tr><th>项目</th><th>论文</th><th>2026-08-18 当前 main 脚本</th></tr></thead>
+            <tbody>
+              <tr><td>Granularity</td><td>三个环境统一 turn-level</td><td>ALFWorld=turn；WebShop/Search=token</td></tr>
+              <tr><td>Evidence decay</td><td>$\gamma=0.95$</td><td>脚本未传参；代码默认 1.0</td></tr>
+              <tr><td>KL coefficient</td><td>统一 0.01</td><td>Search=0.001，其余 0.01</td></tr>
+              <tr><td>Seeds</td><td>未报告均值与误差条</td><td>环境脚本固定 <code>seed=0</code></td></tr>
+            </tbody>
+          </table>
+          <p class="insight"><strong>复现前必须做的事：</strong>固定仓库 commit，显式设置 <code>granularity=turn</code>、<code>belief_decay_gamma=0.95</code>、<code>mult_lambda=0.5</code>、<code>mult_band=0.2</code>、<code>signed=true</code>，并向作者确认 Search/WebShop 的论文结果究竟来自哪套配置。</p>
+          <table class="data-table">
+            <thead><tr><th>训练项</th><th>论文设置</th></tr></thead>
+            <tbody>
+              <tr><td>Backbone</td><td>Qwen2.5-3B/7B-Instruct</td></tr>
+              <tr><td>Learning rate</td><td>$10^{-6}$</td></tr>
+              <tr><td>Group size</td><td>8 trajectories per task</td></tr>
+              <tr><td>PPO clip</td><td>$\epsilon_{low}=0.2,\epsilon_{high}=0.24$</td></tr>
+              <tr><td>KL coefficient</td><td>0.01 toward reference policy</td></tr>
+              <tr><td>Reshaping</td><td>$\lambda=0.5,b=0.2,\gamma=0.95$</td></tr>
+              <tr><td>Optimizer details</td><td>1 PPO epoch/update，grad clip 1.0，entropy coefficient 0.001，FSDP</td></tr>
+              <tr><td>Training steps</td><td>150</td></tr>
+              <tr><td>Max turns</td><td>ALFWorld 50，WebShop 15，Search-QA 4</td></tr>
+              <tr><td>Train batch</td><td>16 / 16 / 128</td></tr>
+              <tr><td>Train / val temperature</td><td>1.0 / 0.4</td></tr>
+              <tr><td>Hardware</td><td>ALFWorld 8 GPUs，WebShop 2，Search-QA 4</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="improvements">
+          <h2>9. 可能的改进方向 <a class="heading-anchor" href="#improvements">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr></thead>
+            <tbody>
+              <tr><td>只聚合 action span gap</td><td>减少 reasoning 长度与风格 confound</td><td>忽略真正关键的规划 token</td><td>all-token / action-only / think-only 三组消融</td></tr>
+              <tr><td>按长度、entropy 或 KL 校准 $e_k$</td><td>缓解负漂移和长 response 偏差</td><td>削弱强 evidence</td><td>比较 reward、belief saturation 与 rank correlation</td></tr>
+              <tr><td>少量 branch rollout 校准 belief</td><td>让 pivotal turn 更接近因果贡献</td><td>训练成本增加</td><td>仅对 top-k revision turn 分叉 continuation</td></tr>
+              <tr><td>学习式 skill retriever</td><td>减少 keyword mapping 错配</td><td>retriever 与 policy 联合偏置</td><td>keyword / embedding / oracle skill 对照</td></tr>
+              <tr><td>uncertainty-aware multiplier band</td><td>teacher 不可靠时更接近 GRPO</td><td>模型可能始终保守</td><td>按 teacher ensemble disagreement 调整 $b$</td></tr>
+              <tr><td>显式 progress belief</td><td>把 success belief 扩为 subgoal progress state</td><td>需要程序或步骤标注</td><td>ALFWorld predicate completion 与 WebShop constraint coverage</td></tr>
+            </tbody>
+          </table>
+          <p class="insight"><strong>可迁移的设计模式：</strong>用外部先验产生局部 ranking signal，保留真实 verifier 决定优化方向，并以严格有界的正 multiplier 调整 credit。这个模式可以迁移到 GUI Agent、代码 Agent 和有终局成功判据的机器人长任务。</p>
+        </section>
+
+        <section class="article-section" id="card">
+          <h2>10. 速读备忘卡 <a class="heading-anchor" href="#card">#</a></h2>
+          <ul class="takeaway-list">
+            <li>AgentOPSD 是 credit assignment 方法，不是新 Agent backbone。</li>
+            <li>GRPO 的问题是同一 trajectory 的所有 turn 共享一个 advantage。</li>
+            <li>Teacher 与 student 共用参数，区别是 teacher 额外看到训练期 skill。</li>
+            <li>Teacher 只重新评分 student 已生成动作，不产生额外 rollout。</li>
+            <li>Token log-prob gap 在一轮内求和，得到 turn evidence。</li>
+            <li>组成功率 $\bar R$ 初始化 success-belief prior。</li>
+            <li>Evidence 在 log-odds 空间递归累积，$\gamma=0.95$。</li>
+            <li>真正用于 credit 的是 $\Delta B_k$，不是局部 $e_k$。</li>
+            <li>Verifier 决定 advantage sign，teacher 只调整相对幅度。</li>
+            <li>$b=0.2,\lambda=0.5$ 意味着最终只做 ±10% 重加权。</li>
+            <li>训练增加一次 teacher scoring；推理没有额外模块或 skill。</li>
+            <li>ALFWorld 7B 达到 89.1%，GRPO 为 81.2%。</li>
+            <li>Search-QA 对 SDAR 的优势很小，WebShop exact success 也并非最优。</li>
+            <li>Bayesian belief 只是 relative support，不是校准成功率。</li>
+            <li>Gap 存在 $-\mathrm{KL}$ 负漂移和 response-length confound。</li>
+            <li>论文尚未用 counterfactual rollout 验证 pivotal turn。</li>
+            <li>当前仓库的 token/turn 与 $\gamma$ 配置和论文不完全一致。</li>
+          </ul>
+          <p class="insight">一句话记忆：<strong>AgentOPSD 用 privileged teacher 判断“哪一轮更像关键证据”，但始终让终局 verifier 决定“整条轨迹该奖还是该罚”。</strong></p>
+        </section>
+
+        <footer class="article-footer">
+          <p>资料：<a href="https://arxiv.org/pdf/2608.05987v1">Paper</a> · <a href="https://github.com/ZethWang/AgentOPSD">Official code</a> · Tsinghua University / Zhejiang University / Meituan</p>
+          <p>关联阅读：<a href="unmasking-on-policy-distillation.html">Unmasking OPD</a> · <a href="learning-to-foresee-effopd.html">Learning to Foresee</a></p>
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+        </footer>
+      </article>
+    </main>
+  </body>
+</html>
