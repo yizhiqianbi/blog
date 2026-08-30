@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Next Forcing 深度解读：用多 chunk 辅助预测打破高帧率视频的外观复制捷径，并核对因果 MCP 链、训练公式、实验和开源代码。">
+    <title>Next Forcing：让 WAM 不再只会复制下一帧</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260717a">
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script type="application/json" id="paper-metadata">
+      {
+        "title": "Next Forcing：让 WAM 不再只会复制下一帧",
+        "paper": "https://arxiv.org/html/2606.11187v1",
+        "project": "https://gangweix.github.io/next-forcing/",
+        "repository": "https://github.com/gangweix/next-forcing",
+        "parent_file": "index.html",
+        "remix_prompt": "同样处理 https://arxiv.org/html/2606.11187v1",
+        "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+        "authors": ["Gangwei Xu", "Qihang Zhang", "Jiaming Zhou", "Xing Zhu", "Yujun Shen", "Xin Yang", "Yinghao Xu"],
+        "date": "2026-08-30",
+        "paper_date": "2026-06-09",
+        "category": "robotics-world-models",
+        "tags": ["next-forcing", "multi-chunk-prediction", "causal-world-model", "world-action-model", "flow-matching", "appearance-shortcut", "video-chunk", "teacher-forcing", "parallel-chunk-generation", "robotwin", "phyworld", "lingbot-va", "wan2.2"],
+        "systems": ["Next Forcing", "LingBot-VA", "Wan2.2", "Fast-WAM", "Riemann-1.0"],
+        "datasets": ["RoboTwin 2.0", "PhyWorld", "3.5M in-house general video clips", "multi-embodiment robot data"],
+        "methods": ["Multi-Chunk Prediction", "causal MCP chain", "temporally shifted targets", "independent flow-matching noise", "multi-layer feature fusion", "future-aware RoPE", "noisy history augmentation", "parallel chunk generation", "Mixture-of-Transformers"],
+        "code": "The official repository releases training code, zero-overhead inference, tests, RoboTwin evaluation scripts, a 5.1B base checkpoint and a 6.7B post-trained checkpoint. As checked on 2026-08-30, wan_va/wan_va_server.py loads with disable_mcp=True; the paper's 2x MCP-accelerated inference path is explicitly not included yet. The released config uses three depths, three blocks per depth, hidden layers [3,11,19,29], loss weights [0.5,0.2,0.1], MCP shift 10, lr 2e-5, betas 0.9/0.95, weight decay 0.1 and 100 warmup steps.",
+        "related_posts": ["posts/riemann-1-causal-autoregressive-world-action-model.html", "posts/rise-of-world-action-models.html", "posts/physisforcing-physics-reinforced-world-simulator.html", "posts/cosmos3-edge-on-device-world-action-model.html", "posts/solaris-multiplayer-video-world-model.html", "posts/qwen-robotworld-language-conditioned-world-model.html"],
+        "graph_nodes": ["Next Forcing", "LingBot-VA", "Wan2.2", "Multi-Chunk Prediction", "MCP depth 1", "MCP depth 2", "MCP depth 3", "appearance shortcut", "temporal target shifting", "independent noise schedule", "multi-layer feature fusion", "causal MCP chain", "future-aware RoPE", "flow matching", "noisy history augmentation", "parallel chunk generation", "RoboTwin 2.0", "PhyWorld", "Fast-WAM", "World Action Model"],
+        "graph_edges": [
+          "Next Forcing -> extends -> LingBot-VA",
+          "LingBot-VA -> uses_backbone -> Wan2.2",
+          "Next Forcing -> introduces -> Multi-Chunk Prediction",
+          "Multi-Chunk Prediction -> counters -> appearance shortcut",
+          "Multi-Chunk Prediction -> uses -> temporal target shifting",
+          "Multi-Chunk Prediction -> uses -> independent noise schedule",
+          "Multi-Chunk Prediction -> uses -> multi-layer feature fusion",
+          "Multi-Chunk Prediction -> organized_as -> causal MCP chain",
+          "MCP depth 1 -> predicts -> next^1 chunk",
+          "MCP depth 2 -> predicts -> next^2 chunk",
+          "MCP depth 3 -> predicts -> next^3 chunk",
+          "causal MCP chain -> propagates_gradient_into -> Wan2.2",
+          "parallel chunk generation -> retains -> MCP depth 1",
+          "Next Forcing -> evaluates_on -> RoboTwin 2.0",
+          "Next Forcing -> evaluates_on -> PhyWorld",
+          "Next Forcing -> belongs_to -> World Action Model",
+          "Next Forcing -> compared_with -> Fast-WAM"
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#core">Insight</a>
+        <a href="#method">Method</a>
+        <a href="#experiments">Experiments</a>
+      </nav>
+    </header>
+
+    <main class="article-shell" id="top">
+      <article>
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+          <p class="kicker">Technical Deep Dive · World Action Model · Causal Video</p>
+          <h1>Next Forcing：让 WAM 不再只会复制下一帧</h1>
+          <p class="article-dek">高帧率视频里，相邻 chunk 几乎一样。普通 causal WAM 只监督下一块，很容易把“预测动力学”退化成“复制外观”。Next Forcing 没有改掉 LingBot-VA 的主干，而是在训练期接出三层轻量 MCP 分支，分别预测更远的未来 chunk，用多时间尺度目标把动态信息压回主模型；推理时可以全部删除，也可以保留第一层并行生成两个 chunk。</p>
+          <div class="article-meta">
+            <span>2026.08.30</span>
+            <span>分类：robotics-world-models</span>
+            <span>arXiv：2606.11187v1</span>
+            <a href="https://arxiv.org/html/2606.11187v1">Paper</a>
+            <a href="https://gangweix.github.io/next-forcing/">Project</a>
+            <a href="https://github.com/gangweix/next-forcing">Code</a>
+          </div>
+        </header>
+
+        <section class="article-section" id="core">
+          <h2>0. 一句话结论 <a class="heading-anchor" href="#core">#</a></h2>
+          <blockquote>
+            <p>Next Forcing 解决 causal video/WAM 在高帧率下只靠相邻外观复制就能完成 next-chunk denoising 的弱监督问题：它用一条 next$^1$ → next$^2$ → next$^3$ 的轻量因果 MCP 链预测多个未来 chunk，迫使主干学习跨 chunk 动力学；RoboTwin 达到 94.1/93.5% Clean/Random，50 fps 下按训练 step 约快 2.3× 收敛，但增加约 1.6B 训练期参数与额外计算，论文声称的 2× 并行推理路径目前尚未开源，也没有报告端到端 wall-clock speedup。</p>
+          </blockquote>
+          <p class="insight"><strong>核心 insight：</strong>问题不只是 teacher forcing 导致 exposure bias，而是<strong>监督的时间跨度太短</strong>。当 $x_{i+1}\approx x_i$ 时，下一 chunk 的 loss 对动力学几乎没有辨识力；同时预测 $x_{i+2}$、$x_{i+3}$，才会让速度、接触、物体状态和动作后果成为完成任务所需的信息。</p>
+          <div class="code-block"><pre><code>普通 causal WAM:
+context → denoise current chunk
+         shortcut: copy nearby appearance
+
+Next Forcing training:
+context → main predicts current chunk
+        ↘ MCP-1 predicts next^1
+          ↘ MCP-2 predicts next^2
+            ↘ MCP-3 predicts next^3
+
+Inference A: delete all MCP modules
+Inference B: main + MCP-1 produce two chunks per autoregressive step</code></pre></div>
+        </section>
+
+        <section class="article-section" id="positioning">
+          <h2>1. 论文定位：它改训练目标，不是重做 WAM 架构 <a class="heading-anchor" href="#positioning">#</a></h2>
+          <p>Next Forcing 建在 LingBot-VA 上。底座是 causal video-action world model：给定语言指令 $\ell$、历史视频 chunk $x_{\le i}$ 和过去动作 $a_{&lt;i}$，视频流生成下一段视觉变化，动作流读取更新后的视觉状态并预测动作。</p>
+          <div class="math-block">$$
+            x_{i+1}\sim p_\theta(\cdot\mid x_{\le i},a_{&lt;i},\ell),
+            \qquad
+            a_i\sim g_\psi(\cdot\mid x_{\le i+1},a_{&lt;i},\ell).
+          $$</div>
+          <p>视频与动作 token 在 30 层 Wan2.2 Transformer 中联合交互。MCP 只显式预测视频 latent，不另设 action MCP；动作受益来自共享主干和 video-action cross-modal attention。</p>
+          <table class="data-table">
+            <thead><tr><th>方法</th><th>主要改动</th><th>学习信号</th><th>推理</th></tr></thead>
+            <tbody>
+              <tr><td>LingBot-VA</td><td>causal joint video-action model</td><td>当前 chunk video/action flow loss</td><td>逐 chunk</td></tr>
+              <tr><td>Diffusion Forcing</td><td>token 独立噪声级别</td><td>序列扩散与因果生成统一</td><td>逐步 rollout</td></tr>
+              <tr><td>Fast-WAM</td><td>质疑 test-time imagination 必要性</td><td>训练期 world representation</td><td>可绕过未来视频</td></tr>
+              <tr><td>Next Forcing</td><td>多 future-chunk 辅助分支</td><td>next$^1$/next$^2$/next$^3$ flow losses</td><td>可删除，或并行两 chunk</td></tr>
+            </tbody>
+          </table>
+          <p>因此它最准确的定位是：<strong>面向 causal video diffusion/WAM 的 multi-token-prediction 式深监督</strong>。它不改变动作表示、不增加 planner，也不解决长时记忆。</p>
+        </section>
+
+        <section class="article-section" id="method">
+          <h2>2. 方法总览：主干做当前，三层 MCP 看更远 <a class="heading-anchor" href="#method">#</a></h2>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/next-forcing/architecture.png" alt="Next Forcing 官方架构图：主模型与三层因果 MCP 分支">
+            <figcaption>官方架构图。左侧主模型预测当前 noisy chunk；右侧三层 MCP 接收主干多层特征、各自的 noisy future target 和上一层 MCP 表征，分别预测 next$^1$/next$^2$/next$^3$。</figcaption>
+          </figure>
+          <ol>
+            <li>把视频 VAE latent 按 $M$ 帧切成 chunk，训练时随机采样 $M\in\{1,2,3,4\}$。</li>
+            <li>主模型使用 clean history 和当前 noisy chunk 做 flow matching；动作流同步预测 robot action。</li>
+            <li>从主干第 4、12、20、30 层收集 video hidden states，拼接后用两层 MLP 压回隐藏维度 $d$。</li>
+            <li>把 future target 沿时间移动 $kM$ 帧，得到 next$^k$ 监督；每个深度独立采样噪声和 timestep。</li>
+            <li>MCP-$k$ 将上一层 future representation 与自己 noisy target 的 patch embedding 拼接，再投影到 $d$。</li>
+            <li>每个深度默认通过 3 个 Wan Transformer blocks，并把输出交给更远的 MCP。</li>
+            <li>主 video loss、action loss 和三个加权 MCP loss 一起反传。</li>
+          </ol>
+          <table class="data-table">
+            <thead><tr><th>张量</th><th>典型形状</th><th>含义</th></tr></thead>
+            <tbody>
+              <tr><td>视频 latent</td><td><code>[B, C, F, H, W]</code></td><td>VAE 时空 latent</td></tr>
+              <tr><td>patch tokens</td><td><code>[B, N, d]</code></td><td>$N=F'H'W'$</td></tr>
+              <tr><td>收集特征</td><td>4 × <code>[B, N, d]</code></td><td>第 4/12/20/30 层 video states</td></tr>
+              <tr><td>fusion 输入</td><td><code>[B, N, 4d]</code></td><td>沿 channel 维拼接</td></tr>
+              <tr><td>$h_{\mathrm{fuse}}$</td><td><code>[B, N, d]</code></td><td>两层 MLP 压缩</td></tr>
+              <tr><td>每层 MCP 输入</td><td><code>[B, N, 2d]</code> → <code>[B, N, d]</code></td><td>上一层状态 + noisy future</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="innovations">
+          <h2>3. 关键创新点 <a class="heading-anchor" href="#innovations">#</a></h2>
+          <h3>3.1 多 chunk 目标：用时间距离打破 appearance shortcut</h3>
+          <p><strong>旧方法为什么不行：</strong>50 fps 下相邻目标的物体外观、背景和相机位姿几乎相同。模型从 clean context 抄外观，再修局部噪声，就能降低 next-chunk MSE；这不要求理解速度、接触或动作后果。</p>
+          <p><strong>它怎么改：</strong>对深度 $k\in\{1,2,3\}$ 构造时间位移后的目标：</p>
+          <div class="math-block">$$x_0^{[k],i}=x_0^{\min(i+k,F)}.$$</div>
+          <p>源码按 <code>frame_shift=(k+1)*chunk_size</code> 在 <code>[B,C,F,H,W]</code> 时间轴切片；末尾复制最后一帧保持形状，但用 <code>valid_mask</code> 从 loss 中剔除。</p>
+          <p><strong>为什么有效：</strong>更远目标与当前外观差异更大。要同时解释 next$^1$、next$^2$、next$^3$，表征必须保留变化方向与未来可达状态。</p>
+          <p><strong>代价/限制：</strong>时间跨度仍只有 3 个 chunk；fps、chunk size 或运动速度变化时，固定 depth 对应的物理时间也会变化。</p>
+
+          <h3>3.2 独立噪声 + 更高 timestep shift：防止 MCP 自己抄答案</h3>
+          <p><strong>旧方法为什么不行：</strong>future branch 若看到低噪声目标，可以独立做局部 denoising，主干不必学习未来动力学。</p>
+          <div class="math-block">$$
+            x_{t_k}^{[k]}=(1-t_k)x_0^{[k]}+t_k\epsilon_k,
+            \qquad \epsilon_k\sim\mathcal N(0,I).
+          $$</div>
+          <p>每个深度独立采样噪声，并设置 $s_{\mathrm{main}}=5$、$s_{\mathrm{mcp}}=10$：</p>
+          <div class="math-block">$$\tilde\sigma=\frac{s\sigma}{1+(s-1)\sigma}.$$</div>
+          <p>$s$ 越大越偏向高噪声，MCP 只能更多依赖主干和上一层 hidden state。把 MCP shift 从 10 降到 5，Clean success 从 85.8 降到 83.2。</p>
+          <p><strong>代价/限制：</strong>高噪声增加优化难度，shift 与 loss weight 强耦合。</p>
+
+          <h3>3.3 多层特征融合：让远期 loss 真正进入主干</h3>
+          <div class="math-block">$$
+            h_{\mathrm{fuse}}=\operatorname{MLP}([h^{(4)};h^{(12)};h^{(20)};h^{(30)}])
+            \in\mathbb R^{B\times N\times d}.
+          $$</div>
+          <p>源码为 <code>Linear(4d,d) → SiLU → Linear(d,d)</code>，配置零基索引 <code>[3,11,19,29]</code>。移除 fusion 后，Clean success 从 85.8 降到 83.6。</p>
+          <p><strong>代价/限制：</strong>要保存四层激活，训练显存增加；论文未报告 activation memory 或每 step 时间。</p>
+
+          <h3>3.4 因果 MCP 链：next$^2$ 建在 next$^1$ 表征上</h3>
+          <div class="math-block">$$
+            z^{[k]}=W_k[h_{\mathrm{prev}}^{[k-1]};E(x_{t_k}^{[k]})],
+            \qquad h_{\mathrm{prev}}^{[0]}=h_{\mathrm{fuse}}.
+          $$</div>
+          <p>每层的输出既投影为该深度 flow prediction，也作为下一深度的 <code>previous_hidden_states</code>。它更像展开三步的 latent transition chain，而不是三个平行 heads。</p>
+          <p><strong>代价/限制：</strong>误差随 depth 累积，所以推理只保留 depth-1，不使用 depth-2/3。</p>
+
+          <h3>3.5 Future-aware RoPE 与共享 causal mask</h3>
+          <p>MCP-$k$ 的 future tokens 使用移动后的时空 grid id。Noisy target 可看严格在前的 clean chunks，也可看同 chunk noisy tokens；clean tokens 不能看 noisy target。源码把 future grid、clean video grid、action grid 拼接计算 RoPE，既表达未来位置，又避免 clean answer 泄漏。</p>
+        </section>
+
+        <section class="article-section" id="train-infer">
+          <h2>4. 训练和推理流程 <a class="heading-anchor" href="#train-infer">#</a></h2>
+          <h3>4.1 一次训练 step</h3>
+          <ol>
+            <li>数据提供语言 embedding、视频 latent、动作序列和 action mask。</li>
+            <li>随机采样 <code>chunk_size∈[1,4]</code>，并随机采样 attention window 4–64。</li>
+            <li>主视频 latent 由 shift=5 scheduler 加噪；clean history 以 0.5 概率扰动，减少直接复制。</li>
+            <li>动作使用独立 scheduler 加噪，padding 由 mask 排除。</li>
+            <li>三个 MCP depth 分别移动 $M,2M,3M$ 帧，用 shift=10 scheduler 独立加噪。</li>
+            <li>30 层主干联合处理 video、action 和 text，并收集四层 video hidden states。</li>
+            <li>三个 MCP 模块串行前向，输出三个 future velocity predictions。</li>
+            <li>主 video、action 与 MCP losses 相加，统一反传。</li>
+          </ol>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/next-forcing/robotwin-training.jpg" alt="Next Forcing 官方训练对比示意">
+            <figcaption>项目页训练结果封面。论文最强结论不是最终多 1–2 个 success points，而是高 fps 的早期训练差距显著扩大。</figcaption>
+          </figure>
+
+          <h3>4.2 Zero-overhead inference</h3>
+          <div class="code-block"><pre><code>load trained checkpoint
+  → delete mcp_hidden_fuser
+  → delete mcp_input_projections
+  → delete all mcp_blocks
+  → standard LingBot-VA rollout</code></pre></div>
+          <p>这不是蒸馏到另一个模型。MCP loss 训练时已经更新主干；推理时直接删除辅助参数。官方当前 server 使用 <code>disable_mcp=True</code>，只实现这一模式。</p>
+
+          <h3>4.3 Parallel chunk generation</h3>
+          <div class="code-block"><pre><code>one denoising trajectory:
+  main model  → current chunk x_i
+  MCP depth-1 → next chunk x_{i+1}
+
+accept both → autoregressive index advances by 2</code></pre></div>
+          <p>Depth-1 只有 3 个 blocks，相比 30 层主干很轻，作者将顺序 denoising 次数减半称为 2× acceleration。Depth-2/3 不使用，因为更远预测会积累漂移。</p>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/next-forcing/robotwin-inference.jpg" alt="Next Forcing 标准推理与 MCP 并行推理对比">
+            <figcaption>项目页推理对比封面。并行模式减少的是顺序 chunk denoising 次数；是否等比例转化为端到端控制吞吐，还取决于 VAE、动作流、缓存和机器人 I/O。</figcaption>
+          </figure>
+          <p class="insight"><strong>需要严格区分：</strong>表 4 只验证 2-chunk rollout 的成功率接近标准推理，没有给出 latency、吞吐、显存或真实机器人控制频率。当前代码也未发布该路径，所以“2×”是<strong>理论上的 autoregressive step reduction</strong>，不是已复测的 wall-clock 加速。</p>
+        </section>
+
+        <section class="article-section" id="formulas">
+          <h2>5. 关键公式逐项对齐 <a class="heading-anchor" href="#formulas">#</a></h2>
+          <h3>5.1 Flow matching 主任务</h3>
+          <div class="math-block">$$
+            x_t=(1-t)x_0+t\epsilon,
+            \qquad v^*(x_t,t)=\epsilon-x_0.
+          $$</div>
+          <p>$x_0\in\mathbb R^{B\times C\times F\times H\times W}$ 是 clean VAE latent；$\epsilon$ 同形状；$t$ 按 frame 采样并广播到空间 token。网络输出 velocity，MSE 再乘 scheduler timestep weight。</p>
+
+          <h3>5.2 Teacher-forced causal prediction</h3>
+          <div class="math-block">$$
+            v_\theta(x_t^{(i)},t,[x_0^{(1:i-1)},\ell])
+            \approx \epsilon^{(i)}-x_0^{(i)}.
+          $$</div>
+          <p>当前 chunk 是 noisy query，之前 chunks 是 clean context。外观捷径来自 $x_0^{(i-1)}$ 与 $x_0^{(i)}$ 太接近。</p>
+
+          <h3>5.3 MCP future loss</h3>
+          <div class="math-block">$$
+            \mathcal L_k^{\mathrm{MCP}}=\mathbb E\left[
+            \|v_\theta^{[k]}(x_{t_k}^{[k]},t_k,c)
+            -(\epsilon_k-x_0^{[k]})\|_2^2\right].
+          $$</div>
+          <p>源码将 prediction unpatchify 回 <code>[B,C,F,H,W]</code>，乘 timestep weight 和 <code>valid_mask</code>。末尾复制帧只保持 shape，不贡献梯度。</p>
+
+          <h3>5.4 总损失</h3>
+          <div class="math-block">$$
+            \mathcal L=\mathcal L_{\mathrm{video}}+\mathcal L_{\mathrm{action}}
+            +0.5\mathcal L_1^{\mathrm{MCP}}
+            +0.2\mathcal L_2^{\mathrm{MCP}}
+            +0.1\mathcal L_3^{\mathrm{MCP}}.
+          $$</div>
+          <p>权重随预测距离下降。三个 MCP loss 参与同一次 <code>loss.backward()</code>，没有 stop-gradient 隔开主干。</p>
+
+          <h3>5.5 代码级模块映射</h3>
+          <table class="data-table">
+            <thead><tr><th>论文组件</th><th>官方实现</th><th>实际行为</th></tr></thead>
+            <tbody>
+              <tr><td>future shifting</td><td><code>wan_va/mcp.py</code></td><td>时间切片、末帧复制、valid mask</td></tr>
+              <tr><td>MCP config</td><td><code>configs/mcp_train_config.py</code></td><td>3 depths、3 blocks、[3,11,19,29]</td></tr>
+              <tr><td>模块构建</td><td><code>model.py::_build_mcp_modules</code></td><td>fusion MLP、三个 projection、九个 blocks</td></tr>
+              <tr><td>因果链</td><td><code>model.py::_forward_mcp</code></td><td>上一深度 future hidden 进入下一深度</td></tr>
+              <tr><td>loss</td><td><code>train.py::compute_loss</code></td><td>weighted MSE + valid mask</td></tr>
+              <tr><td>零开销推理</td><td><code>wan_va_server.py</code></td><td><code>disable_mcp=True</code></td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="alignment">
+          <h2>6. 训练与推理对齐检查 <a class="heading-anchor" href="#alignment">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>检查项</th><th>训练</th><th>标准推理</th><th>并行推理</th></tr></thead>
+            <tbody>
+              <tr><td>历史视频</td><td>clean history + 50% noisy aug</td><td>生成/观测历史</td><td>含 MCP 生成 chunk</td></tr>
+              <tr><td>目标跨度</td><td>next$^0$–next$^3$</td><td>只生成 current</td><td>接受 current + next$^1$</td></tr>
+              <tr><td>MCP 模块</td><td>三层全部参与</td><td>全部删除</td><td>只保留 depth-1</td></tr>
+              <tr><td>噪声</td><td>各 depth 独立</td><td>主 scheduler</td><td>主与 MCP-1 并行</td></tr>
+              <tr><td>cache</td><td>共享 causal mask</td><td>history/KV cache</td><td>【不确定】未开源</td></tr>
+              <tr><td>动作</td><td>联合 flow loss</td><td>读取更新视觉</td><td>是否预取下一 action 未说明</td></tr>
+            </tbody>
+          </table>
+          <p><strong>最主要 mismatch：</strong>MCP-$k$ 训练时看到真实 future target 加噪，而并行推理时 future chunk 从纯噪声生成并直接写回历史。更大的 timestep shift 和 noisy-history augmentation能缓解，但不能消除 exposure bias。</p>
+          <p><strong>【不确定】动作时序：</strong>论文只说同时生成当前和下一视频 chunk，没有说明动作流是否同步输出两个 action chunks。可能是只加速内部 imagination、next video 供下一次 action head 消费，或动作也被批处理。需等待 2× inference code，检查视频 cache、action scheduler 与 control dispatch 的更新顺序。</p>
+        </section>
+
+        <section class="article-section" id="experiments">
+          <h2>7. 实验复盘：证据最强的是高帧率，不是 SOTA 数字 <a class="heading-anchor" href="#experiments">#</a></h2>
+          <h3>7.1 RoboTwin 主结果</h3>
+          <table class="data-table">
+            <thead><tr><th>方法</th><th>Clean SR</th><th>Random SR</th></tr></thead>
+            <tbody>
+              <tr><td>Fast-WAM</td><td>91.9</td><td>91.8</td></tr>
+              <tr><td>LingBot-VA</td><td>92.9</td><td>91.5</td></tr>
+              <tr><td>Next Forcing</td><td><strong>94.1</strong></td><td><strong>93.5</strong></td></tr>
+            </tbody>
+          </table>
+          <p>最终提升为 1.2/2.0 points。更关键的是收敛曲线：</p>
+          <table class="data-table">
+            <thead><tr><th>50 fps / 5k steps</th><th>LingBot-VA</th><th>Next Forcing</th><th>绝对提升</th></tr></thead>
+            <tbody>
+              <tr><td>Clean</td><td>45.5</td><td>70.2</td><td>+24.7</td></tr>
+              <tr><td>Random</td><td>31.9</td><td>61.6</td><td>+29.7</td></tr>
+            </tbody>
+          </table>
+          <p>12 fps 下早期差距约 10 points，50 fps 下扩大到 25–30 points，支持“相邻 chunk 越相似，MCP 越有用”。但改变 fps 同时改变有效时间跨度、样本冗余和 token 分布。更严格的实验应固定物理时间 horizon，只改变采样密度。</p>
+
+          <h3>7.2 Ablation 支持了哪些组件</h3>
+          <table class="data-table">
+            <thead><tr><th>设置（Clean，20k steps）</th><th>SR</th><th>解释</th></tr></thead>
+            <tbody>
+              <tr><td>LingBot-VA default</td><td>75.6</td><td>shift=5 + noisy history</td></tr>
+              <tr><td>+ MCP default</td><td>85.8</td><td>总体 +10.2</td></tr>
+              <tr><td>MCP shift 10 → 5</td><td>83.2</td><td>高噪声目标更依赖主干</td></tr>
+              <tr><td>去掉 multi-layer fusion</td><td>83.6</td><td>深层监督有贡献</td></tr>
+              <tr><td>不从主干初始化 MCP</td><td>83.8</td><td>初始化影响优化</td></tr>
+              <tr><td>1 block / depth</td><td><strong>86.5</strong></td><td>任务成功率高于默认 3 blocks</td></tr>
+              <tr><td>5 blocks / depth</td><td>85.0</td><td>辅助头太强可能削弱主干耦合</td></tr>
+            </tbody>
+          </table>
+          <p>“轻 head 更好”很重要：MCP 太强会独立解决 future denoising，辅助 loss 不再逼主干学习。作者仍选 3 blocks，因为 1 block 生成 artifact 更多，会影响并行推理。</p>
+
+          <h3>7.3 PhyWorld 与通用视频</h3>
+          <table class="data-table">
+            <thead><tr><th>PhyWorld</th><th>FVD OOT</th><th>FVD IT</th><th>Abnormal OOT</th><th>Abnormal IT</th></tr></thead>
+            <tbody>
+              <tr><td>LingBot-VA</td><td>5.3</td><td>3.5</td><td>12%</td><td>3%</td></tr>
+              <tr><td>Next Forcing</td><td><strong>4.7</strong></td><td><strong>3.2</strong></td><td><strong>8%</strong></td><td><strong>2%</strong></td></tr>
+            </tbody>
+          </table>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/next-forcing/phyworld.jpg" alt="Next Forcing 与 LingBot-VA 的 PhyWorld 对比">
+            <figcaption>项目页 PhyWorld 对比封面。OOT 上改善更明显，说明收益并非只来自机器人 action stream。</figcaption>
+          </figure>
+          <p>去掉 action stream 后，在 3.5M 条内部人类活动视频上，50k steps 的两个测试集 FVD 从 225/204 降到 94/97，降幅 58%/52%。这说明 MCP 是通用 causal video training trick。</p>
+
+          <h3>7.4 公平性与隐藏 confound</h3>
+          <ul>
+            <li><strong>Step 不是算力：</strong>每 step 多跑 9 个 blocks、fusion MLP 和三组 future tokens；2.3× 是收敛 step 数，不是 GPU-hour 加速。</li>
+            <li><strong>参数不等：</strong>base 为 5.1B，带 MCP checkpoint 为 6.7B。零开销推理会删除辅助参数，但训练比较没有等 FLOPs 对照。</li>
+            <li><strong>内部数据不可复现：</strong>3.5M 通用视频和两个 1,024 样本测试集未公开。</li>
+            <li><strong>真机证据偏弱：</strong>项目页有两项演示，但没有多任务成功率、失败统计或控制延迟。</li>
+            <li><strong>缺少 depth 消融：</strong>没有只用 next$^1$、next$^{1,2}$、next$^{1,2,3}$ 的对照。</li>
+            <li><strong>2× 未计 wall-clock：</strong>表 4 只有成功率，没有 latency、VAE decode 和通信开销。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="reproduction">
+          <h2>8. 可复现清单：论文、代码与缺口 <a class="heading-anchor" href="#reproduction">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>项目</th><th>公开设置</th></tr></thead>
+            <tbody>
+              <tr><td>Backbone</td><td>Wan2.2 Transformer，30 layers；LingBot-VA framework</td></tr>
+              <tr><td>Checkpoints</td><td>5.1B base；6.7B RoboTwin post-train</td></tr>
+              <tr><td>MCP</td><td>3 depths；每层 3 blocks；从主干最后 3 blocks 初始化</td></tr>
+              <tr><td>Feature layers</td><td>论文 4/12/20/30；代码 [3,11,19,29]</td></tr>
+              <tr><td>Loss weights</td><td>[0.5, 0.2, 0.1]</td></tr>
+              <tr><td>Chunk size</td><td>随机 1–4 latent frames</td></tr>
+              <tr><td>Timestep</td><td>1000 steps；main shift=5；MCP shift=10</td></tr>
+              <tr><td>Noisy history</td><td>概率 0.5</td></tr>
+              <tr><td>RoboTwin data</td><td>2,500 Clean + 25,000 Random demos；50 tasks</td></tr>
+              <tr><td>Training</td><td>50k steps；主实验 64 GPUs；通用视频 32；消融 16</td></tr>
+              <tr><td>Optimizer</td><td>lr 2e-5；betas 0.9/0.95；wd 0.1；warmup 100；batch/GPU 1</td></tr>
+              <tr><td>Runtime</td><td>BF16；Python 3.10；PyTorch 2.9.0；CUDA 12.6；FSDP</td></tr>
+              <tr><td>CFG</td><td><code>cfg_prob=0.1</code></td></tr>
+            </tbody>
+          </table>
+          <p><strong>代码已有：</strong>训练循环、MCP module、RoboTwin 数据转换和评测、smoke test、base/post-train 权重。</p>
+          <p><strong>代码尚缺：</strong>2× parallel chunk generation；README 明确写“will be released separately”。当前只能复现零开销模式。</p>
+          <p><strong>【不确定】需确认：</strong>global batch size、gradient checkpointing/offload、EMA、每 step wall-clock、50 fps 重采样方式、通用视频过滤与 caption。验证应固定 commit，先跑 one-step smoke test 检查三层 MCP loss/valid mask，再做 2.5k Clean 小规模 ablation。</p>
+        </section>
+
+        <section class="article-section" id="improvements">
+          <h2>9. 可能的改进方向 <a class="heading-anchor" href="#improvements">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>改动点</th><th>预期收益</th><th>风险</th><th>验证实验</th></tr></thead>
+            <tbody>
+              <tr><td>按物理时间选 horizon</td><td>跨 fps/速度更稳定</td><td>依赖时间戳</td><td>固定 80/160/320 ms 对照固定 depth</td></tr>
+              <tr><td>自适应 MCP depth</td><td>静态段看远，剧烈段缩短</td><td>gate 可能选简单目标</td><td>按 optical flow/contact 分桶</td></tr>
+              <tr><td>JEPA latent MCP</td><td>聚焦状态变化</td><td>丢失接触细节</td><td>VAE flow / JEPA / hybrid 对照</td></tr>
+              <tr><td>action-side MCP</td><td>学习多步 action consequence</td><td>时间对齐更难</td><td>next action chunk 消融</td></tr>
+              <tr><td>speculative verification</td><td>错误时回退，降低漂移</td><td>验证抵消加速</td><td>latent consistency 接受/重算</td></tr>
+              <tr><td>等 FLOPs 对照</td><td>分离目标与额外算力</td><td>成本高</td><td>加深 baseline / random head / MCP</td></tr>
+            </tbody>
+          </table>
+          <p class="insight"><strong>最可复用的启发：</strong>不要只问“模型是不是 causal”，还要问“loss 对哪个物理时间尺度有辨识力”。短目标负责可控细节，远目标负责动力学；远期辅助头还要足够弱，才能迫使主干承担预测。</p>
+        </section>
+
+        <section class="article-section" id="card">
+          <h2>10. 速读备忘卡 <a class="heading-anchor" href="#card">#</a></h2>
+          <ul class="takeaway-list">
+            <li>Next Forcing 改训练目标，不是新 WAM backbone。</li>
+            <li>它针对高 fps 下 next-chunk denoising 退化成外观复制。</li>
+            <li>主模型预测当前，MCP 预测 next$^1$/next$^2$/next$^3$。</li>
+            <li>MCP 三层是因果链，不是三个独立 head。</li>
+            <li>每个 future target 独立加噪。</li>
+            <li>MCP shift=10，主模型 shift=5。</li>
+            <li>融合主干第 4/12/20/30 层特征。</li>
+            <li>默认每个 depth 3 blocks，共 9 个辅助 blocks。</li>
+            <li>Loss 权重为 0.5/0.2/0.1。</li>
+            <li>valid mask 排除末尾复制帧。</li>
+            <li>RoboTwin 达到 94.1/93.5%。</li>
+            <li>最强证据是 50 fps 早期提升 25–30 points。</li>
+            <li>PhyWorld 和通用视频说明方法不限于机器人。</li>
+            <li>零开销模式直接删除 MCP。</li>
+            <li>并行模式只保留 depth-1，一次接受两个 chunk。</li>
+            <li>“2×”是 chunk step 数减半，未报告端到端 latency。</li>
+            <li>当前官方代码尚未发布 2× inference。</li>
+            <li>2.3× convergence 按 step 计，未扣额外训练 FLOPs。</li>
+          </ul>
+          <p class="insight">一句话记忆：<strong>Next Forcing 用多个更远的 future target，把“会复制上一块”升级成“必须理解状态如何变化”。</strong></p>
+        </section>
+
+        <footer class="article-footer">
+          <p>资料：<a href="https://arxiv.org/html/2606.11187v1">Paper</a> · <a href="https://gangweix.github.io/next-forcing/">Project page</a> · <a href="https://github.com/gangweix/next-forcing">Official code</a></p>
+          <p>关联阅读：<a href="riemann-1-causal-autoregressive-world-action-model.html">Riemann-1.0</a> · <a href="rise-of-world-action-models.html">World-Action Models</a> · <a href="physisforcing-physics-reinforced-world-simulator.html">PhysisForcing</a></p>
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+        </footer>
+      </article>
+    </main>
+  </body>
+</html>
