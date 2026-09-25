@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Deep Video Discovery 深入解读：用多粒度视频数据库和 ReAct 工具调用，把超长视频理解变成一个可搜索、可回溯的 agent 环境。">
+    <title>Deep Video Discovery：把长视频理解变成 Agent 的搜索问题</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="../styles.css?v=20260717a">
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [['$', '$'], ['\\(', '\\)']],
+          displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        },
+        svg: { fontCache: 'global' }
+      };
+    </script>
+    <script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
+    <script type="application/json" id="paper-metadata">
+      {
+        "title": "Deep Video Discovery：把长视频理解变成 Agent 的搜索问题",
+        "paper": "https://arxiv.org/html/2505.18079",
+        "project": "https://github.com/microsoft/DeepVideoDiscovery",
+        "repository": "https://github.com/microsoft/DeepVideoDiscovery",
+        "parent_file": "index.html",
+        "remix_prompt": "Deep Video Discovery: Agentic Search with Tool Use for Long-form Video Understanding 同样处理这篇论文",
+        "agent_description_file": "/Users/pencil/.codex/skills/paper-deep-dive-style/SKILL.md",
+        "authors": ["Xiaoyi Zhang", "Zhaoyang Jia", "Zongyu Guo", "Jiahao Li", "Bin Li", "Houqiang Li", "Yan Lu"],
+        "date": "2026-09-25",
+        "paper_date": "2025-05-23",
+        "category": "agents-systems",
+        "tags": ["deep-video-discovery", "long-video-understanding", "agentic-search", "tool-use", "multi-granular-retrieval", "global-browse", "clip-search", "frame-inspect", "ReAct", "LVBench", "Video-MME", "LongVideoBench", "EgoSchema"],
+        "systems": ["Deep Video Discovery", "OpenAI o3", "GPT-4.1", "GPT-4.1-mini", "WhisperX", "NanoVectorDB", "Azure OpenAI", "Gradio"],
+        "datasets": ["LVBench", "LongVideoBench", "Video-MME Long", "EgoSchema"],
+        "methods": ["multi-granular video database", "subject registry", "caption embedding retrieval", "ReAct observe-reason-act", "chain-of-query", "temporal grounding", "frame-level VQA", "adaptive tool composition"],
+        "code": "The official MIT-licensed repository releases database construction, embedding retrieval, Frame Inspect, ReAct function calling, benchmark reproduction scripts and pre-built captions. The paper uses 5-second clips and up to 15 reasoning steps; the current general config defaults to 10-second clips and 3 steps, while reproduce/run_benchmark.py sets 15 steps explicitly.",
+        "related_posts": ["posts/interaction-models-thinking-machines.html", "posts/agentopsd-recursive-self-distillation-agentic-rl.html", "posts/rise-of-world-action-models.html", "posts/robottt-context-scaling-fast-weights-robot-policies.html", "posts/wam-data-cleaning-qwen-cosmos-roadmap.html"],
+        "graph_nodes": ["Deep Video Discovery", "long-form video understanding", "multi-granular video database", "subject registry", "Global Browse", "Clip Search", "Frame Inspect", "ReAct", "chain-of-query", "temporal grounding", "NanoVectorDB", "OpenAI o3", "GPT-4.1", "GPT-4.1-mini", "WhisperX", "LVBench", "LongVideoBench", "Video-MME", "EgoSchema", "MR. Video", "FastWAM", "WAM data search"],
+        "graph_edges": [
+          "Deep Video Discovery -> solves -> long-form video understanding",
+          "Deep Video Discovery -> constructs -> multi-granular video database",
+          "multi-granular video database -> stores -> subject registry",
+          "multi-granular video database -> stores -> clip captions",
+          "multi-granular video database -> stores -> frame index",
+          "Global Browse -> retrieves -> global context",
+          "Clip Search -> retrieves -> top-k temporal clips",
+          "Frame Inspect -> grounds -> raw video frames",
+          "Deep Video Discovery -> uses -> ReAct",
+          "Clip Search -> enables -> chain-of-query",
+          "Frame Inspect -> provides -> fine-grained VQA",
+          "Deep Video Discovery -> evaluates_on -> LVBench",
+          "Deep Video Discovery -> evaluates_on -> LongVideoBench",
+          "Deep Video Discovery -> evaluates_on -> Video-MME",
+          "Deep Video Discovery -> evaluates_on -> EgoSchema",
+          "Deep Video Discovery -> orchestrated_by -> OpenAI o3",
+          "Deep Video Discovery -> captions_with -> GPT-4.1",
+          "Deep Video Discovery -> can_support -> WAM data search"
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="网站导航">
+      <a class="brand" href="../index.html">一支铅笔</a>
+      <nav class="nav" aria-label="主要导航">
+        <a href="#core">Insight</a>
+        <a href="#method">Method</a>
+        <a href="#experiments">Experiments</a>
+      </nav>
+    </header>
+
+    <main class="article-shell" id="top">
+      <article>
+        <header class="article-hero">
+          <a class="back-link" href="../index.html">← 返回论文笔记</a>
+          <p class="kicker">Technical Deep Dive · Long Video · Agentic Search</p>
+          <h1>Deep Video Discovery：把长视频理解变成 Agent 的搜索问题</h1>
+          <p class="article-dek">Deep Video Discovery 没有把整段一小时视频硬塞进一个更长的上下文，而是先把视频离线编译成“全局摘要、片段 caption、原始帧”三层数据库，再让推理模型自己决定搜索、回看和确认的顺序。它真正提出的是一个 video search environment：LLM 负责规划，工具负责取证，原始像素只在需要时被唤起。</p>
+          <div class="article-meta">
+            <span>2026.09.25</span>
+            <span>分类：agents-systems</span>
+            <span>NeurIPS 2025 · arXiv 2505.18079</span>
+            <a href="https://arxiv.org/html/2505.18079">Paper</a>
+            <a href="https://github.com/microsoft/DeepVideoDiscovery">Code</a>
+          </div>
+        </header>
+
+        <section class="article-section" id="core">
+          <h2>0. 一句话结论 <a class="heading-anchor" href="#core">#</a></h2>
+          <blockquote>
+            <p>Deep Video Discovery 解决的是超长视频中“相关证据太稀疏、一次性读完整段太贵、固定搜索流程不适配不同问题”的痛点：它把视频预处理成带时间戳的多粒度数据库，用 OpenAI o3 在 Global Browse、Clip Search、Frame Inspect 和 Answer 之间自主循环；LVBench 上从基础 o3 的 57.1% 提升到 74.2%，加入 transcript 后达到 76.0%，代价是离线 caption/embedding 预处理、多个 API/VLM 调用以及较高的错误传播和成本。</p>
+          </blockquote>
+          <p class="insight"><strong>核心 insight：</strong>长视频理解的瓶颈不一定是模型“看不进去”，而是模型不知道<strong>先看哪里、看多粗、什么时候回到像素确认</strong>。DVD 把这三个决策显式化成 action space，让视觉证据从上下文里的被动 token 变成可以被 agent 主动查询的环境。</p>
+          <div class="code-block"><pre><code>raw video V
+  -> 5 s clips, 2 FPS
+  -> clip VLM captions + subject registry
+  -> text embeddings + indexed raw frames
+  -> {Global Browse, Clip Search, Frame Inspect}
+  -> LLM observe / reason / act loop
+  -> answer</code></pre></div>
+          <p>所以它不是一个新的视频 backbone，也不是一个端到端训练出来的 world model。更准确的说法是：<strong>一个由离线视频数据库和推理模型组成的 agentic long-video QA system</strong>。</p>
+        </section>
+
+        <section class="article-section" id="positioning">
+          <h2>1. 论文定位：不是“看更多帧”，而是“搜索长视频” <a class="heading-anchor" href="#positioning">#</a></h2>
+          <p>任务设定是 long-form video question answering，主要在多个选择题 benchmark 上验证。输入是一段从几十秒到一小时的视频和问题 $Q$，输出是答案选项；系统内部可以多次查询视频，最后才提交答案。LVBench 是主要实验：1,549 个问题、103 段小时级视频。LongVideoBench、Video-MME Long 和 EgoSchema 用来检查方法是否只对某一个数据集有效。</p>
+          <table class="data-table">
+            <thead><tr><th>路线</th><th>如何处理长视频</th><th>主要问题</th></tr></thead>
+            <tbody>
+              <tr><td>长上下文 VLM</td><td>采样大量帧或压缩成视觉 token，一次性输入</td><td>上下文成本高，稀疏证据会被平均掉，难以回看</td></tr>
+              <tr><td>固定 workflow agent</td><td>预先规定“先总结、再检索、再反思”的顺序</td><td>不同问题需要不同粒度，固定流程会多做无用步骤</td></tr>
+              <tr><td>单粒度 frame agent</td><td>只允许 agent 逐帧或按固定窗口查看</td><td>缺少全局人物/事件关系，搜索空间太碎</td></tr>
+              <tr><td>Deep Video Discovery</td><td>离线多粒度索引，在线由 LLM 自主组合三种工具</td><td>前处理和 API 成本高，工具错误会被后续推理放大</td></tr>
+            </tbody>
+          </table>
+          <p>论文和 MR. Video、VCA、VideoAgent 等方法的关键差异不只在“用了 agent”。更关键的是，DVD 没有规定一条统一的搜索脚本：LLM 可以先做全局浏览，也可以直接检索事件，或者拿到时间范围后立即查原始帧。它把 workflow policy 交给推理模型，而把可见性和检索能力交给工具。</p>
+        </section>
+
+        <section class="article-section" id="method">
+          <h2>2. 方法总览：先编译数据库，再执行搜索 <a class="heading-anchor" href="#method">#</a></h2>
+          <figure class="note-figure wide-figure">
+            <img src="../assets/deep-video-discovery/overview.png" alt="Deep Video Discovery 官方概览图：LLM 推理通过搜索工具访问视频数据库">
+            <figcaption>官方概览图。左边是 agent 通过 Clip Search、Global Browse 逐步收集证据的过程，右边是 LVBench 各类别表现。原图来自官方代码仓库的 <code>asset/overview.png</code>。</figcaption>
+          </figure>
+          <ol>
+            <li>把原视频 $V$ 均匀切成不重叠片段 $v_i$。论文正文采用 $t=5$ 秒，片段帧以 2 FPS 解码。</li>
+            <li>每个片段送入 VLM，结合 transcript 生成详细 caption，并增量维护 subject registry。</li>
+            <li>对 caption 使用 <code>text-embedding-3-large</code> 得到向量，保存时间范围、caption、embedding 和原始帧路径。</li>
+            <li>Global Browse 处理视频级上下文；Clip Search 在 caption embedding 上做中粒度检索；Frame Inspect 回到指定时间段的像素。</li>
+            <li>LLM 维护交互历史 $H_i$，每轮输出 reasoning、tool action 和 parameters。</li>
+            <li>工具返回 observation，追加到历史后继续决策；LLM 选择 Answer 或到达最大步数时终止。</li>
+          </ol>
+          <div class="code-block"><pre><code>Video V
+  -> temporal clips {v_i}
+  -> frames {f_i} @ 2 FPS
+  -> VLM caption c_i + subject registry S
+  -> embedding e_i = Embed(c_i)
+  -> D = {S, (f_i, c_i, e_i)}
+
+Question Q + history H_i
+  -> reasoning LLM M
+  -> A_i in {GlobalBrowse, ClipSearch, FrameInspect, Answer}
+  -> parameters P_i
+  -> observation O_i
+  -> H_(i+1) = H_i + (A_i, P_i, O_i)</code></pre></div>
+          <table class="data-table">
+            <thead><tr><th>对象</th><th>形状/类型</th><th>在实现中的作用</th></tr></thead>
+            <tbody>
+              <tr><td>$V$</td><td>原始视频</td><td>离线解码和必要时的像素回看来源</td></tr>
+              <tr><td>$v_i$</td><td>约 5 秒 clip；代码默认 10 秒</td><td>caption 的基本单元</td></tr>
+              <tr><td>$f_i$</td><td>帧文件集合，默认 2 FPS</td><td>Frame Inspect 的视觉输入</td></tr>
+              <tr><td>$c_i$</td><td>字符串 caption</td><td>可读检索文本，也是 Global Browse 的输入材料</td></tr>
+              <tr><td>$e_i\in\mathbb R^d$</td><td>caption embedding</td><td>NanoVectorDB 中的向量检索键</td></tr>
+              <tr><td>$S$</td><td>subject registry</td><td>跨片段跟踪人物/物体的身份、外观、动作和时间</td></tr>
+              <tr><td>$H_i$</td><td>文本消息历史</td><td>agent 的短期工作记忆，而不是可训练的隐状态</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="article-section" id="innovations">
+          <h2>3. 关键创新点 <a class="heading-anchor" href="#innovations">#</a></h2>
+
+          <h3>3.1 多粒度数据库：全局、片段、像素各自负责一件事</h3>
+          <p><strong>旧方法为什么不行：</strong>把一小时视频均匀采样成一串帧，既保留不了事件关系，也无法保证问题相关的局部细节进入上下文。反过来只保留摘要，又会丢掉“某个人手里具体拿了什么”“两个物体谁先移动”这类需要像素确认的信息。</p>
+          <p><strong>它怎么改：</strong>DVD 将数据库写成</p>
+          <div class="math-block">$$
+            \mathcal D=\left\{S,\left(f_i,c_i,e_i\right)_{i=1}^{N}\right\},
+            \qquad e_i=\operatorname{Embed}(c_i).
+          $$</div>
+          <p>$S$ 是全局 subject-centric 信息，$c_i$ 是片段级自然语言叙述，$e_i$ 用于快速检索，$f_i$ 仍保留原始帧。三层不是同一信息的重复存储，而是把“理解、定位、确认”分开。</p>
+          <p><strong>为什么有效：</strong>大多数问题先需要粗定位，只有少数问题需要视觉细节。检索过程可以先在廉价文本空间缩小时间范围，最后再调用昂贵的 VLM 处理几十帧。</p>
+          <p><strong>代价/限制：</strong>caption 是有损压缩，subject registry 也可能把不同人物错误合并。caption 生成模型的偏差会变成数据库偏差，后面的 agent 即使推理能力很强，也可能检索不到真实证据。</p>
+          <p><strong>实现细节：</strong><code>frame_caption.py</code> 让每个片段输出 JSON，包括时间、subject_registry 和 clip_description；之后再用一次模型合并各片段的局部 registry。<code>build_database.py</code> 将 caption 批量送进 Azure embedding 服务，向量和时间戳写入 <code>NanoVectorDB</code>。</p>
+
+          <h3>3.2 Subject registry：解决“同一个人跨片段是谁”的全局问题</h3>
+          <p><strong>旧方法为什么不行：</strong>逐片段 caption 往往会把同一个人分别写成“穿蓝衣服的人”“主持人”“左边的人”，后续检索只能命中局部描述，很难做跨时间的身份和事件关联。</p>
+          <p><strong>它怎么改：</strong>caption 模型在处理第 $i$ 个 clip 时接收 $S_{i-1}$，输出当前 caption 和新增/更新的 subject 信息：</p>
+          <div class="math-block">$$
+            (S_i,c_i)=\operatorname{VLM}(f_i,S_{i-1}),
+            \qquad S_0=\varnothing.
+          $$</div>
+          <p>每个 subject 记录 name、appearance、identity、first_seen 等字段，最终通过 merge prompt 得到 $S_N$。</p>
+          <p><strong>论文与代码的差异：</strong>论文正文把它写成逐片段传递 $S_{i-1}$ 的 progressive registry；当前仓库的 <code>frame_caption.py</code> 则让每个 clip 先独立输出局部 registry，再由 <code>merge_subject_registries()</code> 做一次全局合并。也就是说，公开实现并没有完全复现论文公式里的在线 registry 传递，这一处应标记为【不确定】。验证方式是检查 caption prompt 是否包含上一片段 registry；当前版本的 prompt 只有 transcript 和输出 schema。</p>
+          <p><strong>为什么有效：</strong>这是一个非常轻量的跨片段记忆。它不要求每个 frame 做显式 tracking，却为 Global Browse 提供了“谁在视频里出现过、什么时候出现、做了什么”的全局索引。</p>
+          <p><strong>代价/限制：</strong>它是语言层的实体记忆，不是几何跟踪。外观变化、遮挡或多人相似时容易 merge 错。论文没有报告 subject registry 的独立准确率，因此它对最终分数的贡献不能单独量化，标记为【不确定】。验证方式是释放 registry ablation：固定所有 caption 和工具，只移除 $S$，比较实体识别与跨时间问题。</p>
+
+          <h3>3.3 三种工具：让检索粒度成为 action space</h3>
+          <p><strong>旧方法为什么不行：</strong>固定的“先摘要、再检索、再回看”流程会对简单问题过度搜索，也会在需要先理解全局的人物关系时过早进入局部。</p>
+          <p><strong>它怎么改：</strong>动作空间定义为</p>
+          <div class="math-block">$$
+            \mathcal A=\mathcal T\cup\{\textsc{Answer}\},
+            \qquad
+            \mathcal T=\{\textsc{GlobalBrowse},\textsc{ClipSearch},\textsc{FrameInspect}\}.
+          $$</div>
+          <ul>
+            <li><strong>Global Browse：</strong>输入原始问题，先从 caption 中找相关片段，再由 VLM 根据这些片段生成带 subject registry 的全局回答。它更像“地图”。</li>
+            <li><strong>Clip Search：</strong>输入 agent 合成的 event description，计算 query embedding 与所有 $e_i$ 的 cosine similarity，返回 top-$k$ 片段和时间戳。默认 $k=16$。</li>
+            <li><strong>Frame Inspect：</strong>输入时间范围和自由问题，从范围内加载原始帧；超过 50 秒时最多均匀采样 50 帧，再由 VLM 做开放式 VQA。它更像“证据确认”。</li>
+          </ul>
+          <p><strong>代码现实：</strong>论文文字还描述了 event-centric global summary 可以从全视频均匀采样帧生成；当前仓库的 <code>global_browse_tool()</code> 实际通过 embedding 检索最多 <code>GLOBAL_BROWSE_TOPK=300</code> 条 caption，再把按时间排序的文本交给 VLM。它因此是“caption-based global browse”，不是每次调用都重新扫完整原始视频。</p>
+          <p><strong>为什么有效：</strong>全局浏览提供语义先验，片段搜索提供高召回的时间定位，帧检查负责把 caption 里的猜测落到像素。工具之间形成的是互补，而不是简单叠加。</p>
+          <p><strong>代价/限制：</strong>每个工具都有自己的误差：Global Browse 可能只看到检索到的片段，Clip Search 受 caption 词汇覆盖限制，Frame Inspect 可能在采样帧中漏掉短动作。更重要的是，agent 会把工具输出当作 observation；一旦某个 observation 错了，后续 reasoning 可能沿错误方向继续。</p>
+
+          <h3>3.4 Chain-of-query：检索不是一次 top-k，而是逐步改写查询</h3>
+          <p><strong>旧方法为什么不行：</strong>用户问题通常不是一个可直接向量检索的事件描述。例如“最后谁把糖果给了谁”需要先知道人物、物体和时间顺序，原问题直接 embedding 很可能召回很多表面相似的片段。</p>
+          <p><strong>它怎么改：</strong>agent 根据当前历史合成 $\hat Q_i$，反复调用 Clip Search：</p>
+          <div class="math-block">$$
+            R_i=\operatorname{ClipSearch}(\hat Q_i,\mathcal D,k),
+            \qquad
+            \hat Q_{i+1}=g_M(Q,H_i,R_i).
+          $$</div>
+          <p>这里 $g_M$ 不是额外训练的 query encoder，而是推理 LLM 的查询改写能力：上一轮结果暴露了新的人名、物体、地点或时间约束，下一轮搜索再把这些词带回数据库。</p>
+          <p><strong>为什么有效：</strong>它把一次困难的检索拆成了“提出假设、观察结果、收紧约束”的过程，和 deep research 中的多轮搜索相似。</p>
+          <p><strong>代价/限制：</strong>如果数据库根本没有正确 caption，反复改写只会在错误邻域里搜索。论文把连续三次 Clip Search 归为 Clip Search Trap，这是一个明确的失败模式。</p>
+
+          <h3>3.5 自适应 ReAct 循环：推理模型本身就是 workflow policy</h3>
+          <p><strong>旧方法为什么不行：</strong>固定程序能保证流程完整，但不能根据问题难度分配计算。论文比较发现，VideoAgent 风格的手工 workflow 即使平均执行 11.1 步，LVBench 也只有 70.2%，而 DVD 平均 7.3 步达到 74.2%。</p>
+          <p><strong>它怎么改：</strong>每轮让 LLM 对历史做 reason，再选择 action 与参数，工具返回 observation 后把完整交互追加回历史。论文故意不规定 Global Browse、Clip Search 和 Frame Inspect 的固定顺序。</p>
+          <p><strong>为什么有效：</strong>模型可以对简单问题“一次全局查询后回答”，对复杂问题走“检索 → 局部回看 → 再检索 → 确认”的路径。消融也显示 Clip Search 是最关键工具：移除它，准确率下降 12.3 个百分点；移除 Frame Inspect 下降 8.4 个百分点；移除 Global Browse 下降 2.9 个百分点。</p>
+          <p><strong>代价/限制：</strong>adaptive 不等于稳定。论文观察到 GPT-4o 在 91.4% 的问题上过早走 Simple Action，平均只有 4.6 步，说明 workflow policy 强烈依赖 reasoning model 的探索性。模型越强，工具调用越合理；但每次调用又增加成本和延迟。</p>
+        </section>
+
+        <section class="article-section" id="train-infer">
+          <h2>4. 训练和推理流程：它主要训练数据库，不训练 agent policy <a class="heading-anchor" href="#train-infer">#</a></h2>
+          <h3>4.1 数据库构建输入与输出</h3>
+          <ol>
+            <li>输入视频 $V$，可选输入 WhisperX 或已有的 SRT transcript。</li>
+            <li>按时间切 clip 并以 2 FPS 解码帧。论文描述的片段长度是 5 秒；当前仓库 <code>config.py</code> 默认 <code>CLIP_SECS=10</code>，benchmark 复现使用已经上传好的 caption 数据。</li>
+            <li>对每个 clip 调用 caption VLM，输出结构化 JSON；如果有 transcript，则拼接进 clip description。</li>
+            <li>对所有 caption 调用 text embedding 服务，生成 $e_i$ 并写入向量数据库。</li>
+            <li>保存 <code>subject_registry</code>、时间范围、fps、视频根目录和帧路径。</li>
+          </ol>
+          <p>这部分没有传统意义上的 end-to-end loss。captioning、subject merge 和 embedding 是离线 API/模型调用，结果被缓存为 JSON 和向量库。</p>
+
+          <h3>4.2 在线推理输入与输出</h3>
+          <div class="code-block"><pre><code>input: video database D, question Q
+state: H_0 = {Q, available actions}
+for i = 1 ... N:
+  reasoning = M.reason(H_(i-1))
+  action, params = M.call(reasoning, H_(i-1))
+  if action == Answer: stop
+  observation = tool(action, params, D)
+  H_i = H_(i-1) + (reasoning, action, params, observation)
+fallback: if N reached, ask M to answer from H_N
+output: final answer or multiple-choice option</code></pre></div>
+          <p>官方 benchmark 脚本将最大步数设为 $N=15$，默认 Clip Search 的 $k=16$，所有帧 resize 到 720p。Frame Inspect 使用最多 50 个均匀采样帧；它不是连续视频模型，而是把若干静态帧和问题发给工具 VLM。</p>
+
+          <h3>4.3 训练、推理和缓存的真实关系</h3>
+          <p>DVD 的“学习”主要发生在数据库构建阶段，在线阶段是 prompt + function calling。推理模型并没有从 LVBench 的工具轨迹上做 RL 或 SFT；仓库 README 仍把“release evaluation trajectories”列在 TODO 中。因此，系统的搜索策略来自通用 reasoning model 的能力，而不是 DVD 自己学出来的 policy。</p>
+          <p>代码中的 <code>DVDCoreAgent</code> 会把数据库对象注入工具参数，调用 <code>global_browse_tool</code>、<code>clip_search_tool</code>、<code>frame_inspect_tool</code>，最后通过 <code>finish</code> 抛出停止信号。<code>reproduce/run_benchmark.py</code> 为每个视频初始化一次 agent，再并行处理多个问题。</p>
+        </section>
+
+        <section class="article-section" id="formulas">
+          <h2>5. 公式与算法逐行讲解 <a class="heading-anchor" href="#formulas">#</a></h2>
+          <h3>5.1 时间切片：先把连续视频离散成可索引对象</h3>
+          <div class="math-block">$$
+            V\longrightarrow\{v_i\}_{i=1}^{N},
+            \qquad N=\left\lceil\frac{\operatorname{len}(V)}{t}\right\rceil,
+            \qquad t=5\text{ s},
+            \qquad f_i=\operatorname{Decode}(v_i,2\text{ FPS}).
+          $$</div>
+          <p>$V$ 是原视频，$t$ 是片段长度，$v_i$ 是第 $i$ 个不重叠窗口，$f_i$ 是该窗口内的帧集合。实现上它们不是 Transformer 内部的 token，而是磁盘上的 JPEG 文件和 JSON 里的时间戳。论文的 $t=5$ 秒与通用仓库默认 <code>CLIP_SECS=10</code> 不同，复现时必须确认使用的是哪一套 caption。</p>
+
+          <h3>5.2 数据库表示：文本负责搜索，像素负责核验</h3>
+          <div class="math-block">$$
+            \mathcal D=\left\{S,\big(f_i,c_i,e_i\big)_{i=1}^{N}\right\},
+            \qquad e_i=\phi(c_i)\in\mathbb R^d.
+          $$</div>
+          <p>$S$ 是最终 subject registry；$c_i$ 是片段 caption；$\phi$ 是语言 embedding 模型；$e_i$ 是向量库里的检索键；$f_i$ 保留原始视觉证据。在代码里，<code>preprocess_captions()</code> 按 128 条 caption 一批请求 embedding，<code>init_single_video_db()</code> 把时间起止点、caption 和向量 upsert 到 <code>NanoVectorDB</code>。</p>
+
+          <h3>5.3 Clip Search：余弦相似度定位时间</h3>
+          <div class="math-block">$$
+            \operatorname{ClipSearch}(\hat Q,k)
+            =\operatorname{TopK}_{i}\left(
+            \frac{\phi(\hat Q)^{\top}e_i}{\|\phi(\hat Q)\|\,\|e_i\|}
+            \right).
+          $$</div>
+          <p>$\hat Q$ 是 agent 根据问题和历史合成的事件描述，$k$ 默认是 16。输出不是像素，而是按相关性排序的 caption 与时间区间。代码中检索后再按 <code>time_start_secs</code> 排序，便于 LLM 阅读事件先后。</p>
+
+          <h3>5.4 Frame Inspect：从多个时间范围采样最多 50 帧</h3>
+          <div class="math-block">$$
+            \mathcal F(\mathcal R)=
+            \operatorname{UniformSample}_{\le 50}
+            \left(\bigcup_{(t_s,t_e)\in\mathcal R}F[t_s,t_e]\right),
+            \qquad
+            o=\operatorname{VLM}(\mathcal F(\mathcal R),q_{\text{sub}}).
+          $$</div>
+          <p>$\mathcal R$ 是 agent 给出的时间范围列表，$F[t_s,t_e]$ 是对应帧集合，$q_{\text{sub}}$ 是局部问题，$o$ 是开放式 VQA 文本。代码会把多个范围展平到一个时间轴上均匀采样，再映射回帧 index；这意味着“最多 50 帧”是所有范围合计，不是每个范围 50 帧。</p>
+
+          <h3>5.5 Algorithm 1：ReAct 状态转移</h3>
+          <div class="math-block">$$
+            R_i=M_{\mathrm{reason}}(H_{i-1}),\qquad
+            (A_i,P_i)=M_{\mathrm{call}}(R_i,H_{i-1}),
+          $$
+          $$
+            O_i=A_i(P_i;\mathcal D),\qquad
+            H_i=H_{i-1}\cup\{(R_i,A_i,P_i,O_i)\}.
+          $$</div>
+          <p>$H_i$ 不是一个固定大小的向量，而是不断增长的消息列表。$R_i$ 是 reasoning，$A_i$ 是工具名或 Answer，$P_i$ 是工具参数，$O_i$ 是工具返回的 observation。与视频模型的 latent rollout 不同，这里每一步的“状态”是语言历史；数据库是外部环境，工具调用是 action。</p>
+        </section>
+
+        <section class="article-section" id="alignment">
+          <h2>6. 训练与推理细节对齐：真正容易复现错的地方 <a class="heading-anchor" href="#alignment">#</a></h2>
+          <table class="data-table">
+            <thead><tr><th>项目</th><th>论文/实验设置</th><th>代码现实与风险</th></tr></thead>
+            <tbody>
+              <tr><td>片段长度</td><td>正文写 $t=5$ 秒</td><td><code>dvd/config.py</code> 默认 <code>CLIP_SECS=10</code>；benchmark 依赖已上传数据库。不要拿 demo 默认值解释论文结果。</td></tr>
+              <tr><td>帧采样</td><td>2 FPS，输入 resize 到 720p</td><td>代码用 <code>VIDEO_FPS=2</code>；Frame Inspect 在长范围内最多 50 帧，短范围使用范围内帧。</td></tr>
+              <tr><td>数据库 VLM</td><td>LVBench 用 GPT-4.1，其他 benchmark 用 GPT-4.1-mini</td><td>通用配置默认 <code>gpt-4.1-mini</code>，需要手动切换并重新生成 caption 才能复现实验。</td></tr>
+              <tr><td>推理 LLM</td><td>OpenAI o3；另测 o4-mini、GPT-4o、DeepSeek-R1、Qwen3-32B</td><td>reasoning model 是最敏感组件；API 版本、prompt 和 function-call 行为都会影响轨迹。</td></tr>
+              <tr><td>tool VLM</td><td>Frame Inspect 也使用 o3</td><td>表 4 显示换成 GPT-4.1-mini 会下降 3.7 个百分点；不能只替换 orchestrator 而不记录 tool model。</td></tr>
+              <tr><td>transcript</td><td>WhisperX transcript 用于分割引导和 caption 丰富</td><td>不带 transcript 的 DVD 已达到 74.2%；带 transcript 的 76.0% 不是纯模型改进，而是额外音频信息。</td></tr>
+              <tr><td>最大步数</td><td>$N=15$，平均实际约 7.3 步</td><td><code>config.MAX_ITERATIONS=3</code> 是 demo 默认；<code>run_benchmark.py</code> 显式传 15。直接运行 <code>local_run.py</code> 会得到不同轨迹。</td></tr>
+              <tr><td>训练/推理</td><td>无 agent policy 的 end-to-end 训练</td><td>离线 caption、embedding 是缓存；在线 function calling 没有公开 evaluation trajectories，无法复现每条搜索路径。</td></tr>
+              <tr><td>安全过滤</td><td>Azure OpenAI content filter 会误拦一小部分 benchmark</td><td>论文明确说 o3 baseline 和 DVD 都受影响；需要记录被拦样本、重试策略和分母，否则 accuracy 不可直接比较。</td></tr>
+            </tbody>
+          </table>
+          <p><strong>训练-推理不一致的核心：</strong>这篇没有通常意义的 teacher forcing 或 diffusion sampler mismatch，但存在“离线文本摘要 vs 在线像素确认”的分工不一致。captioning 先把视频压成语言；Frame Inspect 又在需要时重新读取像素。系统性能因此取决于两个模型之间的接口：caption 是否包含可检索词，时间戳是否足够准确，tool VLM 是否能纠正 caption。</p>
+          <p>还有一个工程陷阱：README 目前列着“Implement MCP server”，但仓库已经有 <code>mcp_server.py</code>。更准确的表述是，文件已经提供了一个粗粒度的 <code>query_video(video_url, question)</code> MCP 包装器，但 README 的 TODO 说明它不应被当成论文级工具轨迹发布或完整 MCP 产品。这里属于代码与文档不同步，复现时应以实际文件为准。</p>
+        </section>
+
+        <section class="article-section" id="experiments">
+          <h2>7. 实验复盘：数字很强，但要看清它买了什么 <a class="heading-anchor" href="#experiments">#</a></h2>
+          <h3>7.1 主结果</h3>
+          <table class="data-table">
+            <thead><tr><th>方法</th><th>LVBench</th><th>LongVideoBench Long</th><th>Video-MME Long 无字幕</th><th>EgoSchema Val</th></tr></thead>
+            <tbody>
+              <tr><td>OpenAI o3</td><td>57.1</td><td>60.6</td><td>64.7</td><td>63.2</td></tr>
+              <tr><td>MR. Video</td><td>60.8</td><td>61.6</td><td>61.8</td><td>73.0</td></tr>
+              <tr><td>Deep Video Discovery</td><td><strong>74.2</strong></td><td><strong>68.6</strong></td><td><strong>67.3</strong></td><td><strong>76.6</strong></td></tr>
+              <tr><td>DVD + auxiliary transcripts</td><td><strong>76.0</strong></td><td>未报告</td><td>未报告</td><td>未报告</td></tr>
+            </tbody>
+          </table>
+          <p>LVBench 上相对 MR. Video 提升 13.4 个百分点，相对裸 o3 提升 17.1 个百分点。LongVideoBench 的 Long 子集提升 7.0 个百分点，Video-MME Long 上超过 MR. Video 5.5 个百分点，EgoSchema 超过论文引用的约 76% human-level accuracy 1 个百分点。这里的正确解读是：<strong>同一个 reasoning LLM 加上可检索视频环境后，能显著超过它直接看视频的模式</strong>。</p>
+
+          <h3>7.2 消融是否证明了结论</h3>
+          <table class="data-table">
+            <thead><tr><th>消融</th><th>LVBench（带 transcript）</th><th>读法</th></tr></thead>
+            <tbody>
+              <tr><td>完整 DVD</td><td>76.0</td><td>caption VLM 4.1、reasoning o3、tool o3</td></tr>
+              <tr><td>reasoning o4-mini</td><td>70.2</td><td>推理能力和探索行为很关键</td></tr>
+              <tr><td>reasoning GPT-4o</td><td>62.3</td><td>更容易过早结束，不能只看通用 VLM 名气</td></tr>
+              <tr><td>database 4.1-mini</td><td>71.9</td><td>caption 质量有影响，但不是最大瓶颈</td></tr>
+              <tr><td>tool 4.1-mini</td><td>72.3</td><td>局部 VQA 质量也会影响最终答案</td></tr>
+              <tr><td>无 Global Browse</td><td>69.0</td><td>下降 2.9</td></tr>
+              <tr><td>无 Clip Search</td><td>59.6</td><td>下降 12.3，是最大单项损失</td></tr>
+              <tr><td>无 Frame Inspect</td><td>63.5</td><td>下降 8.4，说明像素确认不是装饰</td></tr>
+            </tbody>
+          </table>
+          <p>消融总体支持作者的结构性结论：三种粒度缺一不可，Clip Search 是召回的骨架，Frame Inspect 是精确性的来源，Global Browse 负责建立全局地图。不过，表格没有把每个工具的调用成本、平均 token、VLM frame 数、端到端 latency 一并报告，因此“更高准确率”与“更高资源预算”没有被完全拆开。</p>
+
+          <h3>7.3 需要警惕的 confound</h3>
+          <ul>
+            <li><strong>算力和 API 预算不完全公平：</strong>DVD 同时使用 caption model、embedding model、reasoning model 和 Frame Inspect VLM；对比的裸 VLM 通常只做一次推理。作者证明了 agent 机制有效，但没有把每题总 API 成本标准化。</li>
+            <li><strong>数据库 caption 是额外的视觉模型先验：</strong>caption 可能已经把答案相关内容写进了文本。DVD 的提升同时来自检索策略和离线 VLM 摘要质量，二者的独立贡献仍有耦合。</li>
+            <li><strong>benchmark 是选择题：</strong>agent 最后只需输出 option letter，检索到的信息不需要生成可验证的自然语言答案。开放式回答、时间戳证据和幻觉率还需要单独评估。</li>
+            <li><strong>工具失败会被隐藏：</strong>论文分析了 Frame Inspect Trap 和 Clip Search Trap，但没有公开完整轨迹数据；我们无法统计“检索不到”和“检索到了但推理错误”的比例。</li>
+            <li><strong>Azure content filter：</strong>部分样本被服务拦截，论文说明影响了 DVD 和 o3 baseline。这个因素会改变有效评测分母，必须在复现报告中单独记录。</li>
+          </ul>
+        </section>
+
+        <section class="article-section" id="reproduce">
+          <h2>8. 可复现清单：先复现数据库，再复现 agent <a class="heading-anchor" href="#reproduce">#</a></h2>
+          <ol>
+            <li><strong>环境：</strong>安装仓库 <code>requirements.txt</code>，准备 OpenAI/Azure OpenAI 的 caption、embedding、orchestrator 和 tool endpoints；视频下载依赖 <code>yt-dlp</code>，帧解码依赖 OpenCV。</li>
+            <li><strong>数据：</strong>优先使用官方提供的 Hugging Face pre-built captions；从零生成 caption 会重新消耗大量 VLM API 预算。</li>
+            <li><strong>帧设置：</strong>论文为 2 FPS，所有输入 resize 到 720p；Frame Inspect 上限 50 帧，时间范围长于 50 秒时均匀采样。</li>
+            <li><strong>分段设置：</strong>论文 5 秒；当前通用配置 10 秒。复现论文数字应使用与官方 captions 相匹配的分段，不要只改配置然后复用旧数据库。</li>
+            <li><strong>caption schema：</strong>每段至少要有 <code>clip_start_time</code>、<code>clip_end_time</code>、<code>subject_registry</code>、<code>clip_description</code>；空 caption 会在 embedding 前跳过。</li>
+            <li><strong>向量库：</strong>默认 <code>text-embedding-3-large</code>，维度配置为 3072；caption 以 128 条一批进行 embedding。</li>
+            <li><strong>模型分工：</strong>论文主结果是 LVBench caption 用 GPT-4.1，其他 benchmark 用 GPT-4.1-mini，reasoning 和 Frame Inspect 使用 o3；替换任一模型都应重新记录。</li>
+            <li><strong>agent budget：</strong>benchmark 脚本传 <code>max_iterations=15</code>，Clip Search 默认 <code>top_k=16</code>；demo 默认 <code>MAX_ITERATIONS=3</code>，并且 <code>LITE_MODE=True</code> 时只用字幕、移除 Frame Inspect。</li>
+            <li><strong>transcript：</strong>需要复现 76.0% 时，使用 WhisperX 或官方带 transcript caption；无字幕 74.2% 和带字幕 76.0% 不能混报。</li>
+            <li><strong>停止与解析：</strong>选择题评测通过 <code>extract_answer()</code> 解析最终 message；最后一轮会强制追加 finish 指令，避免 agent 无限调用工具。</li>
+          </ol>
+          <p><strong>论文没写清楚但通常必须补齐的细节：</strong>embedding API 的具体版本和归一化方式、caption VLM 对失败 JSON 的重试与温度、不同工具的每题调用上限、被安全过滤样本的处理、视频下载失败的缓存策略，以及 caption/embedding 是否在所有 benchmark 使用相同 prompt。官方代码能补一部分，但 evaluation trajectories、完整成本和端到端 latency 仍未发布。</p>
+          <p class="insight"><strong>最小复现路径：</strong>下载官方 LVBench captions → 用 <code>reproduce.prepare_database</code> 改写视频根目录 → 以 2 FPS 准备帧 → 运行 <code>reproduce.run_benchmark.py</code>。不要从 YouTube demo 直接推断 benchmark 结果，因为 demo 的 <code>lite_mode</code> 默认只走 SRT transcript。</p>
+        </section>
+
+        <section class="article-section" id="improvements">
+          <h2>9. 可能的改进方向 <a class="heading-anchor" href="#improvements">#</a></h2>
+          <h3>9.1 学习一个视频专用检索器</h3>
+          <p><strong>改动点：</strong>用对比学习把问题、caption、帧片段和答案证据对齐，替换通用 text embedding。</p>
+          <p><strong>预期收益：</strong>减少 caption 词汇偏差，改善 Clip Search 的召回，尤其是同义动作、隐含事件和视觉属性。</p>
+          <p><strong>风险：</strong>训练数据可能把 benchmark wording 记住，且检索器变差时 agent 会被错误候选限制。</p>
+          <p><strong>验证实验：</strong>固定 caption 和 o3，只替换 embedding；报告 recall@k、时间 IoU、最终 accuracy、每题调用次数。</p>
+
+          <h3>9.2 引入 budget-aware tool policy</h3>
+          <p><strong>改动点：</strong>为每次工具调用增加预计成本、延迟和信息增益，让 agent 在“继续搜索还是回答”之间做显式决策。</p>
+          <p><strong>预期收益：</strong>保留 DVD 的准确率，同时压低平均步数和 VLM frame 数，减少 Clip Search Trap。</p>
+          <p><strong>风险：</strong>过早停止会重新引入 GPT-4o 的 Simple Action 问题。</p>
+          <p><strong>验证实验：</strong>画 accuracy-cost frontier，比较不同预算下的工具组合和错误类型。</p>
+
+          <h3>9.3 让每个答案都带可验证证据</h3>
+          <p><strong>改动点：</strong>Answer 不只返回选项，还必须返回支持该选项的时间区间和 Frame Inspect 摘要，并增加独立 verifier。</p>
+          <p><strong>预期收益：</strong>区分“检索正确但推理错”和“根本没找到证据”，提升开放式 QA 和人工审计能力。</p>
+          <p><strong>风险：</strong>verifier 可能重复调用 VLM，且时间区间本身不一定涵盖完整因果链。</p>
+          <p><strong>验证实验：</strong>测 temporal IoU、evidence sufficiency、answer faithfulness 与 accuracy，而不只测 option accuracy。</p>
+
+          <h3>9.4 把 subject registry 升级为时空实体图</h3>
+          <p><strong>改动点：</strong>将语言 registry 扩展为带时间、空间关系和动作边的图，例如“人物 A 在 $t_1$ 拿起物体 B，在 $t_2$ 交给 C”。</p>
+          <p><strong>预期收益：</strong>更适合人物关系、事件因果和长时间跨度问题，减少多轮 Clip Search。</p>
+          <p><strong>风险：</strong>图构建错误会产生比文本 caption 更强的错误先验；存储和更新更复杂。</p>
+          <p><strong>验证实验：</strong>在 Entity Recognition、Event Understanding、Reasoning 三类问题上做 registry-only、caption-only、graph+pixel 对比。</p>
+
+          <h3>9.5 从“视频问答”迁移到 WAM 数据搜索</h3>
+          <p><strong>改动点：</strong>把 $c_i$ 从自然语言视频叙述换成 episode/state-action caption：对象、接触、末端位姿、动作阶段、失败原因和时间区间；把 Frame Inspect 换成轨迹窗口检查器。</p>
+          <p><strong>预期收益：</strong>可以用自然语言查询“哪些 episode 在抓取后发生滑落”“哪些片段存在 action/state 不一致”，直接服务数据清洗和 hard-negative mining。</p>
+          <p><strong>风险：</strong>文本 caption 不足以表达精确几何和接触动力学，必须保留原始 RGB、深度、proprioception 和 action chunk。</p>
+          <p><strong>验证实验：</strong>对同一批真机轨迹比较纯向量检索、caption 检索、caption+状态字段检索，在事件召回、时间定位、人工清洗效率和下游 WAM success 上评估。</p>
+        </section>
+
+        <section class="article-section" id="fastwam">
+          <h2>对 FastWAM / 具身数据系统的启发 <a class="heading-anchor" href="#fastwam">#</a></h2>
+          <p>DVD 和 FastWAM 的核心对象不同：DVD 的 action 是“查询数据库”，FastWAM 的 action 是机器人控制或 world-model rollout。但它们共享一个很值得复用的设计：<strong>不要让主模型每次都处理完整历史，而是让一个可查询的外部记忆决定下一次读取什么证据</strong>。</p>
+          <div class="code-block"><pre><code>robot episode database
+  -> 低频 episode summary: task / objects / outcome / progress
+  -> chunk caption: contact / pose / action / failure
+  -> raw sensor index: RGB / depth / proprioception / action
+
+query: "找出放置时末端先抬高再碰撞的片段"
+  -> EpisodeBrowse: 找相关任务和失败类型
+  -> ChunkSearch: 找动作阶段和时间窗口
+  -> WindowInspect: 回看原始多模态窗口
+  -> accept / reject / relabel / hard-negative</code></pre></div>
+          <p>这里的关键不是把 DVD 原样搬进机器人，而是借用它的<strong>多粒度证据接口</strong>：粗粒度负责召回，中粒度负责定位，细粒度负责核验。对于数据清洗，最终输出不应该只有一个自然语言答案，还应包含时间区间、证据来源、过滤原因和置信度，才能形成可审计的 manifest。</p>
+          <p>它也提醒我们：agentic search 不能替代好的数据字段。如果 action、state、task progress 没有在 episode 中显式记录，caption agent 只能从画面猜测，后续的 WAM 训练数据会把猜测当标签。</p>
+        </section>
+
+        <section class="article-section" id="memo">
+          <h2>10. 速读备忘卡 <a class="heading-anchor" href="#memo">#</a></h2>
+          <ul>
+            <li>DVD 是长视频 QA agent，不是新的视频生成模型或 world model。</li>
+            <li>它先离线构建视频数据库，再在线搜索和回答。</li>
+            <li>数据库包含 subject registry、clip caption、caption embedding 和原始帧。</li>
+            <li>论文的分段设置是 5 秒、2 FPS；代码通用默认是 10 秒，必须区分。</li>
+            <li>Global Browse 给全局地图，Clip Search 给时间定位，Frame Inspect 给像素证据。</li>
+            <li>LLM 通过 ReAct 循环自主选择工具，不使用手写固定 workflow。</li>
+            <li>Clip Search 支持 chain-of-query，查询会根据 observation 逐步改写。</li>
+            <li>Frame Inspect 最多均匀采样 50 帧，长范围不等于把所有帧送进 VLM。</li>
+            <li>LVBench 74.2%，加 transcript 76.0%；裸 o3 是 57.1%。</li>
+            <li>移除 Clip Search 下降 12.3，移除 Frame Inspect 下降 8.4，说明检索和核验都重要。</li>
+            <li>reasoning model 比 caption model 更敏感；GPT-4o 容易过早结束，形成 Simple Action。</li>
+            <li>系统的主要代价是离线 caption、在线多次 API/VLM 调用、错误传播和评测不完全可审计。</li>
+            <li>代码公开了数据库构建和 benchmark 脚本，但没有完整 evaluation trajectories。</li>
+            <li>对 WAM 最可迁移的不是“让机器人调用视频工具”，而是 episode 的多粒度可查询证据层。</li>
+          </ul>
+          <p class="source-note">主要来源：<a href="https://arxiv.org/html/2505.18079">论文 HTML / camera-ready 版本</a>、<a href="https://github.com/microsoft/DeepVideoDiscovery">官方代码仓库</a>、仓库中的 <code>dvd/build_database.py</code>、<code>dvd/frame_caption.py</code>、<code>dvd/dvd_core.py</code> 与 <code>reproduce/run_benchmark.py</code>。</p>
+        </section>
+      </article>
+    </main>
+  </body>
+</html>
